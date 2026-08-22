@@ -6,7 +6,8 @@ import {
   readCursorSessionTokens,
 } from "./cursor-tokens.js";
 
-const NEW_SESSION_SCANS_PER_TICK = 2;
+const NEW_SESSION_SCANS_PER_TICK = 8;
+const tokensByGoalSession = new Map<string, Map<string, number>>();
 
 function numberFrom(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
@@ -127,31 +128,30 @@ export async function accountGoalProgress(
 
   const running = options?.busy === true ? true : await threadIsRunning(bb, threadId);
   const extras = [...new Set((options?.extraThreadIds ?? []).filter((id) => id && id !== threadId))];
-  let currentTokens = 0;
-  let sawTokens = false;
+  const ids = [threadId, ...extras];
+  const bucket = tokensByGoalSession.get(threadId) ?? new Map<string, number>();
   let scansLeft = options?.scan === true ? NEW_SESSION_SCANS_PER_TICK : 0;
-  const ids = [threadId, ...(options?.scan === true ? extras : [])];
   for (const id of ids) {
     const sessionId = await sessionIdForThread(bb, id);
-    const cached = sessionId ? peekCursorSessionTokens(sessionId) : null;
-    if (cached != null) {
-      currentTokens += cached;
-      sawTokens = true;
-      continue;
-    }
-    const allowScan = options?.scan === true && (id === threadId || scansLeft > 0);
-    if (!allowScan) continue;
-    if (id !== threadId) scansLeft -= 1;
+    if (!sessionId) continue;
+    const known = bucket.has(sessionId);
+    const allowRead = id === threadId || known || (options?.scan === true && scansLeft > 0);
+    if (!allowRead) continue;
+    if (options?.scan === true && !known && id !== threadId) scansLeft -= 1;
     const tokens = await readThreadTokens(bb, id, { allowScan: true });
     if (tokens == null) continue;
-    currentTokens += tokens;
-    sawTokens = true;
+    bucket.set(sessionId, tokens);
   }
+  tokensByGoalSession.set(threadId, bucket);
+
+  let currentTokens = 0;
+  for (const value of bucket.values()) currentTokens += value;
+  const sawTokens = bucket.size > 0;
 
   let tokensUsed = existing.tokensUsed;
   let lastSeenTokens = existing.lastSeenTokens;
   if (sawTokens) {
-    tokensUsed = Math.max(existing.tokensUsed, currentTokens);
+    tokensUsed = currentTokens;
     lastSeenTokens = currentTokens;
   }
 

@@ -222,8 +222,9 @@ function readAcpStoreTokens(sessionId: string): number | null {
           break;
         }
       }
+      const wal = existsSync(`${file}-wal`);
       const cached = sessionCache.get(sessionId);
-      if (cached && cached.stamp === stamp) return cached.tokens;
+      if (!wal && cached && cached.stamp === stamp) return cached.tokens;
 
       const rows = db.all<{ data: unknown }>("SELECT data FROM blobs WHERE substr(data, 1, 1) = x'7b'");
       let requests = 0;
@@ -260,7 +261,7 @@ export function peekCursorSessionTokens(sessionId: string): number | null {
 export function readCursorSessionTokens(sessionId: string): number | null {
   const id = sessionId.trim();
   if (!id) return null;
-  return peekCursorSessionTokens(id) ?? readComposerTokens(id) ?? readAcpStoreTokens(id);
+  return readAcpStoreTokens(id) ?? readComposerTokens(id) ?? peekCursorSessionTokens(id);
 }
 
 export async function providerSessionId(

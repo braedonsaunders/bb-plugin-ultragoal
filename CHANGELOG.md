@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+- Now is one live subagent per row. Finished workers and duplicate Cursor Task events no longer pile up.
+- Token totals follow the current Cursor session sum instead of freezing on an old maximum.
+
 ## 0.2.3
 
 - Now lists every live Cursor Task / subagent on the root thread, not just one in-progress plan item.

@@ -196,7 +196,7 @@ export default function plugin(bb: BbPluginApi) {
   ) {
     return accountGoalProgress(bb, store, threadId, {
       ...options,
-      extraThreadIds: options?.scan ? collab.threadIdsForRoot(threadId) : [],
+      extraThreadIds: collab.threadIdsForRoot(threadId),
     });
   }
 
@@ -295,10 +295,13 @@ export default function plugin(bb: BbPluginApi) {
       claimed.add(match.id);
       if (match.status === "pending") items.setStatus(threadId, match.id, "in_progress");
     }
-    return oneWorkerPerItem(next);
+    return oneWorkerPerItem(threadId, next);
   }
 
-  function oneWorkerPerItem(agents: GoalAgent[]): GoalAgent[] {
+  function oneWorkerPerItem(threadId: string, agents: GoalAgent[]): GoalAgent[] {
+    const open = new Set(
+      items.list(threadId).filter((item) => item.status !== "completed").map((item) => item.id),
+    );
     const rank = (agent: GoalAgent) => {
       if (agent.status === "running") return 0;
       if (agent.status === "starting") return 1;
@@ -318,17 +321,12 @@ export default function plugin(bb: BbPluginApi) {
         live.push(agent);
         continue;
       }
-      if (!agent.itemId) {
-        if (agent.status !== "stopped" && agent.status !== "completed" && agent.status !== "error") {
-          extra.push(agent);
-        }
-        continue;
-      }
+      if (!agent.itemId || !open.has(agent.itemId)) continue;
       const current = picked.get(agent.itemId);
       if (!current || rank(agent) < rank(current)) picked.set(agent.itemId, agent);
     }
-    const liveItemIds = new Set(live.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)));
-    const rest = [...picked.values()].filter((agent) => !agent.itemId || !liveItemIds.has(agent.itemId));
+    const liveKeys = new Set(live.map((agent) => agent.taskName));
+    const rest = [...picked.values()].filter((agent) => !liveKeys.has(agent.taskName));
     return [...live, ...rest, ...extra];
   }
 

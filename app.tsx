@@ -1155,46 +1155,32 @@ function isLiveAgent(agent: GoalAgent): boolean {
   return agent.status === "running" || agent.status === "starting";
 }
 
-function isActiveWorker(agent: GoalAgent): boolean {
-  return (
-    agent.role !== "verifier" &&
-    agent.status !== "stopped" &&
-    agent.status !== "error" &&
-    agent.status !== "completed"
-  );
+function isNowWorker(agent: GoalAgent, openItemIds: Set<string>): boolean {
+  if (agent.role === "verifier") return agent.status === "running" || agent.status === "starting";
+  if (agent.status === "running" || agent.status === "starting") return true;
+  if (agent.status === "stopped" || agent.status === "error" || agent.status === "completed") return false;
+  return Boolean(agent.itemId && openItemIds.has(agent.itemId));
 }
 
 function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
-  const live = agents.filter(isActiveWorker);
+  const openItemIds = new Set(
+    items.filter((item) => item.status === "in_progress").map((item) => item.id),
+  );
+  const live = agents.filter((agent) => isNowWorker(agent, openItemIds));
+  const seen = new Set<string>();
   const out: GoalItem[] = [];
-  const usedItems = new Set<string>();
-  const usedAgents = new Set<string>();
   for (const agent of live) {
     const key = `live:${agent.taskName}`;
-    if (usedAgents.has(key)) continue;
-    usedAgents.add(key);
-    const existing = agent.itemId ? items.find((item) => item.id === agent.itemId) : undefined;
-    if (existing && !usedItems.has(existing.id)) {
-      usedItems.add(existing.id);
-      out.push(existing);
-    } else {
-      out.push({
-        id: key,
-        step: agent.title || agent.nickname,
-        status: "in_progress",
-      });
-    }
-  }
-  let leftoverSlots = live.filter((agent) => !agent.itemId).length;
-  for (const item of items) {
-    if (item.status !== "in_progress" && !live.some((agent) => agent.itemId === item.id)) continue;
-    if (usedItems.has(item.id)) continue;
-    if (leftoverSlots > 0) {
-      leftoverSlots -= 1;
-      continue;
-    }
-    usedItems.add(item.id);
-    out.push(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const item = agent.itemId && openItemIds.has(agent.itemId)
+      ? items.find((row) => row.id === agent.itemId)
+      : undefined;
+    out.push({
+      id: key,
+      step: item?.step || agent.title || "Subagent task",
+      status: "in_progress",
+    });
   }
   return out;
 }
@@ -1224,9 +1210,10 @@ function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
 }
 
 function nowHeading(item: GoalItem, agent?: GoalAgent): string {
-  const generated = agent?.title?.trim();
-  if (generated && generated !== agent.nickname) return generated;
-  return shortSliceTitle(item.step) || agent?.nickname || currentSliceTitle(item.step);
+  const task = shortSliceTitle(item.step) || agent?.title?.trim() || "";
+  if (task && task !== agent?.nickname) return task;
+  if (agent?.title && agent.title !== agent.nickname) return agent.title;
+  return task || "Subagent task";
 }
 
 function NowRow({
