@@ -1,0 +1,57 @@
+{
+  "name": "bb-plugin-goal",
+  "version": "0.1.0",
+  "description": "Codex-style /goal for Cursor, OpenCode, Claude Code, and Pi. Sets a durable objective and keeps the thread working until it is done, blocked, paused, or limited.",
+  "license": "MIT",
+  "author": "Braedon Saunders",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/braedonsaunders/bb-plugin-goal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/braedonsaunders/bb-plugin-goal/issues"
+  },
+  "homepage": "https://github.com/braedonsaunders/bb-plugin-goal#readme",
+  "keywords": [
+    "bb",
+    "bb-plugin",
+    "goal",
+    "agents",
+    "orchestration"
+  ],
+  "files": [
+    "app.tsx",
+    "server.ts",
+    "contract.ts",
+    "lib",
+    "skills",
+    "templates",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bb": ">=0.39",
+    "bbPluginSdk": ">=0.4.8"
+  },
+  "bb": {
+    "name": "Goal",
+    "description": "Codex-style /goal for Cursor, OpenCode, Claude Code, and Pi. Sets a durable objective and keeps the thread working until it is done, blocked, paused, or limited.",
+    "branding": {
+      "icon": "./assets/icon.svg"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": ["skills"]
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.8",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
