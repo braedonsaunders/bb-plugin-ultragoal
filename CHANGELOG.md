@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- The plugin is UltraGoal: `/ultragoal`, `bb ultragoal`, plugin id `ultragoal`.
+- Now titles drop leftover `NEXT: shipped` wrappers so the current slice stays visible.
+
 ## 0.1.6
 
 - Plan items keep a stable id when their step text changes, so Now titles update in place.

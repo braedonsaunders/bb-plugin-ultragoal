@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GoalSnapshot, GoalStatus } from "../contract.js";
 
@@ -106,11 +109,27 @@ function flag(value: boolean | null | undefined): number | null {
 
 export function validateObjective(objective: string): string | null {
   const text = objective.trim();
-  if (!text) return "goal objective must not be empty";
+  if (!text) return "UltraGoal objective must not be empty";
   if (text.length > MAX_OBJECTIVE_CHARS) {
-    return `Goal objective is too long: ${text.length} characters. Limit: ${MAX_OBJECTIVE_CHARS} characters. Put longer instructions in a file and reference that file from the goal.`;
+    return `UltraGoal objective is too long: ${text.length} characters. Limit: ${MAX_OBJECTIVE_CHARS} characters. Put longer instructions in a file and reference that file from the UltraGoal.`;
   }
   return null;
+}
+
+function importLegacyGoalDatabase(db: { prepare: (sql: string) => { get: () => unknown }; exec: (sql: string) => void }): void {
+  const count = (db.prepare("SELECT COUNT(*) AS n FROM goals").get() as { n: number }).n;
+  if (count > 0) return;
+  const legacy = join(homedir(), ".bb", "plugins", "goal", "data.db");
+  if (!existsSync(legacy)) return;
+  const escaped = legacy.replaceAll("'", "''");
+  db.exec(`ATTACH DATABASE '${escaped}' AS legacy`);
+  try {
+    db.exec("INSERT OR IGNORE INTO goals SELECT * FROM legacy.goals");
+    db.exec("INSERT OR IGNORE INTO goal_items SELECT * FROM legacy.goal_items");
+    db.exec("INSERT OR IGNORE INTO collab_agents SELECT * FROM legacy.collab_agents");
+  } finally {
+    db.exec("DETACH DATABASE legacy");
+  }
 }
 
 export function createGoalStore(bb: BbPluginApi) {
@@ -167,6 +186,7 @@ export function createGoalStore(bb: BbPluginApi) {
     `ALTER TABLE goals ADD COLUMN last_progress_at INTEGER`,
     `ALTER TABLE goals ADD COLUMN progress_update_minutes INTEGER`,
   ]);
+  importLegacyGoalDatabase(db);
 
   const select = db.prepare("SELECT * FROM goals WHERE thread_id = ?");
   const selectActive = db.prepare(

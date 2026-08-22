@@ -1,6 +1,6 @@
-# Goal
+# UltraGoal
 
-A [BB](https://getbb.app) plugin that adds Codex-style durable Goals on Cursor, OpenCode, Claude Code, and Pi. Codex already has native Goal, so this plugin leaves those threads alone.
+A [BB](https://getbb.app) plugin that adds Codex-style durable UltraGoals on Cursor, OpenCode, Claude Code, and Pi. Codex already has native Goal, so this plugin leaves those threads alone.
 
 The root thread is the orchestrator. It keeps a durable objective, a requirement plan, and a crew of named subagents. Workers implement slices. Optional verifiers check finished work on a second model.
 
@@ -9,54 +9,56 @@ The root thread is the orchestrator. It keeps a durable objective, a requirement
 After the community marketplace listing is approved:
 
 ```bash
-bb plugin install goal@bb-community
+bb plugin install ultragoal@bb-community
 ```
 
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-goal.git@v0.1.6'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.2.0'
 ```
 
 Or from a local checkout:
 
 ```bash
-cd bb-plugin-goal
+cd bb-plugin-ultragoal
 npm install
 bb plugin install . --yes
 ```
 
-Reload after source edits with `bb plugin reload goal`.
+Reload after source edits with `bb plugin reload ultragoal`.
 
 ## Use
 
 In a thread on Cursor, OpenCode, Claude Code, or Pi:
 
 ```text
-/goal Ship the ledger export with tests and a reviewable PR
+/ultragoal Ship the ledger export with tests and a reviewable PR
 ```
 
 Other commands:
 
 ```text
-/goal                  # status
-/goal edit <objective> # change the contract
-/goal pause
-/goal resume
-/goal clear
+/ultragoal                  # status
+/ultragoal edit <objective> # change the contract
+/ultragoal pause
+/ultragoal resume
+/ultragoal clear
 ```
 
 CLI (from a thread, or pass `--thread`):
 
 ```bash
-bb goal
-bb goal set "Ship the ledger export"
-bb goal pause
-bb goal resume
-bb goal clear
+bb ultragoal
+bb ultragoal set "Ship the ledger export"
+bb ultragoal pause
+bb ultragoal resume
+bb ultragoal clear
 ```
 
-The Goal pane lists **Now** (expand a row for the live worker), **Up next**, and **Previous**. The plan is read-only in the pane; the agent updates it. Settings control verification, the verifier model, progress-chat interval, auto-continue, and the token budget.
+The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next**, and **Previous**. The plan is read-only in the pane; the agent updates it. Settings control verification, the verifier model, progress-chat interval, auto-continue, and the token budget.
+
+Agent tools keep the Codex names (`get_goal`, `create_goal`, `update_goal`, `update_plan`) so orchestrators and Codex-style skills stay compatible.
 
 ## How it runs
 

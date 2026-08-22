@@ -11,7 +11,7 @@ const SPAWN_AGENT_DESCRIPTION = `
         Spawns an agent to work on the specified task. If your current task is \`/root/task1\` and you spawn_agent with task_name "task_3" the agent will have canonical task name \`/root/task1/task_3\`.
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
-This is the default way Goal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
+This is the default way UltraGoal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
 Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal so they nest under that Now task. One worker per item_id — do not spawn a second worker onto a slice that already has one.
 When verification is on, a separate verifier is launched after each worker returns. Do not mark that slice complete until the verifier reports VERIFY_PASS.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
@@ -386,7 +386,7 @@ export function createCollabStore(
       }
       const root = await bb.sdk.threads.get({ threadId: args.rootThreadId });
       if (!root.projectId) {
-        throw new Error("Goal root thread has no project; cannot spawn a worker");
+        throw new Error("UltraGoal root thread has no project; cannot spawn a worker");
       }
       const usedNames = (byRoot.all(args.rootThreadId) as CollabRow[])
         .map((row) => row.display_name)
@@ -447,7 +447,7 @@ export function createCollabStore(
     }): Promise<{ threadId: string; nickname: string } | null> {
       const root = await bb.sdk.threads.get({ threadId: args.rootThreadId });
       if (!root.projectId) {
-        throw new Error("Goal root thread has no project; cannot spawn a verifier");
+        throw new Error("UltraGoal root thread has no project; cannot spawn a verifier");
       }
       const usedNames = (byRoot.all(args.rootThreadId) as CollabRow[])
         .map((row) => row.display_name)
@@ -467,7 +467,7 @@ export function createCollabStore(
           args.prompt,
           `The new agent's canonical task name is ${taskName}.`,
           `Your call sign is ${displayName}.`,
-          "You are a Goal verifier. Inspect the worktree. Do not implement fixes.",
+          "You are an UltraGoal verifier. Inspect the worktree. Do not implement fixes.",
           "Do not call update_goal or update_plan.",
         ].join("\n\n"),
         title: displayName,
@@ -511,12 +511,12 @@ export function createCollabStore(
             .string()
             .optional()
             .describe(
-              "Short humorous name shown in the Goal pane and sidebar, such as 'Sir Syncs-a-Lot'. The orchestrator should always set this.",
+              "Short humorous name shown in the UltraGoal pane and sidebar, such as 'Sir Syncs-a-Lot'. The orchestrator should always set this.",
             ),
           item_id: z
             .string()
             .optional()
-            .describe("Goal plan item id from get_goal. Nests this worker under that Now task."),
+            .describe("UltraGoal plan item id from get_goal. Nests this worker under that Now task."),
           role: z
             .enum(["worker", "verifier"])
             .optional()
@@ -578,9 +578,9 @@ export function createCollabStore(
             `The new agent's canonical task name is ${taskName}.`,
             `Your call sign is ${displayName}.`,
             role === "verifier"
-              ? "You are a Goal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes."
-              : "You are a Goal subagent for this assigned slice only. Do the work and report evidence.",
-            "Do not call update_goal, do not manage the parent Goal plan, and do not re-orchestrate the whole objective.",
+              ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes."
+              : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
+            "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
           ].join("\n\n");
           const spawnArgs = {
             projectId: parent.projectId ?? projectId,

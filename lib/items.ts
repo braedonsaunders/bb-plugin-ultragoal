@@ -1,5 +1,8 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GoalItem, GoalItemStatus } from "../contract.js";
+import { currentSliceTitle } from "./titles.js";
+
+export { currentSliceTitle };
 
 interface ItemRow {
   id: string;
@@ -12,7 +15,7 @@ interface ItemRow {
 }
 
 function rowToItem(row: ItemRow): GoalItem {
-  return { id: row.id, step: row.step, status: row.status };
+  return { id: row.id, step: currentSliceTitle(row.step), status: row.status };
 }
 
 function newId(): string {
@@ -64,7 +67,7 @@ export function createItemStore(bb: BbPluginApi) {
       }> = [];
 
       for (const [index, item] of plan.entries()) {
-        const step = item.step.trim();
+        const step = currentSliceTitle(item.step);
         if (!step) continue;
         let prior: ItemRow | null = null;
         const id = item.id?.trim();
@@ -106,7 +109,7 @@ export function createItemStore(bb: BbPluginApi) {
     },
 
     updateStep(threadId: string, itemId: string, step: string): GoalItem | null {
-      const text = step.trim();
+      const text = currentSliceTitle(step);
       if (!text) return null;
       const existing = (listStmt.all(threadId) as ItemRow[]).find((row) => row.id === itemId);
       if (!existing) return null;
@@ -124,7 +127,7 @@ export function createItemStore(bb: BbPluginApi) {
       const now = Date.now();
       let order = existing.length;
       for (const item of plan) {
-        const step = item.step.trim();
+        const step = currentSliceTitle(item.step);
         if (!step || seen.has(step.toLowerCase())) continue;
         seen.add(step.toLowerCase());
         insertStmt.run({
@@ -142,7 +145,7 @@ export function createItemStore(bb: BbPluginApi) {
     },
 
     add(threadId: string, step: string, status: GoalItemStatus = "pending"): GoalItem | null {
-      const text = step.trim();
+      const text = currentSliceTitle(step);
       if (!text) return null;
       const existing = listStmt.all(threadId) as ItemRow[];
       const now = Date.now();

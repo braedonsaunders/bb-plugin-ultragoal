@@ -41,7 +41,7 @@ function budgetFields(goal: GoalSnapshot): {
 
 function planInstruction(goal: GoalSnapshot): string {
   if (goal.items.length === 0) {
-    return "The Goal pane has no requirements yet. Call update_plan at the start of this turn with concrete remaining work derived from current evidence. Keep that plan current as you discover or finish work. Do not treat a plan update as a substitute for doing the work.";
+    return "The UltraGoal pane has no requirements yet. Call update_plan at the start of this turn with concrete remaining work derived from current evidence. Keep that plan current as you discover or finish work. Do not treat a plan update as a substitute for doing the work.";
   }
   const lines = goal.items.map((item) => {
     const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? ">" : " ";

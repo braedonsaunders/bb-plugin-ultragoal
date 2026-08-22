@@ -14,6 +14,7 @@ import { lastUserText, parseSlashGoal } from "./lib/slash.js";
 import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
+import { currentSliceTitle } from "./lib/titles.js";
 import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
 import {
   createGoalStore,
@@ -96,12 +97,12 @@ export default function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     autoContinue: {
       type: "boolean",
-      label: "Auto-continue when a Goal is active",
+      label: "Auto-continue when an UltraGoal is active",
       default: true,
     },
     maxGoalTokenBudget: {
       type: "string",
-      label: "Maximum goal token budget (empty = unbounded)",
+      label: "Maximum UltraGoal token budget (empty = unbounded)",
       default: "",
     },
     verifyByDefault: {
@@ -118,7 +119,7 @@ export default function plugin(bb: BbPluginApi) {
     verifyModel: {
       type: "string",
       label: "Default verifier model",
-      description: "Codex GPT-5.6-Sol unless a Goal overrides it in the right-pane Settings.",
+      description: "Codex GPT-5.6-Sol unless an UltraGoal overrides it in the right-pane Settings.",
       default: DEFAULT_VERIFY_MODEL,
     },
     progressUpdateMinutes: {
@@ -162,11 +163,12 @@ export default function plugin(bb: BbPluginApi) {
           .split(/\n/)[0]
           ?.replace(/^#+\s*/, "")
           .trim() ?? "";
-      if (line.length < 8 || line.length > 180) return;
-      if (/^(you are|parent goal|assigned slice|complete only|the new agent's)/i.test(line)) {
+      const title = currentSliceTitle(line);
+      if (title.length < 8 || title.length > 180) return;
+      if (/^(you are|parent goal|assigned slice|complete only|the new agent's)/i.test(title)) {
         return;
       }
-      items.updateStep(rootThreadId, itemId, line);
+      items.updateStep(rootThreadId, itemId, title);
     },
     nextItemId(rootThreadId) {
       const used = new Set(
@@ -184,7 +186,7 @@ export default function plugin(bb: BbPluginApi) {
   });
 
   function publish(threadId: string, goal: GoalSnapshot | null): void {
-    bb.realtime.publish("goal", { threadId, goal });
+    bb.realtime.publish("ultragoal", { threadId, goal });
   }
 
   function account(
@@ -212,7 +214,7 @@ export default function plugin(bb: BbPluginApi) {
         if (latest) publish(threadId, await viewFresh(latest));
       } catch (error) {
         bb.log.warn(
-          `Goal pane refresh failed on ${threadId}: ${
+          `UltraGoal pane refresh failed on ${threadId}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
@@ -756,7 +758,7 @@ export default function plugin(bb: BbPluginApi) {
     }
     if (slash.kind === "status") return true;
     if (slash.kind === "pause") {
-      await pauseGoal(threadId, "Paused from /goal");
+      await pauseGoal(threadId, "Paused from /ultragoal");
       return true;
     }
     if (slash.kind === "resume") {
@@ -1007,13 +1009,13 @@ Keep the plan current as steps complete or the next best action changes. When a 
         goal && (goal.status === "active" || goal.status === "budget_limited")
           ? isVerifier
             ? [
-                `You are a Goal verifier${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
+                `You are an UltraGoal verifier${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
                 "Inspect the current worktree. Do not trust the worker report.",
                 "End with VERIFY_PASS or VERIFY_FAIL. Do not implement fixes.",
                 "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
               ].join("\n")
             : [
-                `You are a Goal subagent${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
+                `You are an UltraGoal subagent${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
                 "Complete only the slice you were assigned. Report evidence when done.",
                 "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
                 "You may spawn nested helpers for your slice if it splits cleanly.",
@@ -1029,21 +1031,21 @@ Keep the plan current as steps complete or the next best action changes. When a 
     const live =
       goal && (goal.status === "active" || goal.status === "budget_limited")
         ? [
-            `Durable Goal (${goal.status}): ${goal.objective}`,
+            `Durable UltraGoal (${goal.status}): ${goal.objective}`,
             "This root thread is the orchestrator. Subagents do the implementation by default.",
             plan.length > 0
               ? `Requirement plan: ${done}/${plan.length} complete. Keep update_plan current as steps complete or the next best action changes.`
-              : "The Goal pane is empty. Call update_plan immediately with concrete remaining work. Do not use TodoWrite or Update TODOs for that list.",
+              : "The UltraGoal pane is empty. Call update_plan immediately with concrete remaining work. Do not use TodoWrite or Update TODOs for that list.",
             liveAgents.length > 0
               ? `${liveAgents.length} subagent(s) are live. Wait or follow up; do not redo their slices on the root.`
               : "No subagents are live. Spawn one worker per in-progress slice before doing the work yourself.",
             "Call spawn_agent for each in-progress slice in this turn. Give each a humorous display_name and the item_id from get_goal.",
             view(goal).settings.verifyEnabled
               ? `Verification is on. After a worker returns, a ${view(goal).settings.verifyProvider}/${view(goal).settings.verifyModel} verifier is launched automatically. Do not mark that slice complete until VERIFY_PASS. On VERIFY_FAIL, spawn a fix worker.`
-              : "Verification is off for this Goal.",
+              : "Verification is off for this UltraGoal.",
             view(goal).settings.progressUpdateMinutes > 0
               ? `Do not write a visible chat status on ordinary turns. A progress-check-in every ${view(goal).settings.progressUpdateMinutes} minutes will ask when a chat update is due. You may also write one short note when a slice completes or a worker fails.`
-              : "Progress chat updates are off for this Goal. Do not write routine status notes.",
+              : "Progress chat updates are off for this UltraGoal. Do not write routine status notes.",
             "Stay on the root to plan, wait, verify, and unblock.",
             "Call update_goal with status complete only when current evidence proves every requirement.",
             "Call update_goal with status blocked only after the same blocker repeats for three consecutive goal turns.",
@@ -1058,7 +1060,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
         "update_plan",
         ...COLLAB_TOOL_NAMES,
       ],
-      skills: ["goal"],
+      skills: ["ultragoal"],
       instructions: live,
     };
   });
@@ -1152,18 +1154,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     if (store.clear(thread.id)) publish(thread.id, null);
   });
 
-  bb.cli.register({
-    name: "goal",
-    summary: "Set, inspect, pause, resume, or clear a durable Goal",
-    commands: [
-      { name: "status", summary: "Show the Goal on a thread", usage: "bb goal [status] [--thread <id>]" },
-      { name: "set", summary: "Set or replace the Goal", usage: "bb goal set <objective> [--thread <id>]" },
-      { name: "edit", summary: "Edit the Goal objective", usage: "bb goal edit <objective> [--thread <id>]" },
-      { name: "pause", summary: "Pause the Goal", usage: "bb goal pause [--thread <id>]" },
-      { name: "resume", summary: "Resume a paused Goal", usage: "bb goal resume [--thread <id>]" },
-      { name: "clear", summary: "Clear the Goal", usage: "bb goal clear [--thread <id>]" },
-    ],
-    async run(argv, ctx) {
+  const runCli = async (argv: string[], ctx: { threadId?: string }) => {
       const parsed = parseCli(argv, ctx.threadId);
       if (parsed.error) return { exitCode: 1, stderr: parsed.error };
       const { threadId, action, objective } = parsed;
@@ -1177,12 +1168,12 @@ Keep the plan current as steps complete or the next best action changes. When a 
         const latest = store.get(threadId);
         return {
           exitCode: 0,
-          stdout: latest ? formatGoalCard(view(latest)) : "No Goal is set on this thread.",
+          stdout: latest ? formatGoalCard(view(latest)) : "No UltraGoal is set on this thread.",
         };
       }
 
       if (action === "set") {
-        if (!objective) return { exitCode: 1, stderr: "Usage: bb goal set <objective>" };
+        if (!objective) return { exitCode: 1, stderr: "Usage: bb ultragoal set <objective>" };
         const result = await userSetGoal(threadId, objective);
         if ("error" in result) return { exitCode: 1, stderr: result.error };
         try {
@@ -1199,12 +1190,12 @@ Keep the plan current as steps complete or the next best action changes. When a 
       }
 
       if (action === "edit") {
-        if (!objective) return { exitCode: 1, stderr: "Usage: bb goal edit <objective>" };
+        if (!objective) return { exitCode: 1, stderr: "Usage: bb ultragoal edit <objective>" };
         const goal = await editGoal(threadId, objective);
         return {
           exitCode: goal ? 0 : 1,
           stdout: goal ? formatGoalCard(view(goal)) : undefined,
-          stderr: goal ? undefined : "No Goal is set on this thread.",
+          stderr: goal ? undefined : "No UltraGoal is set on this thread.",
         };
       }
 
@@ -1213,7 +1204,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
         return {
           exitCode: goal ? 0 : 1,
           stdout: goal ? formatGoalCard(view(goal)) : undefined,
-          stderr: goal ? undefined : "No Goal is set on this thread.",
+          stderr: goal ? undefined : "No UltraGoal is set on this thread.",
         };
       }
 
@@ -1222,16 +1213,31 @@ Keep the plan current as steps complete or the next best action changes. When a 
         return {
           exitCode: goal ? 0 : 1,
           stdout: goal ? formatGoalCard(view(goal)) : undefined,
-          stderr: goal ? undefined : "No Goal is set on this thread.",
+          stderr: goal ? undefined : "No UltraGoal is set on this thread.",
         };
       }
 
       items.clear(threadId);
       store.clear(threadId);
       publish(threadId, null);
-      return { exitCode: 0, stdout: "Goal cleared." };
-    },
-  });
+      return { exitCode: 0, stdout: "UltraGoal cleared." };
+  };
+
+  for (const name of ["ultragoal", "goal"] as const) {
+    bb.cli.register({
+      name,
+      summary: "Set, inspect, pause, resume, or clear a durable UltraGoal",
+      commands: [
+        { name: "status", summary: "Show the UltraGoal on a thread", usage: `bb ${name} [status] [--thread <id>]` },
+        { name: "set", summary: "Set or replace the UltraGoal", usage: `bb ${name} set <objective> [--thread <id>]` },
+        { name: "edit", summary: "Edit the UltraGoal objective", usage: `bb ${name} edit <objective> [--thread <id>]` },
+        { name: "pause", summary: "Pause the UltraGoal", usage: `bb ${name} pause [--thread <id>]` },
+        { name: "resume", summary: "Resume a paused UltraGoal", usage: `bb ${name} resume [--thread <id>]` },
+        { name: "clear", summary: "Clear the UltraGoal", usage: `bb ${name} clear [--thread <id>]` },
+      ],
+      run: runCli,
+    });
+  }
 
   bb.background.service("progress-pulse", {
     async start(signal) {

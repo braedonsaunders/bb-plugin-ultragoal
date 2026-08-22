@@ -4,7 +4,7 @@ import { remainingTokens } from "./prompts.js";
 export function formatGoalCard(goal: GoalSnapshot): string {
   const remaining = remainingTokens(goal);
   const lines = [
-    `Goal: ${goal.status}`,
+    `UltraGoal: ${goal.status}`,
     `Objective: ${goal.objective}`,
     `Tokens used: ${goal.tokensUsed}`,
     `Token budget: ${goal.tokenBudget ?? "none"}`,
@@ -48,7 +48,7 @@ export function goalToolResponse(
   const remaining = goal ? remainingTokens(goal) : null;
   const completionBudgetReport =
     reportCompletionBudget && goal?.status === "complete"
-      ? "Goal achieved. Report final usage from this tool result's structured goal fields. If `goal.tokenBudget` is present, include token usage from `goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is greater than 0, summarize elapsed time in a concise, human-friendly form appropriate to the response language."
+      ? "UltraGoal achieved. Report final usage from this tool result's structured goal fields. If `goal.tokenBudget` is present, include token usage from `goal.tokensUsed` and `goal.tokenBudget`. If `goal.timeUsedSeconds` is greater than 0, summarize elapsed time in a concise, human-friendly form appropriate to the response language."
       : undefined;
   return JSON.stringify(
     {
@@ -73,7 +73,7 @@ export function goalToolResponse(
       remainingTokens: remaining,
       planReminder:
         goal && goal.items.length === 0
-          ? "The Goal pane is empty. Call update_plan immediately with concrete requirements. Do not use TodoWrite or Update TODOs for that list."
+          ? "The UltraGoal pane is empty. Call update_plan immediately with concrete requirements. Do not use TodoWrite or Update TODOs for that list."
           : undefined,
       completionBudgetReport,
     },

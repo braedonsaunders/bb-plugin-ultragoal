@@ -10,8 +10,9 @@ import {
 import type { GoalAgent, GoalItem, GoalSnapshot } from "./contract";
 import { rpcContract } from "./contract";
 import { providerLabel, providerMarkSpec, providerMarkSvg } from "./lib/provider-marks";
+import { currentSliceTitle } from "./lib/titles";
 
-const PLAN_ACTION_ID = "goal-plan";
+const PLAN_ACTION_ID = "ultragoal-plan";
 
 function composerThreadId(
   scope: ReturnType<typeof useComposerView>["scope"],
@@ -209,7 +210,7 @@ function SidebarProviderIcons() {
 }
 
 const GOAL_MARK_STYLE =
-  "display:inline-flex;align-items:center;flex:0 0 auto;height:14px;padding:0 4px;border:1px solid currentColor;border-radius:3px;font-size:9px;font-weight:600;letter-spacing:.06em;line-height:1;text-transform:uppercase;opacity:.55";
+  "display:inline-flex;align-items:center;flex:0 0 auto;height:14px;padding:0 4px;border:1px solid currentColor;border-radius:3px;font-size:9px;font-weight:600;letter-spacing:.04em;line-height:1;opacity:.55";
 
 function injectGoalSidebarMarks(
   crews: Array<{ threadId: string; agents: GoalAgent[]; workerIds?: string[] }>,
@@ -268,8 +269,8 @@ function injectGoalSidebarMarks(
       mark = document.createElement("span");
       mark.dataset.goalMark = "1";
       mark.style.cssText = GOAL_MARK_STYLE;
-      mark.textContent = "Goal";
-      mark.title = "Goal thread";
+      mark.textContent = "UltraGoal";
+      mark.title = "UltraGoal thread";
       container.appendChild(mark);
     }
   }
@@ -296,7 +297,11 @@ function descendantWorkerIds(
   };
   for (const goalId of goalIds) walk(goalId);
   for (const thread of threads) {
-    if (thread.originPluginId === "goal" && thread.parentThreadId && !goalIds.has(thread.id)) {
+    if (
+      (thread.originPluginId === "ultragoal" || thread.originPluginId === "goal") &&
+      thread.parentThreadId &&
+      !goalIds.has(thread.id)
+    ) {
       hide.add(thread.id);
     }
   }
@@ -338,7 +343,7 @@ function SidebarGoalMarks() {
     return () => window.clearInterval(id);
   }, [load]);
 
-  useRealtime("goal", () => {
+  useRealtime("ultragoal", () => {
     void load();
   });
 
@@ -429,7 +434,7 @@ function useGoal(threadId: string | null) {
     void load();
   }, [load]);
 
-  useRealtime("goal", (payload) => {
+  useRealtime("ultragoal", (payload) => {
     const event = payload as { threadId?: string; goal?: GoalSnapshot | null };
     if (!threadId || event.threadId !== threadId) return;
     setGoal(event.goal ? { ...event.goal, agents: event.goal.agents ?? [] } : null);
@@ -455,7 +460,7 @@ function GoalPaneOpener() {
 
   useEffect(() => {
     if (!threadId || !goal || goal.status === "complete") return;
-    navigate.openThreadPanel({ actionId: PLAN_ACTION_ID, title: "Goal" });
+    navigate.openThreadPanel({ actionId: PLAN_ACTION_ID, title: "UltraGoal" });
   }, [navigate, threadId, goal?.status, goal?.objective]);
 
   return null;
@@ -570,7 +575,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   if (!goal) {
     return (
       <div ref={rootRef} className="flex h-full w-full min-w-0 flex-col justify-center overflow-x-hidden px-4 text-sm text-muted-foreground">
-        No Goal is set on this thread.
+        No UltraGoal is set on this thread.
       </div>
     );
   }
@@ -789,7 +794,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
         {items.length === 0 && agents.length === 0 ? (
           <div className="px-2 py-8 text-sm leading-relaxed text-muted-foreground">
-            No requirements yet. Resume the Goal and the agent will fill this list with
+            No requirements yet. Resume the UltraGoal and the agent will fill this list with
             update_plan.
           </div>
         ) : (
@@ -1194,7 +1199,7 @@ function NowRow({
           <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
         </span>
         <span className={`min-w-0 flex-1 text-[13px] leading-5 text-foreground ${open ? "whitespace-normal" : "truncate"}`}>
-          {item.step}
+          {currentSliceTitle(item.step)}
         </span>
         {lead && !open ? (
           <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
@@ -1328,7 +1333,7 @@ function ItemGroup({
                       : "text-foreground/90"
                 }`}
               >
-                {item.step}
+                {currentSliceTitle(item.step)}
               </span>
             </li>
           );
@@ -1341,12 +1346,12 @@ function ItemGroup({
 
 export default definePluginApp((app) => {
   app.slots.experimental_threadHeaderAction({
-    id: "goal-provider-icon",
+    id: "ultragoal-provider-icon",
     title: "Provider",
     component: ThreadProviderHeader,
   });
   app.slots.experimental_threadList({
-    id: "goal-thread-list",
+    id: "ultragoal-thread-list",
     title: "Threads",
     description: "Built-in list with provider icons before titles.",
     component: (props) => {
@@ -1362,30 +1367,30 @@ export default definePluginApp((app) => {
   });
   app.slots.threadPanelAction({
     id: PLAN_ACTION_ID,
-    title: "Goal",
+    title: "UltraGoal",
     icon: "ListChecks",
     layout: "flush",
     component: GoalPlanPanel,
     run: ({ openPanel }) => {
-      openPanel({ title: "Goal" });
+      openPanel({ title: "UltraGoal" });
     },
   });
   app.composer.customize({
-    id: "goal",
+    id: "ultragoal",
     scopes: ["thread", "queued-message"],
-    banners: [{ id: "goal-banner", chrome: "bare", component: GoalChrome }],
+    banners: [{ id: "ultragoal-banner", chrome: "bare", component: GoalChrome }],
     plusMenu: [
       {
-        id: "start-goal",
-        label: "Start a Goal",
+        id: "start-ultragoal",
+        label: "Start an UltraGoal",
         description: "Keep working toward one durable objective",
         run: ({ composer }) => {
           const current = composer.text.trim();
-          if (current.startsWith("/goal")) {
+          if (/^\/(?:ultra)?goal\b/i.test(current)) {
             composer.focus();
             return;
           }
-          composer.setText(current ? `/goal ${current}` : "/goal ");
+          composer.setText(current ? `/ultragoal ${current}` : "/ultragoal ");
           composer.focus();
         },
       },
