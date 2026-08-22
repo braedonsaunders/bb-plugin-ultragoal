@@ -1167,18 +1167,26 @@ function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
     items.filter((item) => item.status === "in_progress").map((item) => item.id),
   );
   const live = agents.filter((agent) => isNowWorker(agent, openItemIds));
+  const loneOpen = items.filter((item) => item.status === "in_progress");
   const seen = new Set<string>();
   const out: GoalItem[] = [];
   for (const agent of live) {
     const key = `live:${agent.taskName}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const item = agent.itemId && openItemIds.has(agent.itemId)
-      ? items.find((row) => row.id === agent.itemId)
-      : undefined;
+    const assigned =
+      agent.itemId && openItemIds.has(agent.itemId)
+        ? items.find((row) => row.id === agent.itemId)
+        : undefined;
+    const item =
+      assigned ??
+      (agent.taskName.startsWith("task/") && loneOpen.length === 1 ? loneOpen[0] : undefined);
     out.push({
       id: key,
-      step: item?.step || agent.title || "Subagent task",
+      step:
+        item?.step ||
+        (agent.title && agent.title !== "Subagent task" ? agent.title : "") ||
+        "Subagent task",
       status: "in_progress",
     });
   }

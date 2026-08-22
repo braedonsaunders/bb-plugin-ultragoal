@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5
+
+- Now ignores leftover Cursor timeline Task rows. A Task only stays in Now when its thread event is still open.
+
 ## 0.2.4
 
 - Now is one live subagent per row. Finished workers and duplicate Cursor Task events no longer pile up.

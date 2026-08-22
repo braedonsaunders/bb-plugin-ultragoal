@@ -465,14 +465,25 @@ export function createCollabStore(
   async function listLiveRootTasks(root: string): Promise<GoalAgent[]> {
     const pending = new Map<
       string,
-      { id: string; description: string | null; completed: boolean }
+      { id: string; description: string | null; completed: boolean; fromEvent: boolean }
     >();
-    const remember = (id: string, description: string | null, completed: boolean) => {
+    const remember = (
+      id: string,
+      description: string | null,
+      completed: boolean,
+      fromEvent: boolean,
+    ) => {
       const key = nativeCallKey(id);
       if (!key) return;
-      const current = pending.get(key) ?? { id, description: null, completed: false };
+      const current = pending.get(key) ?? {
+        id,
+        description: null,
+        completed: false,
+        fromEvent: false,
+      };
       if (description && !current.description) current.description = description;
       if (completed) current.completed = true;
+      if (fromEvent) current.fromEvent = true;
       pending.set(key, current);
     };
     try {
@@ -485,10 +496,10 @@ export function createCollabStore(
       for (const event of page) {
         const item = eventItem(event);
         if (!item || !isNativeTaskItem(item)) continue;
-        remember(item.id, item.description, item.done);
+        remember(item.id, item.description, item.done, true);
       }
     } catch {
-      // Timeline still covers providers that omit item events.
+      // Timeline can still attach titles to event-backed Task calls.
     }
     try {
       const result = await bb.sdk.threads.timeline({
@@ -511,16 +522,17 @@ export function createCollabStore(
             isNativeTaskName(description ?? "");
           if (!isTask) continue;
           const id = String(current.callId ?? current.itemId ?? current.id ?? "");
-          if (status === "pending" || status === "running") remember(id, description, false);
-          else if (status) remember(id, description, true);
+          const key = nativeCallKey(id);
+          if (!pending.has(key)) continue;
+          remember(id, description, Boolean(status) && status !== "pending" && status !== "running", false);
         }
       };
       walk(result.rows ?? []);
     } catch {
-      // Events are enough when timeline rows omit Task calls.
+      // Event started/completed pairing is enough for liveness.
     }
     const live = [...pending.entries()]
-      .filter(([, rec]) => !rec.completed)
+      .filter(([, rec]) => rec.fromEvent && !rec.completed)
       .sort(([a], [b]) => a.localeCompare(b));
     return live.map(([key, rec], index) => nativeAgent(root, rec.id || key, rec.description, index));
   }
