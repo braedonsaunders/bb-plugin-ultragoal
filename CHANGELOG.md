@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5
+
+- Sidebar stays a single Goal-marked row. Crew no longer reappears after a plugin reload.
+- The host expand/collapse caret is hidden on Goal threads.
+
 ## 0.1.4
 
 - Auto-continue stays on, but the root thread no longer posts a status dump every turn.

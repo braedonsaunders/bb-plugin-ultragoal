@@ -212,10 +212,18 @@ const GOAL_MARK_STYLE =
   "display:inline-flex;align-items:center;flex:0 0 auto;height:14px;padding:0 4px;border:1px solid currentColor;border-radius:3px;font-size:9px;font-weight:600;letter-spacing:.06em;line-height:1;text-transform:uppercase;opacity:.55";
 
 function injectGoalSidebarMarks(
-  crews: Array<{ threadId: string; agents: GoalAgent[] }>,
+  crews: Array<{ threadId: string; agents: GoalAgent[]; workerIds?: string[] }>,
+  extraHideIds?: ReadonlySet<string>,
 ) {
   const goalIds = new Set(crews.map((crew) => crew.threadId));
-  const workerIds = new Set(crews.flatMap((crew) => crew.agents.map((agent) => agent.threadId)));
+  const workerIds = new Set(
+    crews.flatMap((crew) => [
+      ...(crew.workerIds ?? []),
+      ...crew.agents.map((agent) => agent.threadId),
+    ]),
+  );
+  for (const id of extraHideIds ?? []) workerIds.add(id);
+  for (const id of goalIds) workerIds.delete(id);
 
   for (const stale of Array.from(document.querySelectorAll("[data-goal-crew]"))) {
     stale.remove();
@@ -231,13 +239,26 @@ function injectGoalSidebarMarks(
       row.style.display = "none";
       continue;
     }
-    if (row.dataset.goalWorkerHidden === "1") {
+    // An empty crew cache after reload used to unhide every worker. Only
+    // restore a row when we positively know the active Goal set and this
+    // thread is not one of its children.
+    if (row.dataset.goalWorkerHidden === "1" && goalIds.size > 0) {
       delete row.dataset.goalWorkerHidden;
       row.style.display = "";
     }
 
     const container = row.querySelector(":scope > span") as HTMLElement | null;
     if (!container) continue;
+    const caret = container.querySelector("button[aria-expanded]") as HTMLElement | null;
+    if (caret) {
+      if (goalIds.has(id)) {
+        caret.dataset.goalCaretHidden = "1";
+        caret.style.display = "none";
+      } else if (caret.dataset.goalCaretHidden === "1") {
+        delete caret.dataset.goalCaretHidden;
+        caret.style.display = "";
+      }
+    }
     let mark = container.querySelector("[data-goal-mark]") as HTMLElement | null;
     if (!goalIds.has(id)) {
       mark?.remove();
@@ -254,16 +275,58 @@ function injectGoalSidebarMarks(
   }
 }
 
+function descendantWorkerIds(
+  threads: readonly { id: string; parentThreadId: string | null; originPluginId?: string | null }[],
+  goalIds: ReadonlySet<string>,
+): Set<string> {
+  const byParent = new Map<string, string[]>();
+  for (const thread of threads) {
+    if (!thread.parentThreadId) continue;
+    const list = byParent.get(thread.parentThreadId) ?? [];
+    list.push(thread.id);
+    byParent.set(thread.parentThreadId, list);
+  }
+  const hide = new Set<string>();
+  const walk = (id: string) => {
+    for (const child of byParent.get(id) ?? []) {
+      if (goalIds.has(child) || hide.has(child)) continue;
+      hide.add(child);
+      walk(child);
+    }
+  };
+  for (const goalId of goalIds) walk(goalId);
+  for (const thread of threads) {
+    if (thread.originPluginId === "goal" && thread.parentThreadId && !goalIds.has(thread.id)) {
+      hide.add(thread.id);
+    }
+  }
+  return hide;
+}
+
 function SidebarGoalMarks() {
   const rpc = useRpc<typeof rpcContract>();
-  const [crews, setCrews] = useState<Array<{ threadId: string; agents: GoalAgent[] }>>([]);
+  const { threads } = experimental_useSidebarThreads();
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
+  const threadTree = threads
+    .map((thread) => `${thread.id}:${thread.parentThreadId ?? ""}:${thread.originPluginId ?? ""}`)
+    .join(",");
+  const [crews, setCrews] = useState<
+    Array<{ threadId: string; agents: GoalAgent[]; workerIds: string[] }>
+  >([]);
 
   const load = useCallback(async () => {
     try {
       const next = await rpc.call("listCrews", {});
-      setCrews(next.crews.map((crew) => ({ threadId: crew.threadId, agents: crew.agents })));
+      setCrews(
+        next.crews.map((crew) => ({
+          threadId: crew.threadId,
+          agents: crew.agents,
+          workerIds: crew.workerIds ?? crew.agents.map((agent) => agent.threadId),
+        })),
+      );
     } catch {
-      setCrews([]);
+      // Keep the last known crew so a failed poll cannot unhide workers.
     }
   }, [rpc]);
 
@@ -288,7 +351,13 @@ function SidebarGoalMarks() {
       if (disposed) return;
       observer.disconnect();
       try {
-        injectGoalSidebarMarks(crews);
+        injectGoalSidebarMarks(
+          crews,
+          descendantWorkerIds(
+            threadsRef.current,
+            new Set(crews.map((crew) => crew.threadId)),
+          ),
+        );
       } finally {
         if (!disposed) observer.observe(document.body, options);
       }
@@ -303,7 +372,7 @@ function SidebarGoalMarks() {
       if (frame) window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [crews]);
+  }, [crews, threadTree]);
 
   return null;
 }

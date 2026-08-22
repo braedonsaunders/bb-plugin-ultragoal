@@ -174,6 +174,7 @@ export const rpcContract = defineRpcContract({
           threadId: z.string(),
           items: z.array(goalItemSchema),
           agents: z.array(goalAgentSchema),
+          workerIds: z.array(z.string()),
         }),
       ),
     }),

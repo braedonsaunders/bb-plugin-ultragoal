@@ -827,7 +827,12 @@ export default function plugin(bb: BbPluginApi) {
         const goal = store.get(threadId);
         if (!goal) continue;
         const snap = view(goal);
-        crews.push({ threadId, items: snap.items, agents: snap.agents });
+        crews.push({
+          threadId,
+          items: snap.items,
+          agents: snap.agents,
+          workerIds: collab.threadIdsForRoot(threadId),
+        });
       }
       return { crews };
     },
