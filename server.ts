@@ -14,7 +14,7 @@ import { lastUserText, parseSlashGoal } from "./lib/slash.js";
 import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
-import { currentSliceTitle } from "./lib/titles.js";
+import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
 import {
   createGoalStore,
@@ -169,6 +169,7 @@ export default function plugin(bb: BbPluginApi) {
         return;
       }
       items.updateStep(rootThreadId, itemId, title);
+      collab.setWorkTitleForItem(rootThreadId, itemId, title);
     },
     nextItemId(rootThreadId) {
       const used = new Set(
@@ -224,16 +225,37 @@ export default function plugin(bb: BbPluginApi) {
     })();
   }
 
-  function crewIsLive(agents: readonly GoalAgent[]): boolean {
-    return agents.some((agent) => agent.status === "running" || agent.status === "starting");
+  function crewIsLive(threadId: string, agents: readonly GoalAgent[]): boolean {
+    const open = new Set(
+      items.list(threadId).filter((item) => item.status !== "completed").map((item) => item.id),
+    );
+    return agents.some((agent) => {
+      if (agent.status === "running" || agent.status === "starting") return true;
+      if (agent.role === "verifier") return false;
+      if (agent.status === "error" || agent.status === "stopped" || agent.status === "completed") {
+        return false;
+      }
+      return Boolean(agent.itemId && open.has(agent.itemId));
+    });
   }
 
   function goalIsBusy(threadId: string, agents = agentCache.get(threadId) ?? []): boolean {
-    return running.get(threadId) === true || crewIsLive(agents);
+    return running.get(threadId) === true || crewIsLive(threadId, agents);
+  }
+
+  function withWorkTitles(threadId: string, agents: GoalAgent[]): GoalAgent[] {
+    const byId = new Map(items.list(threadId).map((item) => [item.id, item]));
+    return agents.map((agent) => {
+      const item = agent.itemId ? byId.get(agent.itemId) : undefined;
+      const work = item ? shortSliceTitle(item.step) : "";
+      const title =
+        agent.title && agent.title !== agent.nickname ? agent.title : work || agent.title || agent.nickname;
+      return { ...agent, title };
+    });
   }
 
   function view(goal: StoredGoal): GoalSnapshot {
-    const agents = agentCache.get(goal.threadId) ?? [];
+    const agents = withWorkTitles(goal.threadId, agentCache.get(goal.threadId) ?? []);
     return snapshotOf(goal, items, goalIsBusy(goal.threadId, agents), agents);
   }
 
@@ -295,7 +317,18 @@ export default function plugin(bb: BbPluginApi) {
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
     try {
       const listed = await collab.listForRoot(goal.threadId);
-      agentCache.set(goal.threadId, assignLiveAgents(goal.threadId, listed));
+      const assigned = assignLiveAgents(goal.threadId, listed);
+      const open = new Map(
+        items.list(goal.threadId).filter((item) => item.status !== "completed").map((item) => [item.id, item]),
+      );
+      for (const agent of assigned) {
+        if (!agent.itemId || agent.role === "verifier") continue;
+        const item = open.get(agent.itemId);
+        if (!item) continue;
+        if (agent.title && agent.title !== agent.nickname) continue;
+        collab.setWorkTitleForItem(goal.threadId, item.id, item.step);
+      }
+      agentCache.set(goal.threadId, assigned);
     } catch (error) {
       bb.log.warn(
         `Could not list Goal agents on ${goal.threadId}: ${

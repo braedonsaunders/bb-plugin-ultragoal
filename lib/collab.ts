@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { isPromptLikeTitle, shortSliceTitle } from "./titles.js";
 import { z } from "zod";
 import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
 import { nextAuditorName, nextHumorousName, slugFromName } from "./names.js";
@@ -230,16 +231,40 @@ export function createCollabStore(
     return [...found.values()];
   }
 
-  const statusCache = new Map<string, { status: GoalAgentStatus; summary: string | null; at: number }>();
+  const statusCache = new Map<
+    string,
+    { status: GoalAgentStatus; summary: string | null; title: string | null; at: number }
+  >();
 
-  async function refreshStatus(threadId: string): Promise<{ status: GoalAgentStatus; summary: string | null }> {
+  function displayTitle(title: string | null | undefined): string | null {
+    const text = title?.trim();
+    if (!text || isPromptLikeTitle(text)) return null;
+    return text;
+  }
+
+  async function refreshStatus(
+    threadId: string,
+  ): Promise<{ status: GoalAgentStatus; summary: string | null; title: string | null }> {
     try {
       const thread = await bb.sdk.threads.get({ threadId });
       const mapped = mapThreadStatus(thread.status, null);
-      statusCache.set(threadId, { ...mapped, at: Date.now() });
-      return mapped;
+      const next = { ...mapped, title: displayTitle(thread.title), at: Date.now() };
+      statusCache.set(threadId, next);
+      return next;
     } catch {
-      return statusCache.get(threadId) ?? { status: "unknown", summary: null };
+      return statusCache.get(threadId) ?? { status: "unknown", summary: null, title: null };
+    }
+  }
+
+  async function applyWorkTitle(threadId: string, step: string): Promise<void> {
+    const title = shortSliceTitle(step);
+    if (!title) return;
+    try {
+      await bb.sdk.threads.update({ threadId, title });
+      const cached = statusCache.get(threadId);
+      if (cached) statusCache.set(threadId, { ...cached, title, at: Date.now() });
+    } catch {
+      // Display name on the pane is enough if the host rejects a title write.
     }
   }
 
@@ -322,11 +347,18 @@ export function createCollabStore(
       all.map(async (row) => {
         const mapped = refreshIds.has(row.thread_id)
           ? await refreshStatus(row.thread_id)
-          : (statusCache.get(row.thread_id) ?? { status: "completed" as const, summary: null });
+          : (statusCache.get(row.thread_id) ?? {
+              status: "completed" as const,
+              summary: null,
+              title: null,
+            });
+        const nickname = row.display_name?.trim() || nicknameOf(row.task_name, null);
+        const title = mapped.title && mapped.title !== nickname ? mapped.title : null;
         return {
           threadId: row.thread_id,
           taskName: row.task_name,
-          nickname: row.display_name?.trim() || nicknameOf(row.task_name, null),
+          nickname,
+          title,
           itemId: row.item_id,
           role: row.role === "verifier" ? "verifier" : "worker",
           status: mapped.status,
@@ -361,6 +393,14 @@ export function createCollabStore(
         display_name: patch.displayName ?? null,
         item_id: patch.itemId ?? null,
       });
+    },
+    setWorkTitleForItem(rootThreadId: string, itemId: string, step: string) {
+      const title = shortSliceTitle(step);
+      if (!title) return;
+      const rows = (byRoot.all(rootId(rootThreadId)) as CollabRow[]).filter(
+        (row) => row.item_id === itemId && row.role !== "verifier",
+      );
+      for (const row of rows) void applyWorkTitle(row.thread_id, step);
     },
 
     forget(threadId: string) {
@@ -412,7 +452,7 @@ export function createCollabStore(
           `Your call sign is ${displayName}. The new agent's canonical task name is ${taskName}.`,
           "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
         ].join("\n\n"),
-        title: displayName,
+        title: shortSliceTitle(args.step) || displayName,
         visibility: "hidden" as const,
         origin: "plugin",
       });
@@ -429,7 +469,7 @@ export function createCollabStore(
         last_verify_hash: null,
       });
       try {
-        await bb.sdk.threads.update({ threadId: child.id, title: displayName });
+        await applyWorkTitle(child.id, args.step);
       } catch {
         // Title from spawn is enough if update is unavailable.
       }
@@ -591,7 +631,7 @@ export function createCollabStore(
               ? { type: "reuse" as const, environmentId: parent.environmentId }
               : { type: "project-default" as const },
             prompt,
-            title: displayName,
+            title: shortSliceTitle(trimmed) || displayName,
             visibility: "hidden" as const,
             origin: "plugin" as const,
           };
@@ -603,7 +643,7 @@ export function createCollabStore(
                     sourceThreadId: threadId,
                     parentThreadId: threadId,
                     prompt,
-                    title: displayName,
+                    title: shortSliceTitle(trimmed) || displayName,
                     visibility: "hidden",
                     workspace: "reuse",
                   })
@@ -621,7 +661,7 @@ export function createCollabStore(
             last_verify_hash: null,
           });
           try {
-            await bb.sdk.threads.update({ threadId: child.id, title: displayName });
+            await applyWorkTitle(child.id, trimmed);
           } catch {
             // Title from spawn/fork is enough if update is unavailable.
           }

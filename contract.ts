@@ -34,6 +34,7 @@ export const goalAgentSchema = z.object({
   threadId: z.string(),
   taskName: z.string(),
   nickname: z.string(),
+  title: z.string().nullable(),
   itemId: z.string().nullable(),
   role: goalAgentRoleSchema,
   status: goalAgentStatusSchema,

@@ -10,7 +10,7 @@ import {
 import type { GoalAgent, GoalItem, GoalSnapshot } from "./contract";
 import { rpcContract } from "./contract";
 import { providerLabel, providerMarkSpec, providerMarkSvg } from "./lib/provider-marks";
-import { currentSliceTitle } from "./lib/titles";
+import { currentSliceTitle, shortSliceTitle } from "./lib/titles";
 
 const PLAN_ACTION_ID = "ultragoal-plan";
 
@@ -1168,10 +1168,23 @@ function agentStatusLabel(status: GoalAgent["status"]): string {
 }
 
 function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
-  return (
-    agents.find((agent) => agent.role === "worker" && isLiveAgent(agent)) ??
-    agents.find((agent) => isLiveAgent(agent))
+  const workers = agents.filter(
+    (agent) =>
+      agent.role !== "verifier" &&
+      agent.status !== "stopped" &&
+      agent.status !== "error",
   );
+  return (
+    workers.find((agent) => isLiveAgent(agent)) ??
+    workers.find((agent) => agent.status === "idle" || agent.status === "unknown") ??
+    workers[0]
+  );
+}
+
+function nowHeading(item: GoalItem, agent?: GoalAgent): string {
+  const generated = agent?.title?.trim();
+  if (generated && generated !== agent.nickname) return generated;
+  return shortSliceTitle(item.step) || agent?.nickname || currentSliceTitle(item.step);
 }
 
 function NowRow({
@@ -1198,10 +1211,10 @@ function NowRow({
         <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-foreground">
           <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
         </span>
-        <span className={`min-w-0 flex-1 text-[13px] leading-5 text-foreground ${open ? "whitespace-normal" : "truncate"}`}>
-          {currentSliceTitle(item.step)}
+        <span className="min-w-0 flex-1 truncate text-[13px] leading-5 text-foreground">
+          {nowHeading(item, lead)}
         </span>
-        {lead && !open ? (
+        {lead ? (
           <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
             {lead.nickname}
           </span>
@@ -1219,14 +1232,14 @@ function NowRow({
                 {lead.nickname}
                 <span className="ml-1.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
                   {lead.role === "verifier" ? "verify · " : ""}
-                  {agentStatusLabel(lead.status)}
+                  {lead.status === "idle" || lead.status === "unknown"
+                    ? "working"
+                    : agentStatusLabel(lead.status)}
                 </span>
               </div>
-              {lead.summary ? (
-                <div className="mt-0.5 line-clamp-3 text-[11px] leading-4 text-muted-foreground">
-                  {lead.summary}
-                </div>
-              ) : null}
+              <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                {nowHeading(item, lead)}
+              </div>
             </button>
           ) : (
             <div className="text-[11px] text-muted-foreground">Waiting for a worker.</div>
@@ -1325,7 +1338,7 @@ function ItemGroup({
                 ) : null}
               </span>
               <span
-                className={`min-w-0 flex-1 text-[13px] leading-snug ${
+                className={`min-w-0 flex-1 truncate text-[13px] leading-snug ${
                   completed
                     ? "text-muted-foreground line-through"
                     : active
@@ -1333,7 +1346,7 @@ function ItemGroup({
                       : "text-foreground/90"
                 }`}
               >
-                {currentSliceTitle(item.step)}
+                {shortSliceTitle(item.step) || currentSliceTitle(item.step)}
               </span>
             </li>
           );

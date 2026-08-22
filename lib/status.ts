@@ -30,7 +30,17 @@ export function formatGoalCard(goal: GoalSnapshot): string {
     }
   }
   if (goal.agents.length > 0) {
-    const live = goal.agents.filter((agent) => agent.status === "running" || agent.status === "starting").length;
+    const live = goal.agents.filter(
+      (agent) =>
+        agent.status === "running" ||
+        agent.status === "starting" ||
+        (agent.role === "worker" &&
+          agent.itemId &&
+          goal.items.some((item) => item.id === agent.itemId && item.status !== "completed") &&
+          agent.status !== "error" &&
+          agent.status !== "stopped" &&
+          agent.status !== "completed"),
+    ).length;
     lines.push(`Agents: ${live}/${goal.agents.length} live`);
     for (const agent of goal.agents) {
       lines.push(

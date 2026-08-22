@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Now shows the assigned worker even when Cursor reports the thread idle.
+- Now and worker thread titles use a short generated slice title, not the full prompt.
+
 ## 0.2.1
 
 - Register only `bb ultragoal` so a leftover `bb goal` command cannot block startup.
