@@ -343,7 +343,7 @@ export function createCollabStore(
       }
     }
 
-    const agents = await Promise.all(
+    const agents: GoalAgent[] = await Promise.all(
       all.map(async (row) => {
         const mapped = refreshIds.has(row.thread_id)
           ? await refreshStatus(row.thread_id)
@@ -360,7 +360,7 @@ export function createCollabStore(
           nickname,
           title,
           itemId: row.item_id,
-          role: row.role === "verifier" ? "verifier" : "worker",
+          role: row.role === "verifier" ? "verifier" as const : "worker" as const,
           status: mapped.status,
           summary: mapped.summary,
         };
@@ -376,7 +376,164 @@ export function createCollabStore(
       completed: 5,
       unknown: 6,
     };
+    const seenTasks = new Set(agents.map((agent) => agent.taskName));
+    for (const native of await listLiveRootTasks(root)) {
+      if (seenTasks.has(native.taskName)) continue;
+      seenTasks.add(native.taskName);
+      agents.push(native);
+    }
+
     return agents.sort((a, b) => rank[a.status] - rank[b.status] || a.nickname.localeCompare(b.nickname));
+  }
+
+  function isNativeTaskName(name: string): boolean {
+    return /^(task|spawn_agent)\b|subagent/i.test(name.trim());
+  }
+
+  function eventItem(event: unknown): { id: string; tool: string; description: string | null; itemType: string; status: string } | null {
+    if (!event || typeof event !== "object") return null;
+    const row = event as { type?: string; data?: Record<string, unknown> };
+    const data = row.data ?? {};
+    const item = (data.item ?? data) as Record<string, unknown>;
+    const id = String(item.id ?? data.id ?? "");
+    if (!id) return null;
+    const args =
+      item.arguments && typeof item.arguments === "object"
+        ? (item.arguments as Record<string, unknown>)
+        : null;
+    const description =
+      (typeof item.description === "string" && item.description) ||
+      (typeof item.prompt === "string" && item.prompt) ||
+      (typeof args?.description === "string" && args.description) ||
+      (typeof args?.prompt === "string" && args.prompt) ||
+      (typeof args?.title === "string" && args.title) ||
+      null;
+    return {
+      id,
+      tool: String(item.tool ?? item.taskType ?? item.name ?? item.toolName ?? data.tool ?? ""),
+      description,
+      itemType: String(item.type ?? ""),
+      status: String(item.status ?? item.taskStatus ?? ""),
+    };
+  }
+
+  function isLiveNativeItem(item: { tool: string; description: string | null; itemType: string; status: string }): boolean {
+    if (item.itemType === "backgroundTask") {
+      return item.status === "pending" || item.status === "running" || item.status === "";
+    }
+    return isNativeTaskName(item.tool) || isNativeTaskName(item.description ?? "");
+  }
+
+  function nativeAgent(
+    root: string,
+    callId: string,
+    description: string | null,
+    index: number,
+  ): GoalAgent {
+    const title = description ? shortSliceTitle(description) : null;
+    const nickname =
+      title && !isNativeTaskName(title) ? title : `Subagent ${index + 1}`;
+    const itemId = description?.match(/item_id=([a-z0-9_]+)/i)?.[1] ?? null;
+    return {
+      threadId: root,
+      taskName: `task/${callId}`,
+      nickname,
+      title,
+      itemId,
+      role: "worker",
+      status: "running",
+      summary: null,
+    };
+  }
+
+  async function listLiveRootTasks(root: string): Promise<GoalAgent[]> {
+    const merged: GoalAgent[] = [];
+    const seen = new Set<string>();
+    const add = (agent: GoalAgent) => {
+      if (seen.has(agent.taskName)) return;
+      seen.add(agent.taskName);
+      merged.push(agent);
+    };
+    try {
+      for (const agent of await listLiveFromEvents(root)) add(agent);
+    } catch {
+      // Timeline still covers providers that omit item/started for Task.
+    }
+    try {
+      for (const agent of await listLiveFromTimeline(root)) add(agent);
+    } catch {
+      // Events are enough when timeline rows omit Task calls.
+    }
+    return merged;
+  }
+
+  async function listLiveFromEvents(root: string): Promise<GoalAgent[]> {
+    const page = await bb.sdk.threads.events.list({
+      threadId: root,
+      types: ["item/started", "item/completed"],
+      limit: "200",
+      order: "desc",
+    });
+    const seen = new Set<string>();
+    const live: GoalAgent[] = [];
+    for (const event of page) {
+      const item = eventItem(event);
+      if (!item || seen.has(item.id)) continue;
+      seen.add(item.id);
+      if (event.type === "item/completed") continue;
+      if (!isLiveNativeItem(item)) continue;
+      live.push(nativeAgent(root, item.id, item.description, live.length));
+    }
+    return live;
+  }
+
+  async function listLiveFromTimeline(root: string): Promise<GoalAgent[]> {
+    const result = await bb.sdk.threads.timeline({
+      threadId: root,
+      includeNestedRows: "true",
+    });
+    const rows = result.rows ?? [];
+    const live: GoalAgent[] = [];
+    const walk = (list: unknown[]) => {
+      for (const row of list) {
+        if (!row || typeof row !== "object") continue;
+        const current = row as Record<string, unknown>;
+        const status = String(current.status ?? "");
+        const children = current.childRows;
+        if (Array.isArray(children)) walk(children);
+        if (current.kind !== "work") continue;
+        if (status && status !== "pending") continue;
+        const workKind = String(current.workKind ?? "");
+        const toolName = String(current.toolName ?? current.tool ?? "");
+        const description = typeof current.description === "string" ? current.description : null;
+        const taskStatus = String(current.taskStatus ?? "");
+        const liveWorkflow =
+          workKind === "workflow" && (status === "pending" || taskStatus === "pending" || taskStatus === "running");
+        if (
+          workKind !== "delegation" &&
+          !liveWorkflow &&
+          !isNativeTaskName(toolName) &&
+          !isNativeTaskName(description ?? "")
+        ) {
+          continue;
+        }
+        live.push(
+          nativeAgent(
+            root,
+            String(current.callId ?? current.id ?? `n${live.length}`),
+            description,
+            live.length,
+          ),
+        );
+      }
+    };
+    walk(rows);
+    for (const workflow of result.activeWorkflows ?? []) {
+      const status = String(workflow.taskStatus ?? workflow.status ?? "");
+      if (status && status !== "pending" && status !== "running") continue;
+      live.push(nativeAgent(root, workflow.itemId || workflow.id, workflow.description, live.length));
+    }
+    return live;
   }
 
   return {

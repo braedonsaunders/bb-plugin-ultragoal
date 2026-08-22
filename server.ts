@@ -259,16 +259,22 @@ export default function plugin(bb: BbPluginApi) {
     return snapshotOf(goal, items, goalIsBusy(goal.threadId, agents), agents);
   }
 
+  function isRootNativeAgent(rootThreadId: string, agent: GoalAgent): boolean {
+    return agent.threadId === rootThreadId && agent.taskName.startsWith("task/");
+  }
+
   function assignLiveAgents(threadId: string, agents: GoalAgent[]): GoalAgent[] {
     const open = items.list(threadId).filter((item) => item.status !== "completed");
     const next = agents.map((agent) => ({ ...agent }));
     const claimed = new Set<string>();
     const assignable = (agent: GoalAgent) =>
       agent.role !== "verifier" &&
+      !isRootNativeAgent(threadId, agent) &&
       agent.status !== "stopped" &&
       agent.status !== "completed" &&
       agent.status !== "error";
     for (const agent of next) {
+      if (isRootNativeAgent(threadId, agent)) continue;
       if (agent.itemId && open.some((item) => item.id === agent.itemId) && !claimed.has(agent.itemId)) {
         claimed.add(agent.itemId);
         const item = open.find((row) => row.id === agent.itemId);
@@ -300,6 +306,7 @@ export default function plugin(bb: BbPluginApi) {
       if (agent.status === "completed") return 3;
       return 4;
     };
+    const live: GoalAgent[] = [];
     const picked = new Map<string, GoalAgent>();
     const extra: GoalAgent[] = [];
     for (const agent of agents) {
@@ -307,11 +314,22 @@ export default function plugin(bb: BbPluginApi) {
         if (agent.status === "running" || agent.status === "starting") extra.push(agent);
         continue;
       }
-      if (!agent.itemId) continue;
+      if (agent.status === "running" || agent.status === "starting") {
+        live.push(agent);
+        continue;
+      }
+      if (!agent.itemId) {
+        if (agent.status !== "stopped" && agent.status !== "completed" && agent.status !== "error") {
+          extra.push(agent);
+        }
+        continue;
+      }
       const current = picked.get(agent.itemId);
       if (!current || rank(agent) < rank(current)) picked.set(agent.itemId, agent);
     }
-    return [...picked.values(), ...extra];
+    const liveItemIds = new Set(live.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)));
+    const rest = [...picked.values()].filter((agent) => !agent.itemId || !liveItemIds.has(agent.itemId));
+    return [...live, ...rest, ...extra];
   }
 
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {

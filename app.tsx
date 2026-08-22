@@ -516,9 +516,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       .map((agent) => agent.itemId)
       .filter((id): id is string => Boolean(id)),
   );
-  const nowItems = items.filter(
-    (item) => item.status === "in_progress" || liveItemIds.has(item.id),
-  );
+  const nowItems = nowDisplayItems(items, agents);
   const nextItems = items.filter(
     (item) => item.status === "pending" && !liveItemIds.has(item.id),
   );
@@ -1157,6 +1155,50 @@ function isLiveAgent(agent: GoalAgent): boolean {
   return agent.status === "running" || agent.status === "starting";
 }
 
+function isActiveWorker(agent: GoalAgent): boolean {
+  return (
+    agent.role !== "verifier" &&
+    agent.status !== "stopped" &&
+    agent.status !== "error" &&
+    agent.status !== "completed"
+  );
+}
+
+function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
+  const live = agents.filter(isActiveWorker);
+  const out: GoalItem[] = [];
+  const usedItems = new Set<string>();
+  const usedAgents = new Set<string>();
+  for (const agent of live) {
+    const key = `live:${agent.taskName}`;
+    if (usedAgents.has(key)) continue;
+    usedAgents.add(key);
+    const existing = agent.itemId ? items.find((item) => item.id === agent.itemId) : undefined;
+    if (existing && !usedItems.has(existing.id)) {
+      usedItems.add(existing.id);
+      out.push(existing);
+    } else {
+      out.push({
+        id: key,
+        step: agent.title || agent.nickname,
+        status: "in_progress",
+      });
+    }
+  }
+  let leftoverSlots = live.filter((agent) => !agent.itemId).length;
+  for (const item of items) {
+    if (item.status !== "in_progress" && !live.some((agent) => agent.itemId === item.id)) continue;
+    if (usedItems.has(item.id)) continue;
+    if (leftoverSlots > 0) {
+      leftoverSlots -= 1;
+      continue;
+    }
+    usedItems.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
+
 function agentStatusLabel(status: GoalAgent["status"]): string {
   if (status === "starting") return "starting";
   if (status === "running") return "running";
@@ -1197,7 +1239,9 @@ function NowRow({
   onOpenAgent: (agent: GoalAgent) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const crew = agents.filter((agent) => agent.itemId === item.id);
+  const crew = agents.filter(
+    (agent) => agent.itemId === item.id || item.id === `live:${agent.taskName}`,
+  );
   const lead = primaryAgent(crew);
   return (
     <li className="rounded-md">

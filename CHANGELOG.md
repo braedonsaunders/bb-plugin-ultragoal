@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Now lists every live Cursor Task / subagent on the root thread, not just one in-progress plan item.
+
 ## 0.2.2
 
 - Now shows the assigned worker even when Cursor reports the thread idle.
