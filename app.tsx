@@ -516,7 +516,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       .map((agent) => agent.itemId)
       .filter((id): id is string => Boolean(id)),
   );
-  const nowItems = nowDisplayItems(items, agents);
+  const nowItems = nowDisplayItems(items);
   const nextItems = items.filter(
     (item) => item.status === "pending" && !liveItemIds.has(item.id),
   );
@@ -1155,40 +1155,13 @@ function isLiveAgent(agent: GoalAgent): boolean {
   return agent.status === "running" || agent.status === "starting";
 }
 
-function isNowWorker(agent: GoalAgent, openItemIds: Set<string>): boolean {
-  if (agent.role === "verifier") return agent.status === "running" || agent.status === "starting";
-  if (agent.status === "running" || agent.status === "starting") return true;
-  if (agent.status === "stopped" || agent.status === "error" || agent.status === "completed") return false;
-  return Boolean(agent.itemId && openItemIds.has(agent.itemId));
-}
-
-function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
-  const openItemIds = new Set(
-    items.filter((item) => item.status === "in_progress").map((item) => item.id),
-  );
-  const live = agents.filter((agent) => isNowWorker(agent, openItemIds));
-  const loneOpen = items.filter((item) => item.status === "in_progress");
+function nowDisplayItems(items: GoalItem[]): GoalItem[] {
   const seen = new Set<string>();
   const out: GoalItem[] = [];
-  for (const agent of live) {
-    const key = `live:${agent.taskName}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const assigned =
-      agent.itemId && openItemIds.has(agent.itemId)
-        ? items.find((row) => row.id === agent.itemId)
-        : undefined;
-    const item =
-      assigned ??
-      (agent.taskName.startsWith("task/") && loneOpen.length === 1 ? loneOpen[0] : undefined);
-    out.push({
-      id: key,
-      step:
-        item?.step ||
-        (agent.title && agent.title !== "Subagent task" ? agent.title : "") ||
-        "Subagent task",
-      status: "in_progress",
-    });
+  for (const item of items) {
+    if (item.status !== "in_progress" || seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
   }
   return out;
 }
@@ -1203,6 +1176,10 @@ function agentStatusLabel(status: GoalAgent["status"]): string {
   return "unknown";
 }
 
+function isNamedWorker(agent: GoalAgent): boolean {
+  return !agent.taskName.startsWith("task/") && !/^Subagent \d+$/i.test(agent.nickname);
+}
+
 function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
   const workers = agents.filter(
     (agent) =>
@@ -1210,10 +1187,12 @@ function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
       agent.status !== "stopped" &&
       agent.status !== "error",
   );
+  const named = workers.filter(isNamedWorker);
+  const pool = named.length > 0 ? named : workers;
   return (
-    workers.find((agent) => isLiveAgent(agent)) ??
-    workers.find((agent) => agent.status === "idle" || agent.status === "unknown") ??
-    workers[0]
+    pool.find((agent) => isLiveAgent(agent)) ??
+    pool.find((agent) => agent.status === "idle" || agent.status === "unknown") ??
+    pool[0]
   );
 }
 
@@ -1221,7 +1200,7 @@ function nowHeading(item: GoalItem, agent?: GoalAgent): string {
   const task = shortSliceTitle(item.step) || agent?.title?.trim() || "";
   if (task && task !== agent?.nickname) return task;
   if (agent?.title && agent.title !== agent.nickname) return agent.title;
-  return task || "Subagent task";
+  return task || currentSliceTitle(item.step);
 }
 
 function NowRow({
@@ -1234,9 +1213,7 @@ function NowRow({
   onOpenAgent: (agent: GoalAgent) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const crew = agents.filter(
-    (agent) => agent.itemId === item.id || item.id === `live:${agent.taskName}`,
-  );
+  const crew = agents.filter((agent) => agent.itemId === item.id && isNamedWorker(agent));
   const lead = primaryAgent(crew);
   return (
     <li className="rounded-md">

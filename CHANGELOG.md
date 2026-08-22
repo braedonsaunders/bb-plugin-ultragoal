@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Now is one row per open plan item. In-thread Cursor Task calls no longer appear as extra Now workers.
+
 ## 0.2.5
 
 - Now ignores leftover Cursor timeline Task rows. A Task only stays in Now when its thread event is still open.
