@@ -516,7 +516,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       .map((agent) => agent.itemId)
       .filter((id): id is string => Boolean(id)),
   );
-  const nowItems = nowDisplayItems(items);
+  const nowItems = nowDisplayItems(items, agents);
   const nextItems = items.filter(
     (item) => item.status === "pending" && !liveItemIds.has(item.id),
   );
@@ -1155,11 +1155,17 @@ function isLiveAgent(agent: GoalAgent): boolean {
   return agent.status === "running" || agent.status === "starting";
 }
 
-function nowDisplayItems(items: GoalItem[]): GoalItem[] {
+function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
+  const named = agents.filter(isNamedWorker);
+  const assignedIds = new Set(
+    named.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)),
+  );
+  const open = items.filter((item) => item.status === "in_progress");
+  const rows = assignedIds.size > 0 ? open.filter((item) => assignedIds.has(item.id)) : open;
   const seen = new Set<string>();
   const out: GoalItem[] = [];
-  for (const item of items) {
-    if (item.status !== "in_progress" || seen.has(item.id)) continue;
+  for (const item of rows) {
+    if (seen.has(item.id)) continue;
     seen.add(item.id);
     out.push(item);
   }

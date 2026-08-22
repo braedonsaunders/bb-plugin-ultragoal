@@ -13,7 +13,7 @@ const SPAWN_AGENT_DESCRIPTION = `
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 This is the default way UltraGoal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
-Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal so they nest under that Now task. One worker per item_id — do not spawn a second worker onto a slice that already has one.
+Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal when that slice is still open and unassigned. If the slice is taken or finished, UltraGoal opens a new Now row from your message. Do not use the Cursor Task tool for UltraGoal work.
 When verification is on, a separate verifier is launched after each worker returns. Do not mark that slice complete until the verifier reports VERIFY_PASS.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
@@ -77,6 +77,10 @@ export function createCollabStore(
     onChange?: (rootThreadId: string) => void;
     nextItemId?: (rootThreadId: string) => string | null;
     retitleItem?: (rootThreadId: string, itemId: string, message: string) => void;
+    claimItem?: (
+      rootThreadId: string,
+      args: { itemId: string | null; message: string; workerThreadId?: string },
+    ) => string | null;
   },
 ) {
   const db = bb.storage.database();
@@ -386,6 +390,11 @@ export function createCollabStore(
     threadIdsForRoot(rootThreadId: string): string[] {
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => row.thread_id);
     },
+    workersOnItem(rootThreadId: string, itemId: string): string[] {
+      return (byRoot.all(rootId(rootThreadId)) as CollabRow[])
+        .filter((row) => row.role !== "verifier" && row.item_id === itemId)
+        .map((row) => row.thread_id);
+    },
     listForRoot,
     setMeta(threadId: string, patch: { displayName?: string | null; itemId?: string | null }) {
       setMeta.run({
@@ -595,13 +604,17 @@ export function createCollabStore(
           const slug = /^[a-z0-9_]+$/.test(task_name) ? task_name : slugFromName(displayName);
           const taskName = `${parentPath === "/root" ? "/root" : parentPath}/${slug}`;
           const rootThreadId = rootId(threadId);
-          const itemId = item_id?.trim() || hooks?.nextItemId?.(rootThreadId) || null;
+          const requested = item_id?.trim() || hooks?.nextItemId?.(rootThreadId) || null;
+          const itemId =
+            role === "verifier"
+              ? requested
+              : hooks?.claimItem?.(rootThreadId, { itemId: requested, message: trimmed }) ?? requested;
           if (itemId && itemHasWorker(rootThreadId, itemId) && role !== "verifier") {
             return {
               content: [
                 {
                   type: "text",
-                  text: `Slice ${itemId} already has a worker. Spawn the next unassigned item_id instead.`,
+                  text: `Slice ${itemId} already has a worker. Spawn again so UltraGoal can open a new Now row.`,
                 },
               ],
               isError: true,
@@ -732,8 +745,23 @@ export function createCollabStore(
             mode: "auto",
             input: [{ type: "text", text: trimmed }],
           });
-          if (agent.item_id) hooks?.retitleItem?.(rootId(threadId), agent.item_id, trimmed);
-          hooks?.onChange?.(rootId(threadId));
+          const rootThreadId = rootId(threadId);
+          const itemId =
+            hooks?.claimItem?.(rootThreadId, {
+              itemId: agent.item_id,
+              message: trimmed,
+              workerThreadId: agent.thread_id,
+            }) ?? agent.item_id;
+          if (itemId && itemId !== agent.item_id) {
+            setMeta.run({
+              thread_id: agent.thread_id,
+              display_name: agent.display_name,
+              item_id: itemId,
+            });
+          } else if (itemId) {
+            hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
+          }
+          hooks?.onChange?.(rootThreadId);
           return "";
         },
       });

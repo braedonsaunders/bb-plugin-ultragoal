@@ -15,6 +15,21 @@ import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js"
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
+
+function sliceTitleFromMessage(message: string): string {
+  const line =
+    message
+      .trim()
+      .split(/\n/)[0]
+      ?.replace(/^#+\s*/, "")
+      .trim() ?? "";
+  const title = currentSliceTitle(line);
+  if (title.length < 8 || title.length > 180) return "";
+  if (/^(you are|parent goal|assigned slice|complete only|the new agent's)/i.test(title)) {
+    return "";
+  }
+  return title;
+}
 import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
 import {
   createGoalStore,
@@ -152,24 +167,37 @@ export default function plugin(bb: BbPluginApi) {
   const inflight = new Set<string>();
   const running = new Map<string, boolean>();
   let publishFresh: (threadId: string) => Promise<void> = async () => {};
+  let workersOnItem = (_rootThreadId: string, _itemId: string): string[] => [];
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
       void publishFresh(rootThreadId);
     },
     retitleItem(rootThreadId, itemId, message) {
-      const line =
-        message
-          .trim()
-          .split(/\n/)[0]
-          ?.replace(/^#+\s*/, "")
-          .trim() ?? "";
-      const title = currentSliceTitle(line);
-      if (title.length < 8 || title.length > 180) return;
-      if (/^(you are|parent goal|assigned slice|complete only|the new agent's)/i.test(title)) {
-        return;
-      }
+      const title = sliceTitleFromMessage(message);
+      if (!title) return;
       items.updateStep(rootThreadId, itemId, title);
+      items.setStatus(rootThreadId, itemId, "in_progress");
       collab.setWorkTitleForItem(rootThreadId, itemId, title);
+    },
+    claimItem(rootThreadId, { itemId, message, workerThreadId }) {
+      const title = sliceTitleFromMessage(message);
+      if (!title) return itemId;
+      const preferred = itemId ? items.list(rootThreadId).find((item) => item.id === itemId) : undefined;
+      const occupants = itemId ? workersOnItem(rootThreadId, itemId) : [];
+      const exclusive =
+        Boolean(workerThreadId) &&
+        occupants.length > 0 &&
+        occupants.every((id) => id === workerThreadId);
+      const free = occupants.length === 0;
+      if (preferred && preferred.status !== "completed" && (free || exclusive)) {
+        items.updateStep(rootThreadId, preferred.id, title);
+        items.setStatus(rootThreadId, preferred.id, "in_progress");
+        collab.setWorkTitleForItem(rootThreadId, preferred.id, title);
+        return preferred.id;
+      }
+      const created = items.add(rootThreadId, title, "in_progress");
+      if (created) collab.setWorkTitleForItem(rootThreadId, created.id, title);
+      return created?.id ?? itemId;
     },
     nextItemId(rootThreadId) {
       const used = new Set(
@@ -185,6 +213,7 @@ export default function plugin(bb: BbPluginApi) {
       );
     },
   });
+  workersOnItem = (rootThreadId, itemId) => collab.workersOnItem(rootThreadId, itemId);
 
   function publish(threadId: string, goal: GoalSnapshot | null): void {
     bb.realtime.publish("ultragoal", { threadId, goal });
@@ -1088,7 +1117,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
             liveAgents.length > 0
               ? `${liveAgents.length} subagent(s) are live. Wait or follow up; do not redo their slices on the root.`
               : "No subagents are live. Spawn one worker per in-progress slice before doing the work yourself.",
-            "Call spawn_agent for each in-progress slice in this turn. Give each a humorous display_name and the item_id from get_goal.",
+            "Call spawn_agent or followup_task for each in-progress slice in this turn. Give each a humorous display_name. Do not use the Cursor Task tool for UltraGoal work — that does not update Now.",
             view(goal).settings.verifyEnabled
               ? `Verification is on. After a worker returns, a ${view(goal).settings.verifyProvider}/${view(goal).settings.verifyModel} verifier is launched automatically. Do not mark that slice complete until VERIFY_PASS. On VERIFY_FAIL, spawn a fix worker.`
               : "Verification is off for this UltraGoal.",

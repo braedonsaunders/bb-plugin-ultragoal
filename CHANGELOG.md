@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7
+
+- spawn_agent and followup_task open a new Now row when the old slice is taken or finished, so the pane tracks the current leftovers.
+
 ## 0.2.6
 
 - Now is one row per open plan item. In-thread Cursor Task calls no longer appear as extra Now workers.
