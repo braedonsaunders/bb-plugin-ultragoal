@@ -174,13 +174,17 @@ export default function plugin(bb: BbPluginApi) {
     bb.realtime.publish("goal", { threadId, goal });
   }
 
+  function crewIsLive(agents: readonly GoalAgent[]): boolean {
+    return agents.some((agent) => agent.status === "running" || agent.status === "starting");
+  }
+
+  function goalIsBusy(threadId: string, agents = agentCache.get(threadId) ?? []): boolean {
+    return running.get(threadId) === true || crewIsLive(agents);
+  }
+
   function view(goal: StoredGoal): GoalSnapshot {
-    return snapshotOf(
-      goal,
-      items,
-      running.get(goal.threadId) === true,
-      agentCache.get(goal.threadId) ?? [],
-    );
+    const agents = agentCache.get(goal.threadId) ?? [];
+    return snapshotOf(goal, items, goalIsBusy(goal.threadId, agents), agents);
   }
 
   function assignLiveAgents(threadId: string, agents: GoalAgent[]): GoalAgent[] {
@@ -227,7 +231,15 @@ export default function plugin(bb: BbPluginApi) {
         }`,
       );
     }
-    return view(goal);
+    const latest = store.get(goal.threadId) ?? goal;
+    if (
+      (latest.status === "active" || latest.status === "budget_limited") &&
+      goalIsBusy(latest.threadId)
+    ) {
+      const accounted = await accountGoalProgress(bb, store, latest.threadId, { busy: true });
+      return view(accounted ?? latest);
+    }
+    return view(latest);
   }
 
   publishFresh = async (threadId: string) => {
@@ -237,6 +249,121 @@ export default function plugin(bb: BbPluginApi) {
   };
 
   const verifying = new Set<string>();
+  const staffing = new Set<string>();
+  const MAX_PARALLEL_WORKERS = 4;
+
+  function occupiesSlice(status: GoalAgent["status"]): boolean {
+    return status === "running" || status === "starting";
+  }
+
+  function parseVerifyVerdict(text: string | null | undefined): "pass" | "fail" | null {
+    if (!text) return null;
+    if (/\bVERIFY_PASS\b/i.test(text)) return "pass";
+    if (/\bVERIFY_FAIL\b/i.test(text)) return "fail";
+    return null;
+  }
+
+  async function threadOutput(threadId: string): Promise<string> {
+    try {
+      return (await bb.sdk.threads.output({ threadId })).output?.trim() ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  async function settleFinishedSlices(threadId: string): Promise<boolean> {
+    const goal = store.get(threadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return false;
+    const snap = await viewFresh(goal);
+    let changed = false;
+    for (const item of snap.items.filter((row) => row.status !== "completed")) {
+      const crew = snap.agents.filter((agent) => agent.itemId === item.id);
+      if (crew.some((agent) => occupiesSlice(agent.status))) continue;
+      const finished = crew.filter(
+        (agent) => agent.role === "worker" && agent.status === "completed",
+      );
+      if (finished.length === 0) continue;
+      if (snap.settings.verifyEnabled) {
+        const verifiers = crew.filter((agent) => agent.role === "verifier");
+        if (verifiers.some((agent) => occupiesSlice(agent.status))) continue;
+        let verdict: "pass" | "fail" | null = null;
+        for (const verifier of verifiers) {
+          verdict = parseVerifyVerdict(await threadOutput(verifier.threadId)) ?? parseVerifyVerdict(verifier.summary);
+          if (verdict) break;
+        }
+        if (!verdict) {
+          await maybeVerifyWorker(finished[0].threadId);
+          continue;
+        }
+        if (verdict === "fail") continue;
+      }
+      items.setStatus(threadId, item.id, "completed");
+      changed = true;
+      bb.log.info(`Goal slice completed: ${item.id} on ${threadId}`);
+    }
+    if (changed) {
+      const latest = store.get(threadId);
+      if (latest) publish(threadId, await viewFresh(latest));
+    }
+    return changed;
+  }
+
+  async function ensureCrew(threadId: string): Promise<void> {
+    const goal = store.get(threadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    if (staffing.has(threadId)) return;
+    staffing.add(threadId);
+    try {
+      await settleFinishedSlices(threadId);
+      const snap = await viewFresh(store.get(threadId) ?? goal);
+      const open = snap.items.filter((item) => item.status !== "completed");
+      if (open.length === 0) return;
+      for (const agent of snap.agents.filter((row) => row.role === "worker")) {
+        if (agent.status !== "error" && agent.status !== "unknown") continue;
+        collab.forget(agent.threadId);
+        try {
+          await bb.sdk.threads.stop({ threadId: agent.threadId });
+        } catch {
+          // Failed forks can be dropped from the Goal store even if stop is unavailable.
+        }
+      }
+      const latest = await viewFresh(store.get(threadId) ?? goal);
+      const workers = latest.agents.filter((agent) => agent.role === "worker");
+      const staffed = new Set(
+        workers
+          .filter((agent) => occupiesSlice(agent.status) && agent.itemId)
+          .map((agent) => agent.itemId as string),
+      );
+      const live = workers.filter(
+        (agent) => agent.status === "running" || agent.status === "starting",
+      ).length;
+      const slots = Math.max(0, MAX_PARALLEL_WORKERS - live);
+      if (slots === 0) return;
+      const needs = open.filter((item) => !staffed.has(item.id)).slice(0, slots);
+      for (const item of needs) {
+        if (item.status === "pending") items.setStatus(threadId, item.id, "in_progress");
+        const spawned = await collab.spawnWorker({
+          rootThreadId: threadId,
+          itemId: item.id,
+          step: item.step,
+          objective: goal.objective,
+        });
+        if (spawned) {
+          staffed.add(item.id);
+          bb.log.info(`Goal worker ${spawned.nickname} assigned to ${item.id} on ${threadId}`);
+        }
+      }
+      if (needs.length > 0) await viewFresh(store.get(threadId) ?? goal);
+    } catch (error) {
+      bb.log.warn(
+        `Could not staff Goal crew on ${threadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      staffing.delete(threadId);
+    }
+  }
 
   async function maybeVerifyWorker(workerThreadId: string): Promise<void> {
     const row = collab.rowOf(workerThreadId);
@@ -308,8 +435,9 @@ export default function plugin(bb: BbPluginApi) {
     const goal = store.get(rootId);
     if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
     if (!view(goal).settings.autoContinue) return;
+    await ensureCrew(rootId);
     if (await threadIsRunning(bb, rootId)) return;
-    await continueIfIdle(rootId, goal);
+    await continueIfIdle(rootId, store.get(rootId) ?? goal);
   }
 
   async function refreshRunning(threadId: string): Promise<boolean> {
@@ -349,11 +477,31 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  async function stopCrew(rootId: string): Promise<void> {
+    const agents = agentCache.get(rootId) ?? [];
+    await Promise.all(
+      agents
+        .filter((agent) => agent.status === "running" || agent.status === "starting")
+        .map(async (agent) => {
+          try {
+            await bb.sdk.threads.stop({ threadId: agent.threadId });
+          } catch (error) {
+            bb.log.warn(
+              `Could not stop Goal worker ${agent.threadId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }),
+    );
+  }
+
   async function pauseGoal(threadId: string, reason: string): Promise<StoredGoal | null> {
     const goal = applyStatus(threadId, "paused", reason);
     await stopThread(threadId);
+    await stopCrew(threadId);
     const latest = store.get(threadId);
-    if (latest) publish(threadId, view(latest));
+    if (latest) publish(threadId, await viewFresh(latest));
     return latest ?? goal;
   }
 
@@ -371,6 +519,7 @@ export default function plugin(bb: BbPluginApi) {
     });
     const current = store.get(threadId);
     if (current) await seedEmptyPlan(threadId, current);
+    await ensureCrew(threadId);
     const latest = store.get(threadId);
     if (latest && options?.start !== false) {
       await refreshRunning(threadId);
@@ -546,7 +695,9 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   async function continueIfIdle(threadId: string, goal: StoredGoal): Promise<void> {
-    const snap = await viewFresh(goal);
+    await ensureCrew(threadId);
+    const latestGoal = store.get(threadId) ?? goal;
+    const snap = await viewFresh(latestGoal);
     const text = isBudgetExhausted(snap) ? budgetLimitPrompt(snap) : continuationPrompt(snap);
     const sent = await sendSteering(threadId, text, "start");
     if (!sent) return;
@@ -555,7 +706,7 @@ export default function plugin(bb: BbPluginApi) {
       lastContinueWasAutomatic: true,
     });
     const latest = store.get(threadId);
-    if (latest) publish(threadId, view(latest));
+    if (latest) publish(threadId, await viewFresh(latest));
     bb.log.info(`Goal continue sent on ${threadId}`);
   }
 
@@ -618,16 +769,17 @@ export default function plugin(bb: BbPluginApi) {
       await refreshRunning(threadId);
       const goal = (await accountGoalProgress(bb, store, threadId)) ?? store.get(threadId);
       if (goal) await seedEmptyPlan(threadId, goal);
+      await ensureCrew(threadId);
       const latest = store.get(threadId);
       return { goal: latest ? await viewFresh(latest) : null };
     },
     async pause({ threadId }) {
       const goal = await pauseGoal(threadId, "Paused from the composer.");
-      return { goal: goal ? view(goal) : null };
+      return { goal: goal ? await viewFresh(goal) : null };
     },
     async resume({ threadId }) {
       const goal = await resumeGoal(threadId);
-      return { goal: goal ? view(goal) : null };
+      return { goal: goal ? await viewFresh(goal) : null };
     },
     clear({ threadId }) {
       items.clear(threadId);
@@ -685,7 +837,6 @@ export default function plugin(bb: BbPluginApi) {
         const goal = store.get(threadId);
         if (!goal) continue;
         const snap = await viewFresh(goal);
-        if (snap.agents.length === 0) continue;
         crews.push({ threadId, items: snap.items, agents: snap.agents });
       }
       return { crews };
@@ -917,6 +1068,7 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
     const parentRoot = child?.root_thread_id;
     if (parentRoot && parentRoot !== thread.id && !thread.hasPendingInteraction) {
       if (child.role !== "verifier") await maybeVerifyWorker(thread.id);
+      await settleFinishedSlices(parentRoot);
       void publishFresh(parentRoot);
       void nudgeRoot(parentRoot);
     }
@@ -942,8 +1094,13 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
     if (!goal) return;
     store.update(thread.id, { lastProgressAt: Date.now() });
     goal = store.get(thread.id) ?? goal;
-    publish(thread.id, await viewFresh(goal));
+    const snap = await viewFresh(goal);
+    publish(thread.id, snap);
     if (goal.status !== "active" && goal.status !== "budget_limited") return;
+    if (crewIsLive(snap.agents)) {
+      bb.log.info(`Skipping Goal continue on ${thread.id}: crew still running`);
+      return;
+    }
 
     if (isBudgetExhausted(view(goal)) && goal.status === "active") {
       goal = applyStatus(thread.id, "budget_limited", "Reached the token budget.") ?? goal;

@@ -105,6 +105,7 @@ export function createCollabStore(
   const setHash = db.prepare(
     "UPDATE collab_agents SET last_verify_hash = @last_verify_hash WHERE thread_id = @thread_id",
   );
+  const removeRow = db.prepare("DELETE FROM collab_agents WHERE thread_id = ?");
 
   function rowOf(threadId: string): CollabRow | null {
     return (byThread.get(threadId) as CollabRow | undefined) ?? null;
@@ -332,12 +333,75 @@ export function createCollabStore(
       });
     },
 
+    forget(threadId: string) {
+      removeRow.run(threadId);
+    },
+
     setVerifyHash(threadId: string, hash: string) {
       setHash.run({ thread_id: threadId, last_verify_hash: hash });
     },
 
     verifiersFor(sourceThreadId: string): CollabRow[] {
       return bySource.all(sourceThreadId) as CollabRow[];
+    },
+
+    async spawnWorker(args: {
+      rootThreadId: string;
+      itemId: string | null;
+      step: string;
+      objective: string;
+    }): Promise<{ threadId: string; nickname: string; itemId: string | null } | null> {
+      const root = await bb.sdk.threads.get({ threadId: args.rootThreadId });
+      if (!root.projectId) {
+        throw new Error("Goal root thread has no project; cannot spawn a worker");
+      }
+      const usedNames = (byRoot.all(args.rootThreadId) as CollabRow[])
+        .map((row) => row.display_name)
+        .filter((name): name is string => Boolean(name));
+      const displayName = nextHumorousName(usedNames);
+      const slug = slugFromName(displayName);
+      const taskName = `/root/${slug}`;
+      const model = "model" in root && typeof root.model === "string" ? root.model : undefined;
+      const child = await bb.sdk.threads.spawn({
+        projectId: root.projectId,
+        parentThreadId: args.rootThreadId,
+        providerId: root.providerId,
+        ...(model ? { model } : {}),
+        environment: root.environmentId
+          ? { type: "reuse" as const, environmentId: root.environmentId }
+          : { type: "project-default" as const },
+        prompt: [
+          `Parent Goal: ${args.objective}`,
+          args.itemId
+            ? `Assigned slice (item_id=${args.itemId}): ${args.step}`
+            : `Assigned slice: ${args.step}`,
+          "Complete only this slice. Inspect the worktree and implement the fix. Report evidence when done.",
+          `Your call sign is ${displayName}. The new agent's canonical task name is ${taskName}.`,
+          "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
+        ].join("\n\n"),
+        title: displayName,
+        visibility: "hidden" as const,
+        origin: "plugin",
+      });
+      insert.run({
+        thread_id: child.id,
+        root_thread_id: args.rootThreadId,
+        parent_thread_id: args.rootThreadId,
+        task_name: taskName,
+        created_at: Date.now(),
+        display_name: displayName,
+        item_id: args.itemId,
+        role: "worker",
+        source_thread_id: null,
+        last_verify_hash: null,
+      });
+      try {
+        await bb.sdk.threads.update({ threadId: child.id, title: displayName });
+      } catch {
+        // Title from spawn is enough if update is unavailable.
+      }
+      hooks?.onChange?.(args.rootThreadId);
+      return { threadId: child.id, nickname: displayName, itemId: args.itemId };
     },
 
     async spawnVerifier(args: {
@@ -375,7 +439,7 @@ export function createCollabStore(
         ].join("\n\n"),
         title: displayName,
         visibility: "hidden" as const,
-        startedOnBehalfOf: { initiator: "system" as const, senderThreadId: args.rootThreadId },
+        origin: "plugin",
       });
       insert.run({
         thread_id: child.id,
@@ -485,7 +549,7 @@ export function createCollabStore(
             prompt,
             title: displayName,
             visibility: "hidden" as const,
-            startedOnBehalfOf: { initiator: "agent" as const, senderThreadId: threadId },
+            origin: "plugin" as const,
           };
           const child =
             fork_turns === "none"

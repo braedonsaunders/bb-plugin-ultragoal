@@ -7,7 +7,7 @@ import {
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
-import type { GoalAgent, GoalAgentStatus, GoalItem, GoalItemStatus, GoalSnapshot } from "./contract";
+import type { GoalAgent, GoalItem, GoalSnapshot } from "./contract";
 import { rpcContract } from "./contract";
 import { providerLabel, providerMarkSpec, providerMarkSvg } from "./lib/provider-marks";
 
@@ -208,103 +208,60 @@ function SidebarProviderIcons() {
   return null;
 }
 
-function injectGoalCrews(
-  crews: Array<{ threadId: string; items: GoalItem[]; agents: GoalAgent[] }>,
+const GOAL_MARK_STYLE =
+  "display:inline-flex;align-items:center;flex:0 0 auto;height:14px;padding:0 4px;border:1px solid currentColor;border-radius:3px;font-size:9px;font-weight:600;letter-spacing:.06em;line-height:1;text-transform:uppercase;opacity:.55";
+
+function injectGoalSidebarMarks(
+  crews: Array<{ threadId: string; agents: GoalAgent[] }>,
 ) {
-  const wanted = new Set(crews.map((crew) => crew.threadId));
+  const goalIds = new Set(crews.map((crew) => crew.threadId));
+  const workerIds = new Set(crews.flatMap((crew) => crew.agents.map((agent) => agent.threadId)));
+
   for (const stale of Array.from(document.querySelectorAll("[data-goal-crew]"))) {
-    const id = (stale as HTMLElement).dataset.goalCrew;
-    if (!id || !wanted.has(id)) stale.remove();
+    stale.remove();
   }
-  for (const crew of crews) {
-    const overlay = document.querySelector(`[data-sidebar-thread-id="${crew.threadId}"]`);
-    const row = overlay?.parentElement;
-    if (!row?.parentElement) continue;
-    let block = row.parentElement.querySelector(
-      `[data-goal-crew="${crew.threadId}"]`,
-    ) as HTMLElement | null;
-    if (!block) {
-      block = document.createElement("div");
-      block.dataset.goalCrew = crew.threadId;
-      block.style.cssText =
-        "padding:2px 10px 8px 28px;display:flex;flex-direction:column;gap:6px;min-width:0";
-      row.after(block);
-    }
-    const live = crew.agents.filter(
-      (agent) => agent.status === "running" || agent.status === "starting",
-    );
-    if (live.length === 0) {
-      block.remove();
+
+  for (const target of Array.from(document.querySelectorAll("[data-sidebar-thread-id]"))) {
+    const id = target.getAttribute("data-sidebar-thread-id");
+    const row = target.parentElement as HTMLElement | null;
+    if (!id || !row) continue;
+
+    if (workerIds.has(id)) {
+      row.dataset.goalWorkerHidden = "1";
+      row.style.display = "none";
       continue;
     }
-    const byItem = new Map<string, GoalAgent[]>();
-    const loose: GoalAgent[] = [];
-    for (const agent of live) {
-      if (agent.itemId && crew.items.some((item) => item.id === agent.itemId)) {
-        const list = byItem.get(agent.itemId) ?? [];
-        list.push(agent);
-        byItem.set(agent.itemId, list);
-      } else {
-        loose.push(agent);
-      }
+    if (row.dataset.goalWorkerHidden === "1") {
+      delete row.dataset.goalWorkerHidden;
+      row.style.display = "";
     }
-    const parts: string[] = [];
-    for (const item of crew.items) {
-      const assigned = byItem.get(item.id);
-      if (!assigned?.length) continue;
-      parts.push(
-        `<div style="min-width:0">
-          <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;opacity:.65;margin-bottom:2px">${escapeHtml(item.step)}</div>
-          ${assigned
-            .map(
-              (agent) =>
-                `<button type="button" data-goal-crew-open="${escapeHtml(agent.threadId)}" style="display:flex;align-items:center;gap:6px;width:100%;border:0;background:transparent;color:inherit;padding:2px 0;cursor:pointer;text-align:left">
-                  <span style="width:6px;height:6px;border-radius:99px;background:currentColor;flex:0 0 auto"></span>
-                  <span style="font-size:12px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(agent.nickname)}</span>
-                </button>`,
-            )
-            .join("")}
-        </div>`,
-      );
+
+    const container = row.querySelector(":scope > span") as HTMLElement | null;
+    if (!container) continue;
+    let mark = container.querySelector("[data-goal-mark]") as HTMLElement | null;
+    if (!goalIds.has(id)) {
+      mark?.remove();
+      continue;
     }
-    if (loose.length) {
-      parts.push(
-        `<div style="min-width:0">
-          ${loose
-            .map(
-              (agent) =>
-                `<button type="button" data-goal-crew-open="${escapeHtml(agent.threadId)}" style="display:flex;align-items:center;gap:6px;width:100%;border:0;background:transparent;color:inherit;padding:2px 0;cursor:pointer;text-align:left">
-                  <span style="width:6px;height:6px;border-radius:99px;background:currentColor;flex:0 0 auto"></span>
-                  <span style="font-size:12px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(agent.nickname)}</span>
-                </button>`,
-            )
-            .join("")}
-        </div>`,
-      );
+    if (!mark) {
+      mark = document.createElement("span");
+      mark.dataset.goalMark = "1";
+      mark.style.cssText = GOAL_MARK_STYLE;
+      mark.textContent = "Goal";
+      mark.title = "Goal thread";
+      container.appendChild(mark);
     }
-    block.innerHTML = parts.join("");
   }
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function SidebarGoalCrew() {
+function SidebarGoalMarks() {
   const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
-  const [crews, setCrews] = useState<
-    Array<{ threadId: string; items: GoalItem[]; agents: GoalAgent[] }>
-  >([]);
+  const [crews, setCrews] = useState<Array<{ threadId: string; agents: GoalAgent[] }>>([]);
 
   const load = useCallback(async () => {
     try {
       const next = await rpc.call("listCrews", {});
-      setCrews(next.crews);
+      setCrews(next.crews.map((crew) => ({ threadId: crew.threadId, agents: crew.agents })));
     } catch {
       setCrews([]);
     }
@@ -331,18 +288,7 @@ function SidebarGoalCrew() {
       if (disposed) return;
       observer.disconnect();
       try {
-        injectGoalCrews(crews);
-        for (const button of Array.from(document.querySelectorAll("[data-goal-crew-open]"))) {
-          const el = button as HTMLButtonElement;
-          if (el.dataset.goalCrewBound === "1") continue;
-          el.dataset.goalCrewBound = "1";
-          el.addEventListener("click", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const id = el.dataset.goalCrewOpen;
-            if (id) navigate.toThread(id);
-          });
-        }
+        injectGoalSidebarMarks(crews);
       } finally {
         if (!disposed) observer.observe(document.body, options);
       }
@@ -357,7 +303,7 @@ function SidebarGoalCrew() {
       if (frame) window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [crews, navigate]);
+  }, [crews]);
 
   return null;
 }
@@ -427,7 +373,7 @@ function GoalChrome() {
   return (
     <>
       <GoalPaneOpener />
-      <SidebarGoalCrew />
+      <SidebarGoalMarks />
     </>
   );
 }
@@ -444,12 +390,6 @@ function GoalPaneOpener() {
   }, [navigate, threadId, goal?.status, goal?.objective]);
 
   return null;
-}
-
-function nextStatus(status: GoalItemStatus): GoalItemStatus {
-  if (status === "completed") return "pending";
-  if (status === "pending") return "in_progress";
-  return "completed";
 }
 
 function GoalPlanPanel({ threadId }: { threadId: string }) {
@@ -495,29 +435,28 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   const items = goal?.items ?? [];
   const agents = goal?.agents ?? [];
   const doneItems = items.filter((item) => item.status === "completed");
-  const assignedItemIds = new Set(
-    agents.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)),
+  const liveAgents = agents.filter((agent) => agent.status === "running" || agent.status === "starting");
+  const liveItemIds = new Set(
+    liveAgents.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)),
   );
   const nowItems = items.filter(
-    (item) => item.status === "in_progress" || assignedItemIds.has(item.id),
+    (item) => item.status !== "completed" && liveItemIds.has(item.id),
   );
   const nextItems = items.filter(
-    (item) => item.status === "pending" && !assignedItemIds.has(item.id),
+    (item) => item.status !== "completed" && !liveItemIds.has(item.id),
   );
-  const liveAgents = agents.filter((agent) => agent.status === "running" || agent.status === "starting");
   const done = doneItems.length;
   const elapsed = goal ? liveSeconds(goal, now) : 0;
   const hours = Math.max(elapsed / 3600, 1 / 60);
   const showResume = Boolean(goal && goal.status !== "complete" && !goal.agentRunning);
-  const showPause = goal?.status === "active" || goal?.status === "budget_limited";
+  const showPause = Boolean(
+    goal &&
+      (goal.status === "active" || goal.status === "budget_limited") &&
+      goal.agentRunning,
+  );
 
   const apply = (next: GoalSnapshot | null) => {
     setGoal(next);
-  };
-
-  const setStatus = async (item: GoalItem, status: GoalItemStatus) => {
-    const next = await rpc.call("setItemStatus", { threadId, itemId: item.id, status });
-    apply(next.goal);
   };
 
   const add = async () => {
@@ -719,11 +658,9 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
             value={items.length > 0 ? `${done}/${items.length}` : "—"}
             hint={
               items.length > 0
-                ? `${nowItems.length} now · ${nextItems.length} next${
-                    agents.length > 0 ? ` · ${liveAgents.length} agents` : ""
-                  }`
-                : agents.length > 0
-                  ? `${liveAgents.length}/${agents.length} agents`
+                ? `${nowItems.length} now · ${nextItems.length} next`
+                : liveAgents.length > 0
+                  ? `${liveAgents.length} live`
                   : "awaiting plan"
             }
           />
@@ -781,7 +718,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
         {items.length === 0 && agents.length === 0 ? (
           <div className="px-2 py-8 text-sm leading-relaxed text-muted-foreground">
             No requirements yet. Resume the Goal and the agent will fill this list with
-            update_plan, or add one below.
+            update_plan.
           </div>
         ) : (
           <>
@@ -790,10 +727,6 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
               agents={agents}
               collapsed={collapsed.now}
               onToggleCollapsed={() => toggleCollapsed("now")}
-              onToggle={(item) => void setStatus(item, nextStatus(item.status))}
-              onRemove={(item) => {
-                void rpc.call("removeItem", { threadId, itemId: item.id }).then((next) => apply(next.goal));
-              }}
               onOpenAgent={(agent) => navigate.toThread(agent.threadId)}
             />
             <ItemGroup
@@ -801,10 +734,6 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
               items={nextItems}
               collapsed={collapsed.next}
               onToggleCollapsed={() => toggleCollapsed("next")}
-              onToggle={(item) => void setStatus(item, nextStatus(item.status))}
-              onRemove={(item) => {
-                void rpc.call("removeItem", { threadId, itemId: item.id }).then((next) => apply(next.goal));
-              }}
             />
             <ItemGroup
               title="Previous"
@@ -813,10 +742,6 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
               emptyLabel="Completed requirements will appear here."
               collapsed={collapsed.previous}
               onToggleCollapsed={() => toggleCollapsed("previous")}
-              onToggle={(item) => void setStatus(item, nextStatus(item.status))}
-              onRemove={(item) => {
-                void rpc.call("removeItem", { threadId, itemId: item.id }).then((next) => apply(next.goal));
-              }}
             />
           </>
         )}
@@ -1124,16 +1049,6 @@ function GoalSettingsPanel({
   );
 }
 
-function agentStatusLabel(status: GoalAgentStatus): string {
-  if (status === "starting") return "Starting";
-  if (status === "running") return "Running";
-  if (status === "completed") return "Done";
-  if (status === "error") return "Error";
-  if (status === "stopped") return "Stopped";
-  if (status === "idle") return "Idle";
-  return "Unknown";
-}
-
 function SectionHeading({
   title,
   count,
@@ -1148,7 +1063,7 @@ function SectionHeading({
   return (
     <button
       type="button"
-      className="flex w-full items-baseline justify-between px-1 pb-1 pt-2.5 text-left text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground"
+      className="flex w-full items-baseline justify-between px-1 pb-0.5 pt-1.5 text-left text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground"
       onClick={onToggle}
       aria-expanded={!collapsed}
     >
@@ -1161,42 +1076,105 @@ function SectionHeading({
   );
 }
 
-function AgentRow({
-  agent,
-  onOpen,
-}: {
-  agent: GoalAgent;
-  onOpen: (agent: GoalAgent) => void;
-}) {
-  const liveAgent = agent.status === "running" || agent.status === "starting";
+function isLiveAgent(agent: GoalAgent): boolean {
+  return agent.status === "running" || agent.status === "starting";
+}
+
+function agentStatusLabel(status: GoalAgent["status"]): string {
+  if (status === "starting") return "starting";
+  if (status === "running") return "running";
+  if (status === "completed") return "done";
+  if (status === "error") return "error";
+  if (status === "stopped") return "stopped";
+  if (status === "idle") return "idle";
+  return "unknown";
+}
+
+function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
   return (
-    <button
-      type="button"
-      className="flex w-full items-start gap-2 rounded-md px-1 py-1 text-left hover:bg-state-hover"
-      onClick={() => onOpen(agent)}
-    >
-      <span
-        className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
-          agent.status === "error"
-            ? "bg-destructive"
-            : liveAgent
-              ? "animate-pulse bg-foreground"
-              : "bg-muted-foreground/50"
-        }`}
-      />
-      <span className="min-w-0 flex-1">
-        <span className="flex items-baseline justify-between gap-2">
-          <span className="truncate text-[13px] leading-snug text-foreground">{agent.nickname}</span>
-          <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-            {agent.role === "verifier" ? "Verify · " : ""}
-            {agentStatusLabel(agent.status)}
-          </span>
+    agents.find((agent) => agent.role === "worker" && isLiveAgent(agent)) ??
+    agents.find((agent) => isLiveAgent(agent))
+  );
+}
+
+function NowRow({
+  item,
+  agents,
+  onOpenAgent,
+}: {
+  item: GoalItem;
+  agents: GoalAgent[];
+  onOpenAgent: (agent: GoalAgent) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const crew = agents.filter((agent) => agent.itemId === item.id);
+  const lead = primaryAgent(crew);
+  const live = crew.filter(isLiveAgent);
+  const done = crew.filter((agent) => !isLiveAgent(agent) && agent.status !== "error");
+  return (
+    <li className="rounded-md">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left hover:bg-state-hover"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span className="w-2 shrink-0 text-[9px] text-muted-foreground">{open ? "▾" : "▸"}</span>
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-foreground">
+          <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
         </span>
-        {agent.summary ? (
-          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{agent.summary}</span>
+        <span className={`min-w-0 flex-1 text-[13px] leading-5 text-foreground ${open ? "whitespace-normal" : "truncate"}`}>
+          {item.step}
+        </span>
+        {lead && !open ? (
+          <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
+            {lead.nickname}
+          </span>
         ) : null}
-      </span>
-    </button>
+      </button>
+      {open ? (
+        <div className="mb-1 ml-5 space-y-1.5 border-l border-border/70 py-1 pl-2.5">
+          {live.length === 0 && done.length === 0 ? (
+            <div className="text-[11px] text-muted-foreground">Waiting for a worker.</div>
+          ) : null}
+          {live.map((agent) => (
+            <button
+              key={agent.threadId}
+              type="button"
+              className="block w-full min-w-0 text-left hover:text-foreground"
+              onClick={() => onOpenAgent(agent)}
+            >
+              <div className="truncate text-[12px] leading-4 text-foreground">
+                {agent.nickname}
+                <span className="ml-1.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+                  {agent.role === "verifier" ? "verify · " : ""}
+                  {agentStatusLabel(agent.status)}
+                </span>
+              </div>
+              {agent.summary ? (
+                <div className="mt-0.5 line-clamp-3 text-[11px] leading-4 text-muted-foreground">
+                  {agent.summary}
+                </div>
+              ) : null}
+            </button>
+          ))}
+          {done.length > 0 ? (
+            <div className="space-y-0.5">
+              {done.slice(0, 3).map((agent) => (
+                <button
+                  key={agent.threadId}
+                  type="button"
+                  className="block w-full truncate text-left text-[10px] leading-4 text-muted-foreground/50 hover:text-muted-foreground"
+                  onClick={() => onOpenAgent(agent)}
+                >
+                  {agent.nickname}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 
@@ -1205,76 +1183,35 @@ function NowSection({
   agents,
   collapsed,
   onToggleCollapsed,
-  onToggle,
-  onRemove,
   onOpenAgent,
 }: {
   items: GoalItem[];
   agents: GoalAgent[];
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  onToggle: (item: GoalItem) => void;
-  onRemove: (item: GoalItem) => void;
   onOpenAgent: (agent: GoalAgent) => void;
 }) {
-  const live = agents.filter((agent) => agent.status === "running" || agent.status === "starting").length;
-  if (items.length === 0 && agents.length === 0) return null;
+  const live = agents.filter(isLiveAgent);
+  if (items.length === 0 && live.length === 0) return null;
   return (
-    <section className="px-1 pb-2">
+    <section className="px-1 pb-1">
       <SectionHeading
         title="Now"
-        count={`${items.length}${agents.length > 0 ? ` · ${live}/${agents.length} agents` : ""}`}
+        count={String(items.length)}
         collapsed={collapsed}
         onToggle={onToggleCollapsed}
       />
       {collapsed ? null : (
-      <ul className="space-y-1">
-        {items.map((item) => {
-          const crew = agents.filter((agent) => agent.itemId === item.id);
-          return (
-            <li key={item.id}>
-              <div className="group flex items-start gap-2 rounded-md px-1 py-1.5 hover:bg-state-hover">
-                <button
-                  type="button"
-                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-foreground"
-                  onClick={() => onToggle(item)}
-                  aria-label={item.step}
-                >
-                  <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
-                </button>
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 text-left text-[13px] leading-snug text-foreground"
-                  onClick={() => onToggle(item)}
-                >
-                  {item.step}
-                </button>
-                <button
-                  type="button"
-                  className="hidden shrink-0 px-1 text-xs text-muted-foreground hover:text-destructive group-hover:block"
-                  onClick={() => onRemove(item)}
-                >
-                  ×
-                </button>
-              </div>
-              {crew.length > 0 ? (
-                <ul className="mb-1 ml-6 border-l border-border/70 pl-2">
-                  {crew.map((agent) => (
-                    <AgentRow key={agent.threadId} agent={agent} onOpen={onOpenAgent} />
-                  ))}
-                </ul>
-              ) : (
-                <div className="mb-1 ml-6 text-[11px] text-muted-foreground">No agent assigned</div>
-              )}
-            </li>
-          );
-        })}
-        {agents.filter((agent) => !items.some((item) => item.id === agent.itemId)).map((agent) => (
-          <li key={agent.threadId} className="ml-1">
-            <AgentRow agent={agent} onOpen={onOpenAgent} />
-          </li>
-        ))}
-      </ul>
+        <ul>
+          {items.map((item) => (
+            <NowRow
+              key={item.id}
+              item={item}
+              agents={agents}
+              onOpenAgent={onOpenAgent}
+            />
+          ))}
+        </ul>
       )}
     </section>
   );
@@ -1285,8 +1222,6 @@ function ItemGroup({
   items,
   collapsed,
   onToggleCollapsed,
-  onToggle,
-  onRemove,
   alwaysShow,
   emptyLabel,
 }: {
@@ -1294,8 +1229,6 @@ function ItemGroup({
   items: GoalItem[];
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  onToggle: (item: GoalItem) => void;
-  onRemove: (item: GoalItem) => void;
   alwaysShow?: boolean;
   emptyLabel?: string;
 }) {
@@ -1316,9 +1249,8 @@ function ItemGroup({
           const completed = item.status === "completed";
           const active = item.status === "in_progress";
           return (
-            <li key={item.id} className="group flex items-start gap-2 rounded-md px-1 py-1.5 hover:bg-state-hover">
-              <button
-                type="button"
+            <li key={item.id} className="flex items-start gap-2 rounded-md px-1 py-1.5">
+              <span
                 className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border ${
                   completed
                     ? "border-foreground bg-foreground text-background"
@@ -1326,35 +1258,24 @@ function ItemGroup({
                       ? "border-foreground"
                       : "border-muted-foreground/50"
                 }`}
-                onClick={() => onToggle(item)}
-                aria-label={item.step}
               >
                 {completed ? (
                   <span className="text-[10px] leading-none">✓</span>
                 ) : active ? (
                   <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
                 ) : null}
-              </button>
-              <button
-                type="button"
-                className={`min-w-0 flex-1 text-left text-[13px] leading-snug ${
+              </span>
+              <span
+                className={`min-w-0 flex-1 text-[13px] leading-snug ${
                   completed
                     ? "text-muted-foreground line-through"
                     : active
                       ? "text-foreground"
                       : "text-foreground/90"
                 }`}
-                onClick={() => onToggle(item)}
               >
                 {item.step}
-              </button>
-              <button
-                type="button"
-                className="hidden shrink-0 px-1 text-xs text-muted-foreground hover:text-destructive group-hover:block"
-                onClick={() => onRemove(item)}
-              >
-                ×
-              </button>
+              </span>
             </li>
           );
         })}
@@ -1379,7 +1300,7 @@ export default definePluginApp((app) => {
       return (
         <>
           <SidebarProviderIcons />
-          <SidebarGoalCrew />
+          <SidebarGoalMarks />
           <Original {...props} />
         </>
       );

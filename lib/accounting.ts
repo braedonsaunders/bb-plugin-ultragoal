@@ -168,7 +168,7 @@ export async function accountGoalProgress(
   bb: BbPluginApi,
   store: GoalStore,
   threadId: string,
-  options?: { evenIfIdle?: boolean },
+  options?: { evenIfIdle?: boolean; busy?: boolean },
 ): Promise<StoredGoal | null> {
   const existing = store.get(threadId);
   if (!existing) return null;
@@ -176,7 +176,7 @@ export async function accountGoalProgress(
     return existing;
   }
 
-  const running = await threadIsRunning(bb, threadId);
+  const running = options?.busy === true ? true : await threadIsRunning(bb, threadId);
   const currentTokens = await readThreadTokens(bb, threadId);
   let tokensUsed = existing.tokensUsed;
   let lastSeenTokens = existing.lastSeenTokens;
@@ -192,7 +192,7 @@ export async function accountGoalProgress(
   const now = Date.now();
   let timeUsedSeconds = existing.timeUsedSeconds;
   let lastAccountedAt = existing.lastAccountedAt;
-  if (running || options?.evenIfIdle) {
+  if (running || options?.evenIfIdle || options?.busy) {
     const lastAt = existing.lastAccountedAt ?? existing.startedAt;
     timeUsedSeconds =
       existing.timeUsedSeconds + Math.max(0, Math.round((now - lastAt) / 1000));

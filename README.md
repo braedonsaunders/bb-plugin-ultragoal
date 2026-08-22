@@ -15,7 +15,7 @@ bb plugin install goal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-goal.git@v0.1.0'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-goal.git@v0.1.1'
 ```
 
 Or from a local checkout:
@@ -56,7 +56,7 @@ bb goal resume
 bb goal clear
 ```
 
-The Goal pane lists **Now** (in-flight slices with assigned agents), **Up next**, and **Previous**. Settings on that pane control verification, the verifier model, progress-chat interval, auto-continue, and the token budget.
+The Goal pane lists **Now** (expand a row for the live worker), **Up next**, and **Previous**. The plan is read-only in the pane; the agent updates it. Settings control verification, the verifier model, progress-chat interval, auto-continue, and the token budget.
 
 ## How it runs
 
