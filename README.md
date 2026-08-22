@@ -15,7 +15,7 @@ bb plugin install goal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-goal.git@v0.1.2'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-goal.git@v0.1.3'
 ```
 
 Or from a local checkout:

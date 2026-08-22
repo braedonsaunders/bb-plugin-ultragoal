@@ -63,7 +63,7 @@ function planInstruction(goal: GoalSnapshot): string {
           "No subagents are running. Spawn one worker per in-progress slice before doing implementation on the root.",
         ];
   return [
-    "Current requirement plan (keep update_plan current; mark every independent in-flight step in_progress at the same time):",
+    "Current requirement plan (keep update_plan current as steps complete or the next best action changes):",
     ...lines,
     ...agentLines,
   ].join("\n");

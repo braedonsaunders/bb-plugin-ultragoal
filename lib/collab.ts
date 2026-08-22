@@ -12,7 +12,7 @@ const SPAWN_AGENT_DESCRIPTION = `
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 This is the default way Goal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
-Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal so they nest under that Now task.
+Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal so they nest under that Now task. One worker per item_id — do not spawn a second worker onto a slice that already has one.
 When verification is on, a separate verifier is launched after each worker returns. Do not mark that slice complete until the verifier reports VERIFY_PASS.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
@@ -106,6 +106,13 @@ export function createCollabStore(
     "UPDATE collab_agents SET last_verify_hash = @last_verify_hash WHERE thread_id = @thread_id",
   );
   const removeRow = db.prepare("DELETE FROM collab_agents WHERE thread_id = ?");
+
+  function itemHasWorker(rootThreadId: string, itemId: string | null): boolean {
+    if (!itemId) return false;
+    return (byRoot.all(rootThreadId) as CollabRow[]).some(
+      (row) => row.role !== "verifier" && row.item_id === itemId,
+    );
+  }
 
   function rowOf(threadId: string): CollabRow | null {
     return (byThread.get(threadId) as CollabRow | undefined) ?? null;
@@ -222,81 +229,99 @@ export function createCollabStore(
     return [...found.values()];
   }
 
-  async function listForRoot(threadId: string): Promise<GoalAgent[]> {
+  const statusCache = new Map<string, { status: GoalAgentStatus; summary: string | null; at: number }>();
+
+  async function refreshStatus(threadId: string): Promise<{ status: GoalAgentStatus; summary: string | null }> {
+    try {
+      const thread = await bb.sdk.threads.get({ threadId });
+      const mapped = mapThreadStatus(thread.status, null);
+      statusCache.set(threadId, { ...mapped, at: Date.now() });
+      return mapped;
+    } catch {
+      return statusCache.get(threadId) ?? { status: "unknown", summary: null };
+    }
+  }
+
+  async function listForRoot(
+    threadId: string,
+    options?: { discover?: boolean; refreshLimit?: number },
+  ): Promise<GoalAgent[]> {
     const root = rootId(threadId);
     const rows = byRoot.all(root) as CollabRow[];
     const seen = new Set(rows.map((row) => row.thread_id));
     const extras: CollabRow[] = [];
-    try {
-      const children = await discoverChildren(root);
-      for (const child of children) {
-        if (seen.has(child.id)) continue;
-        seen.add(child.id);
-        const extra: CollabRow = {
-          thread_id: child.id,
-          root_thread_id: root,
-          parent_thread_id: child.parentThreadId ?? root,
-          task_name: child.title || child.titleFallback || child.id,
-          created_at: child.createdAt ?? 0,
-          display_name: child.title || child.titleFallback || null,
-          item_id: null,
-          role: "worker",
-          source_thread_id: null,
-          last_verify_hash: null,
-        };
-        extras.push(extra);
-        try {
-          insert.run({
-            thread_id: extra.thread_id,
-            root_thread_id: extra.root_thread_id,
-            parent_thread_id: extra.parent_thread_id,
-            task_name: extra.task_name,
-            created_at: extra.created_at,
-            display_name: extra.display_name,
-            item_id: extra.item_id,
-            role: extra.role,
-            source_thread_id: extra.source_thread_id,
-            last_verify_hash: extra.last_verify_hash,
-          });
-        } catch {
-          // Row may already exist from a concurrent spawn.
+    if (options?.discover) {
+      try {
+        const children = await discoverChildren(root);
+        for (const child of children) {
+          if (seen.has(child.id)) continue;
+          seen.add(child.id);
+          const extra: CollabRow = {
+            thread_id: child.id,
+            root_thread_id: root,
+            parent_thread_id: child.parentThreadId ?? root,
+            task_name: child.title || child.titleFallback || child.id,
+            created_at: child.createdAt ?? 0,
+            display_name: child.title || child.titleFallback || null,
+            item_id: null,
+            role: "worker",
+            source_thread_id: null,
+            last_verify_hash: null,
+          };
+          extras.push(extra);
+          try {
+            insert.run({
+              thread_id: extra.thread_id,
+              root_thread_id: extra.root_thread_id,
+              parent_thread_id: extra.parent_thread_id,
+              task_name: extra.task_name,
+              created_at: extra.created_at,
+              display_name: extra.display_name,
+              item_id: extra.item_id,
+              role: extra.role,
+              source_thread_id: extra.source_thread_id,
+              last_verify_hash: extra.last_verify_hash,
+            });
+          } catch {
+            // Row may already exist from a concurrent spawn.
+          }
         }
+      } catch {
+        // Listing children is best-effort; collab rows still render.
       }
-    } catch {
-      // Listing children is best-effort; collab rows still render.
     }
 
+    const all = [...rows, ...extras];
     const usedNames = new Set(
-      [...rows, ...extras]
-        .map((row) => row.display_name?.trim())
-        .filter((name): name is string => Boolean(name)),
+      all.map((row) => row.display_name?.trim()).filter((name): name is string => Boolean(name)),
     );
-    for (const row of [...rows, ...extras]) {
+    for (const row of all) {
       if (!needsHumorousName(row.display_name)) continue;
       const displayName = nextHumorousName(usedNames);
       usedNames.add(displayName);
       row.display_name = displayName;
       setMeta.run({ thread_id: row.thread_id, display_name: displayName, item_id: row.item_id });
-      try {
-        await bb.sdk.threads.update({ threadId: row.thread_id, title: displayName });
-      } catch {
-        // Display name in the Goal store is enough if the thread title cannot change.
+    }
+
+    const refreshLimit = options?.refreshLimit ?? 8;
+    const refreshIds = new Set(
+      [...all]
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, refreshLimit)
+        .map((row) => row.thread_id),
+    );
+    for (const row of all) {
+      const cached = statusCache.get(row.thread_id);
+      if (cached && (cached.status === "running" || cached.status === "starting")) {
+        refreshIds.add(row.thread_id);
       }
     }
 
     const agents = await Promise.all(
-      [...rows, ...extras].map(async (row) => {
-        let mapped: { status: GoalAgentStatus; summary: string | null };
-        try {
-          const thread = await bb.sdk.threads.get({ threadId: row.thread_id });
-          const output =
-            thread.status === "idle"
-              ? await bb.sdk.threads.output({ threadId: row.thread_id }).catch(() => ({ output: null }))
-              : { output: null };
-          mapped = mapThreadStatus(thread.status, output.output);
-        } catch {
-          mapped = { status: "unknown", summary: null };
-        }
+      all.map(async (row) => {
+        const mapped = refreshIds.has(row.thread_id)
+          ? await refreshStatus(row.thread_id)
+          : (statusCache.get(row.thread_id) ?? { status: "completed" as const, summary: null });
         return {
           threadId: row.thread_id,
           taskName: row.task_name,
@@ -324,6 +349,10 @@ export function createCollabStore(
   return {
     rootId,
     rowOf,
+    itemHasWorker,
+    threadIdsForRoot(rootThreadId: string): string[] {
+      return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => row.thread_id);
+    },
     listForRoot,
     setMeta(threadId: string, patch: { displayName?: string | null; itemId?: string | null }) {
       setMeta.run({
@@ -351,6 +380,9 @@ export function createCollabStore(
       step: string;
       objective: string;
     }): Promise<{ threadId: string; nickname: string; itemId: string | null } | null> {
+      if (args.itemId && itemHasWorker(args.rootThreadId, args.itemId)) {
+        return null;
+      }
       const root = await bb.sdk.threads.get({ threadId: args.rootThreadId });
       if (!root.projectId) {
         throw new Error("Goal root thread has no project; cannot spawn a worker");
@@ -523,6 +555,17 @@ export function createCollabStore(
           const taskName = `${parentPath === "/root" ? "/root" : parentPath}/${slug}`;
           const rootThreadId = rootId(threadId);
           const itemId = item_id?.trim() || hooks?.nextItemId?.(rootThreadId) || null;
+          if (itemId && itemHasWorker(rootThreadId, itemId) && role !== "verifier") {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Slice ${itemId} already has a worker. Spawn the next unassigned item_id instead.`,
+                },
+              ],
+              isError: true,
+            };
+          }
           if (byName.get(rootId(threadId), taskName)) {
             return {
               content: [{ type: "text", text: `An agent named ${taskName} already exists.` }],

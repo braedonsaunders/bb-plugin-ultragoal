@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+- Goal pane returns the stored plan immediately; crew and tokens fill in over realtime.
+- Cursor token totals use cursortrack (ACP session stores and IDE composers), not visible-text estimates.
+- Continuation prompts stay agent-only. A busy thread no longer dumps the prompt into chat.
+- Crew listing no longer refetches every historical worker on each pane or sidebar poll.
+
 ## 0.1.2
 
 - Previous starts collapsed.

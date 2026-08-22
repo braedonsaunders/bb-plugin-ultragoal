@@ -428,7 +428,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   useEffect(() => {
     const id = window.setInterval(() => {
       void refresh();
-    }, 4000);
+    }, 12_000);
     return () => window.clearInterval(id);
   }, [refresh]);
 
@@ -436,15 +436,8 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   const agents = goal?.agents ?? [];
   const doneItems = items.filter((item) => item.status === "completed");
   const liveAgents = agents.filter((agent) => agent.status === "running" || agent.status === "starting");
-  const liveItemIds = new Set(
-    liveAgents.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)),
-  );
-  const nowItems = items.filter(
-    (item) => item.status !== "completed" && liveItemIds.has(item.id),
-  );
-  const nextItems = items.filter(
-    (item) => item.status !== "completed" && !liveItemIds.has(item.id),
-  );
+  const nowItems = items.filter((item) => item.status === "in_progress");
+  const nextItems = items.filter((item) => item.status === "pending");
   const done = doneItems.length;
   const elapsed = goal ? liveSeconds(goal, now) : 0;
   const hours = Math.max(elapsed / 3600, 1 / 60);
@@ -1109,8 +1102,6 @@ function NowRow({
   const [open, setOpen] = useState(false);
   const crew = agents.filter((agent) => agent.itemId === item.id);
   const lead = primaryAgent(crew);
-  const live = crew.filter(isLiveAgent);
-  const done = crew.filter((agent) => !isLiveAgent(agent) && agent.status !== "error");
   return (
     <li className="rounded-md">
       <button
@@ -1134,44 +1125,28 @@ function NowRow({
       </button>
       {open ? (
         <div className="mb-1 ml-5 space-y-1.5 border-l border-border/70 py-1 pl-2.5">
-          {live.length === 0 && done.length === 0 ? (
-            <div className="text-[11px] text-muted-foreground">Waiting for a worker.</div>
-          ) : null}
-          {live.map((agent) => (
+          {lead ? (
             <button
-              key={agent.threadId}
               type="button"
               className="block w-full min-w-0 text-left hover:text-foreground"
-              onClick={() => onOpenAgent(agent)}
+              onClick={() => onOpenAgent(lead)}
             >
               <div className="truncate text-[12px] leading-4 text-foreground">
-                {agent.nickname}
+                {lead.nickname}
                 <span className="ml-1.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-                  {agent.role === "verifier" ? "verify · " : ""}
-                  {agentStatusLabel(agent.status)}
+                  {lead.role === "verifier" ? "verify · " : ""}
+                  {agentStatusLabel(lead.status)}
                 </span>
               </div>
-              {agent.summary ? (
+              {lead.summary ? (
                 <div className="mt-0.5 line-clamp-3 text-[11px] leading-4 text-muted-foreground">
-                  {agent.summary}
+                  {lead.summary}
                 </div>
               ) : null}
             </button>
-          ))}
-          {done.length > 0 ? (
-            <div className="space-y-0.5">
-              {done.slice(0, 3).map((agent) => (
-                <button
-                  key={agent.threadId}
-                  type="button"
-                  className="block w-full truncate text-left text-[10px] leading-4 text-muted-foreground/50 hover:text-muted-foreground"
-                  onClick={() => onOpenAgent(agent)}
-                >
-                  {agent.nickname}
-                </button>
-              ))}
-            </div>
-          ) : null}
+          ) : (
+            <div className="text-[11px] text-muted-foreground">Waiting for a worker.</div>
+          )}
         </div>
       ) : null}
     </li>

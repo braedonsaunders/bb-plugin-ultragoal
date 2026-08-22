@@ -11,7 +11,7 @@ import {
   objectiveUpdatedPrompt,
 } from "./lib/prompts.js";
 import { lastUserText, parseSlashGoal } from "./lib/slash.js";
-import { formatGoalCard, goalToolResponse, isUnfinished, lastTurnUsedTools } from "./lib/status.js";
+import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
 import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
@@ -174,6 +174,41 @@ export default function plugin(bb: BbPluginApi) {
     bb.realtime.publish("goal", { threadId, goal });
   }
 
+  function account(
+    threadId: string,
+    options?: { evenIfIdle?: boolean; busy?: boolean; scan?: boolean },
+  ) {
+    return accountGoalProgress(bb, store, threadId, {
+      ...options,
+      extraThreadIds: options?.scan ? collab.threadIdsForRoot(threadId) : [],
+    });
+  }
+
+  const paneRefresh = new Set<string>();
+  function refreshPane(threadId: string): void {
+    if (paneRefresh.has(threadId)) return;
+    paneRefresh.add(threadId);
+    void (async () => {
+      try {
+        await refreshRunning(threadId);
+        const goal = store.get(threadId);
+        if (!goal) return;
+        await seedEmptyPlan(threadId, goal);
+        await ensureCrew(threadId);
+        const latest = store.get(threadId);
+        if (latest) publish(threadId, await viewFresh(latest));
+      } catch (error) {
+        bb.log.warn(
+          `Goal pane refresh failed on ${threadId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      } finally {
+        paneRefresh.delete(threadId);
+      }
+    })();
+  }
+
   function crewIsLive(agents: readonly GoalAgent[]): boolean {
     return agents.some((agent) => agent.status === "running" || agent.status === "starting");
   }
@@ -217,7 +252,29 @@ export default function plugin(bb: BbPluginApi) {
       claimed.add(match.id);
       if (match.status === "pending") items.setStatus(threadId, match.id, "in_progress");
     }
-    return next;
+    return oneWorkerPerItem(next);
+  }
+
+  function oneWorkerPerItem(agents: GoalAgent[]): GoalAgent[] {
+    const rank = (agent: GoalAgent) => {
+      if (agent.status === "running") return 0;
+      if (agent.status === "starting") return 1;
+      if (agent.status === "idle") return 2;
+      if (agent.status === "completed") return 3;
+      return 4;
+    };
+    const picked = new Map<string, GoalAgent>();
+    const extra: GoalAgent[] = [];
+    for (const agent of agents) {
+      if (agent.role === "verifier") {
+        if (agent.status === "running" || agent.status === "starting") extra.push(agent);
+        continue;
+      }
+      if (!agent.itemId) continue;
+      const current = picked.get(agent.itemId);
+      if (!current || rank(agent) < rank(current)) picked.set(agent.itemId, agent);
+    }
+    return [...picked.values(), ...extra];
   }
 
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
@@ -231,15 +288,7 @@ export default function plugin(bb: BbPluginApi) {
         }`,
       );
     }
-    const latest = store.get(goal.threadId) ?? goal;
-    if (
-      (latest.status === "active" || latest.status === "budget_limited") &&
-      goalIsBusy(latest.threadId)
-    ) {
-      const accounted = await accountGoalProgress(bb, store, latest.threadId, { busy: true });
-      return view(accounted ?? latest);
-    }
-    return view(latest);
+    return view(store.get(goal.threadId) ?? goal);
   }
 
   publishFresh = async (threadId: string) => {
@@ -252,69 +301,12 @@ export default function plugin(bb: BbPluginApi) {
   const staffing = new Set<string>();
   const MAX_PARALLEL_WORKERS = 4;
 
-  function occupiesSlice(status: GoalAgent["status"]): boolean {
-    return status === "running" || status === "starting";
-  }
-
-  function parseVerifyVerdict(text: string | null | undefined): "pass" | "fail" | null {
-    if (!text) return null;
-    if (/\bVERIFY_PASS\b/i.test(text)) return "pass";
-    if (/\bVERIFY_FAIL\b/i.test(text)) return "fail";
-    return null;
-  }
-
-  async function threadOutput(threadId: string): Promise<string> {
-    try {
-      return (await bb.sdk.threads.output({ threadId })).output?.trim() ?? "";
-    } catch {
-      return "";
-    }
-  }
-
-  async function settleFinishedSlices(threadId: string): Promise<boolean> {
-    const goal = store.get(threadId);
-    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return false;
-    const snap = await viewFresh(goal);
-    let changed = false;
-    for (const item of snap.items.filter((row) => row.status !== "completed")) {
-      const crew = snap.agents.filter((agent) => agent.itemId === item.id);
-      if (crew.some((agent) => occupiesSlice(agent.status))) continue;
-      const finished = crew.filter(
-        (agent) => agent.role === "worker" && agent.status === "completed",
-      );
-      if (finished.length === 0) continue;
-      if (snap.settings.verifyEnabled) {
-        const verifiers = crew.filter((agent) => agent.role === "verifier");
-        if (verifiers.some((agent) => occupiesSlice(agent.status))) continue;
-        let verdict: "pass" | "fail" | null = null;
-        for (const verifier of verifiers) {
-          verdict = parseVerifyVerdict(await threadOutput(verifier.threadId)) ?? parseVerifyVerdict(verifier.summary);
-          if (verdict) break;
-        }
-        if (!verdict) {
-          await maybeVerifyWorker(finished[0].threadId);
-          continue;
-        }
-        if (verdict === "fail") continue;
-      }
-      items.setStatus(threadId, item.id, "completed");
-      changed = true;
-      bb.log.info(`Goal slice completed: ${item.id} on ${threadId}`);
-    }
-    if (changed) {
-      const latest = store.get(threadId);
-      if (latest) publish(threadId, await viewFresh(latest));
-    }
-    return changed;
-  }
-
   async function ensureCrew(threadId: string): Promise<void> {
     const goal = store.get(threadId);
     if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
     if (staffing.has(threadId)) return;
     staffing.add(threadId);
     try {
-      await settleFinishedSlices(threadId);
       const snap = await viewFresh(store.get(threadId) ?? goal);
       const open = snap.items.filter((item) => item.status !== "completed");
       if (open.length === 0) return;
@@ -331,7 +323,7 @@ export default function plugin(bb: BbPluginApi) {
       const workers = latest.agents.filter((agent) => agent.role === "worker");
       const staffed = new Set(
         workers
-          .filter((agent) => occupiesSlice(agent.status) && agent.itemId)
+          .filter((agent) => agent.itemId && agent.status !== "error" && agent.status !== "unknown")
           .map((agent) => agent.itemId as string),
       );
       const live = workers.filter(
@@ -622,24 +614,11 @@ export default function plugin(bb: BbPluginApi) {
     if (inflight.has(threadId)) return false;
     inflight.add(threadId);
     try {
-      try {
-        await bb.sdk.threads.send({
-          threadId,
-          mode,
-          input: [{ type: "text", text, visibility: "agent-only" }],
-        });
-      } catch (error) {
-        bb.log.warn(
-          `Agent-only Goal steering failed on ${threadId}, retrying visible: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        await bb.sdk.threads.send({
-          threadId,
-          mode: "auto",
-          input: [{ type: "text", text }],
-        });
-      }
+      await bb.sdk.threads.send({
+        threadId,
+        mode,
+        input: [{ type: "text", text, visibility: "agent-only" }],
+      });
       return true;
     } catch (error) {
       bb.log.warn(
@@ -684,6 +663,8 @@ export default function plugin(bb: BbPluginApi) {
       if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
       try {
         await requestProgressUpdate(threadId, goal);
+        const accounted = await account(threadId, { busy: goalIsBusy(threadId), scan: true });
+        if (accounted) publish(threadId, view(accounted));
       } catch (error) {
         bb.log.warn(
           `Goal progress pulse failed on ${threadId}: ${
@@ -766,12 +747,9 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     async getGoal({ threadId }) {
-      await refreshRunning(threadId);
-      const goal = (await accountGoalProgress(bb, store, threadId)) ?? store.get(threadId);
-      if (goal) await seedEmptyPlan(threadId, goal);
-      await ensureCrew(threadId);
-      const latest = store.get(threadId);
-      return { goal: latest ? await viewFresh(latest) : null };
+      const goal = store.get(threadId);
+      if (goal) refreshPane(threadId);
+      return { goal: goal ? view(goal) : null };
     },
     async pause({ threadId }) {
       const goal = await pauseGoal(threadId, "Paused from the composer.");
@@ -836,7 +814,7 @@ export default function plugin(bb: BbPluginApi) {
       for (const threadId of store.listActiveThreadIds()) {
         const goal = store.get(threadId);
         if (!goal) continue;
-        const snap = await viewFresh(goal);
+        const snap = view(goal);
         crews.push({ threadId, items: snap.items, agents: snap.agents });
       }
       return { crews };
@@ -861,7 +839,7 @@ export default function plugin(bb: BbPluginApi) {
     parameters: z.object({}).strict(),
     async execute(_params, { threadId }) {
       await refreshRunning(threadId);
-      const accounted = await accountGoalProgress(bb, store, threadId);
+      const accounted = await account(threadId);
       const goal = accounted ?? store.get(threadId);
       return goalToolResponse(goal ? await viewFresh(goal) : null);
     },
@@ -926,7 +904,7 @@ export default function plugin(bb: BbPluginApi) {
         ),
     }),
     async execute({ status }, { threadId }) {
-      const accounted = (await accountGoalProgress(bb, store, threadId)) ?? store.get(threadId);
+      const accounted = (await account(threadId)) ?? store.get(threadId);
       if (!accounted) {
         return {
           content: [{ type: "text", text: "cannot update goal because this thread has no goal" }],
@@ -940,10 +918,9 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "update_plan",
-    description: `Updates the task plan shown in the Goal pane.
+    description: `Updates the task plan.
 Provide an optional explanation and a list of plan items, each with a step and status.
-Mark every independent slice that is underway as in_progress — multiple steps can be in_progress at once.
-This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs for that list.
+Keep the plan current as steps complete or the next best action changes. Append newly discovered remaining work in the same call. Do not treat a plan update as a substitute for doing the work.
 `,
     experimental_statusLabels: {
       pending: "Updating plan",
@@ -966,6 +943,7 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
       const goal = store.get(threadId);
       const next = goal ? await viewFresh(goal) : null;
       if (next) publish(threadId, next);
+      void ensureCrew(threadId);
       return "Plan updated";
     },
   });
@@ -1018,7 +996,7 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
             `Durable Goal (${goal.status}): ${goal.objective}`,
             "This root thread is the orchestrator. Subagents do the implementation by default.",
             plan.length > 0
-              ? `Requirement plan: ${done}/${plan.length} complete. Keep update_plan current. Mark independent in-flight work in_progress at the same time.`
+              ? `Requirement plan: ${done}/${plan.length} complete. Keep update_plan current as steps complete or the next best action changes.`
               : "The Goal pane is empty. Call update_plan immediately with concrete remaining work. Do not use TodoWrite or Update TODOs for that list.",
             liveAgents.length > 0
               ? `${liveAgents.length} subagent(s) are live. Wait or follow up; do not redo their slices on the root.`
@@ -1068,7 +1046,6 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
     const parentRoot = child?.root_thread_id;
     if (parentRoot && parentRoot !== thread.id && !thread.hasPendingInteraction) {
       if (child.role !== "verifier") await maybeVerifyWorker(thread.id);
-      await settleFinishedSlices(parentRoot);
       void publishFresh(parentRoot);
       void nudgeRoot(parentRoot);
     }
@@ -1089,7 +1066,7 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
     }
 
     running.set(thread.id, false);
-    const accounted = await accountGoalProgress(bb, store, thread.id, { evenIfIdle: true });
+    const accounted = await account(thread.id, { evenIfIdle: true });
     let goal = accounted ?? store.get(thread.id);
     if (!goal) return;
     store.update(thread.id, { lastProgressAt: Date.now() });
@@ -1097,19 +1074,9 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
     const snap = await viewFresh(goal);
     publish(thread.id, snap);
     if (goal.status !== "active" && goal.status !== "budget_limited") return;
-    if (crewIsLive(snap.agents)) {
-      bb.log.info(`Skipping Goal continue on ${thread.id}: crew still running`);
-      return;
-    }
 
     if (isBudgetExhausted(view(goal)) && goal.status === "active") {
       goal = applyStatus(thread.id, "budget_limited", "Reached the token budget.") ?? goal;
-    }
-
-    if (goal.lastContinueWasAutomatic && !lastTurnUsedTools(rows)) {
-      bb.log.info(`Skipping Goal continue on ${thread.id}: continuation turn made no tool call`);
-      store.update(thread.id, { lastContinueWasAutomatic: false });
-      return;
     }
 
     if (goal.lastContinueAt && Date.now() - goal.lastContinueAt < STALE_CONTINUE_MS) {
@@ -1171,7 +1138,7 @@ This is the only way to fill the Goal pane. Do not use TodoWrite or Update TODOs
       }
 
       if (action === "status") {
-        const goal = (await accountGoalProgress(bb, store, threadId)) ?? store.get(threadId);
+        const goal = (await account(threadId)) ?? store.get(threadId);
         if (goal) await seedEmptyPlan(threadId, goal);
         const latest = store.get(threadId);
         return {

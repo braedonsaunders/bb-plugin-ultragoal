@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-goal",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Codex-style /goal for Cursor, OpenCode, Claude Code, and Pi. Sets a durable objective and keeps the thread working until it is done, blocked, paused, or limited.",
   "license": "MIT",
   "author": "Braedon Saunders",
