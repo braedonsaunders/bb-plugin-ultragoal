@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Register only `bb ultragoal` so a leftover `bb goal` command cannot block startup.
+
 ## 0.2.0
 
 - The plugin is UltraGoal: `/ultragoal`, `bb ultragoal`, plugin id `ultragoal`.

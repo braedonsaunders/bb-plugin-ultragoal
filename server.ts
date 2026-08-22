@@ -1223,21 +1223,19 @@ Keep the plan current as steps complete or the next best action changes. When a 
       return { exitCode: 0, stdout: "UltraGoal cleared." };
   };
 
-  for (const name of ["ultragoal", "goal"] as const) {
-    bb.cli.register({
-      name,
-      summary: "Set, inspect, pause, resume, or clear a durable UltraGoal",
-      commands: [
-        { name: "status", summary: "Show the UltraGoal on a thread", usage: `bb ${name} [status] [--thread <id>]` },
-        { name: "set", summary: "Set or replace the UltraGoal", usage: `bb ${name} set <objective> [--thread <id>]` },
-        { name: "edit", summary: "Edit the UltraGoal objective", usage: `bb ${name} edit <objective> [--thread <id>]` },
-        { name: "pause", summary: "Pause the UltraGoal", usage: `bb ${name} pause [--thread <id>]` },
-        { name: "resume", summary: "Resume a paused UltraGoal", usage: `bb ${name} resume [--thread <id>]` },
-        { name: "clear", summary: "Clear the UltraGoal", usage: `bb ${name} clear [--thread <id>]` },
-      ],
-      run: runCli,
-    });
-  }
+  bb.cli.register({
+    name: "ultragoal",
+    summary: "Set, inspect, pause, resume, or clear a durable UltraGoal",
+    commands: [
+      { name: "status", summary: "Show the UltraGoal on a thread", usage: "bb ultragoal [status] [--thread <id>]" },
+      { name: "set", summary: "Set or replace the UltraGoal", usage: "bb ultragoal set <objective> [--thread <id>]" },
+      { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
+      { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
+      { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
+      { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
+    ],
+    run: runCli,
+  });
 
   bb.background.service("progress-pulse", {
     async start(signal) {
