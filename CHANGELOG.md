@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+
+- Plan items keep a stable id when their step text changes, so Now titles update in place.
+- Next is only unstarted work. A live worker's current slice stays in Now, not a reused slot.
+
 ## 0.1.5
 
 - Sidebar stays a single Goal-marked row. Crew no longer reappears after a plugin reload.

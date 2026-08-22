@@ -155,6 +155,19 @@ export default function plugin(bb: BbPluginApi) {
     onChange: (rootThreadId) => {
       void publishFresh(rootThreadId);
     },
+    retitleItem(rootThreadId, itemId, message) {
+      const line =
+        message
+          .trim()
+          .split(/\n/)[0]
+          ?.replace(/^#+\s*/, "")
+          .trim() ?? "";
+      if (line.length < 8 || line.length > 180) return;
+      if (/^(you are|parent goal|assigned slice|complete only|the new agent's)/i.test(line)) {
+        return;
+      }
+      items.updateStep(rootThreadId, itemId, line);
+    },
     nextItemId(rootThreadId) {
       const used = new Set(
         (agentCache.get(rootThreadId) ?? [])
@@ -243,8 +256,8 @@ export default function plugin(bb: BbPluginApi) {
       if (!assignable(agent)) continue;
       if (agent.itemId && claimed.has(agent.itemId)) agent.itemId = null;
       const match =
-        open.find((item) => item.status === "pending" && !claimed.has(item.id)) ??
         open.find((item) => item.status === "in_progress" && !claimed.has(item.id)) ??
+        open.find((item) => item.status === "pending" && !claimed.has(item.id)) ??
         open.find((item) => !claimed.has(item.id));
       if (!match) continue;
       collab.setMeta(agent.threadId, { itemId: match.id });
@@ -937,7 +950,7 @@ export default function plugin(bb: BbPluginApi) {
     name: "update_plan",
     description: `Updates the task plan.
 Provide an optional explanation and a list of plan items, each with a step and status.
-Keep the plan current as steps complete or the next best action changes. Append newly discovered remaining work in the same call. Do not treat a plan update as a substitute for doing the work.
+Keep the plan current as steps complete or the next best action changes. When a live worker moves to a new slice, pass that item's id and the new step text and keep status in_progress. Do not add a pending Next row for work a worker is already doing. Append only genuinely unstarted work. Do not treat a plan update as a substitute for doing the work.
 `,
     experimental_statusLabels: {
       pending: "Updating plan",
@@ -948,7 +961,13 @@ Keep the plan current as steps complete or the next best action changes. Append 
       plan: z
         .array(
           z.object({
-            step: z.string().describe("Task step text."),
+            id: z
+              .string()
+              .optional()
+              .describe(
+                "Existing item_id from get_goal. Pass this when updating a slice so the Now title changes in place instead of creating a new Next row.",
+              ),
+            step: z.string().describe("Task step text. Update this when the worker's current slice changes."),
             status: z.enum(["pending", "in_progress", "completed"]).describe("Step status."),
           }),
         )

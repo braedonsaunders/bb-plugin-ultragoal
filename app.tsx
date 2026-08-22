@@ -505,8 +505,18 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   const agents = goal?.agents ?? [];
   const doneItems = items.filter((item) => item.status === "completed");
   const liveAgents = agents.filter((agent) => agent.status === "running" || agent.status === "starting");
-  const nowItems = items.filter((item) => item.status === "in_progress");
-  const nextItems = items.filter((item) => item.status === "pending");
+  const liveItemIds = new Set(
+    agents
+      .filter((agent) => agent.status === "running" || agent.status === "starting")
+      .map((agent) => agent.itemId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const nowItems = items.filter(
+    (item) => item.status === "in_progress" || liveItemIds.has(item.id),
+  );
+  const nextItems = items.filter(
+    (item) => item.status === "pending" && !liveItemIds.has(item.id),
+  );
   const done = doneItems.length;
   const elapsed = goal ? liveSeconds(goal, now) : 0;
   const hours = Math.max(elapsed / 3600, 1 / 60);

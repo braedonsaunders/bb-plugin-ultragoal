@@ -48,32 +48,71 @@ export function createItemStore(bb: BbPluginApi) {
 
     replace(
       threadId: string,
-      plan: Array<{ step: string; status: GoalItemStatus }>,
+      plan: Array<{ id?: string; step: string; status: GoalItemStatus }>,
     ): GoalItem[] {
       const existing = listStmt.all(threadId) as ItemRow[];
-      const unused = new Map(existing.map((row) => [row.step.trim().toLowerCase(), row]));
-      const now = Date.now();
-      const next: ItemRow[] = [];
+      const byId = new Map(existing.map((row) => [row.id, row]));
+      const byStep = new Map(
+        existing.map((row) => [row.step.trim().toLowerCase(), row]),
+      );
+      const claimed = new Set<string>();
+      const slots: Array<{
+        step: string;
+        status: GoalItemStatus;
+        index: number;
+        prior: ItemRow | null;
+      }> = [];
 
       for (const [index, item] of plan.entries()) {
         const step = item.step.trim();
         if (!step) continue;
-        const prior = unused.get(step.toLowerCase());
-        unused.delete(step.toLowerCase());
-        next.push({
-          id: prior?.id ?? newId(),
-          thread_id: threadId,
-          step,
-          status: item.status,
-          sort_order: index,
-          created_at: prior?.created_at ?? now,
-          updated_at: now,
-        });
+        let prior: ItemRow | null = null;
+        const id = item.id?.trim();
+        if (id && byId.has(id) && !claimed.has(id)) {
+          prior = byId.get(id) ?? null;
+        } else {
+          const viaStep = byStep.get(step.toLowerCase());
+          if (viaStep && !claimed.has(viaStep.id)) prior = viaStep;
+        }
+        if (prior) claimed.add(prior.id);
+        slots.push({ step, status: item.status, index, prior });
       }
+
+      const unused = existing.filter((row) => !claimed.has(row.id));
+      for (const slot of slots) {
+        if (slot.prior) continue;
+        const found = unused.findIndex((row) => row.status === slot.status);
+        if (found < 0) continue;
+        const prior = unused.splice(found, 1)[0];
+        if (!prior) continue;
+        slot.prior = prior;
+        claimed.add(prior.id);
+      }
+
+      const now = Date.now();
+      const next: ItemRow[] = slots.map((slot, order) => ({
+        id: slot.prior?.id ?? newId(),
+        thread_id: threadId,
+        step: slot.step,
+        status: slot.status,
+        sort_order: order,
+        created_at: slot.prior?.created_at ?? now,
+        updated_at: now,
+      }));
 
       clearStmt.run(threadId);
       for (const row of next) insertStmt.run(row);
       return next.map(rowToItem);
+    },
+
+    updateStep(threadId: string, itemId: string, step: string): GoalItem | null {
+      const text = step.trim();
+      if (!text) return null;
+      const existing = (listStmt.all(threadId) as ItemRow[]).find((row) => row.id === itemId);
+      if (!existing) return null;
+      const next = { ...existing, step: text, updated_at: Date.now() };
+      updateStmt.run(next);
+      return rowToItem(next);
     },
 
     merge(

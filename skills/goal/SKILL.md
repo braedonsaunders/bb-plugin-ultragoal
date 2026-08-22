@@ -36,7 +36,7 @@ Workers complete their assigned slice and report evidence. They do not call `upd
 - `get_goal` — read status, token budget, tokens used, elapsed time, the requirement plan, and live subagents.
 - `create_goal` — only when the user or system explicitly asked to start a Goal, and only when no unfinished Goal exists. Do not infer a Goal from an ordinary task. Set `token_budget` only when the user asked for one.
 - `update_goal` — `complete` or `blocked` only. You cannot pause, resume, clear, or budget-limit a Goal.
-- `update_plan` — same contract as Codex. Provide `plan` (and optional `explanation`). Each item is `{ step, status }` with status `pending`, `in_progress`, or `completed`. Keep the plan current as steps complete or the next best action changes.
+- `update_plan` — same contract as Codex. Provide `plan` (and optional `explanation`). Each item is `{ id?, step, status }`. Pass `id` from `get_goal` when updating an existing slice so its Now title changes in place. Keep status `in_progress` for live workers. Next is only work that has not started — do not park a worker's current slice there.
 - `spawn_agent`, `send_message`, `followup_task`, `list_agents`, `wait_agent`, `interrupt_agent` — Codex MultiAgentV2. This is the default execution path. `send_message` queues without starting a turn; `followup_task` wakes a non-root agent.
 
 ## How to run

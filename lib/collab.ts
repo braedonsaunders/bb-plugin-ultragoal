@@ -75,6 +75,7 @@ export function createCollabStore(
   hooks?: {
     onChange?: (rootThreadId: string) => void;
     nextItemId?: (rootThreadId: string) => string | null;
+    retitleItem?: (rootThreadId: string, itemId: string, message: string) => void;
   },
 ) {
   const db = bb.storage.database();
@@ -624,6 +625,7 @@ export function createCollabStore(
           } catch {
             // Title from spawn/fork is enough if update is unavailable.
           }
+          if (itemId) hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
           hooks?.onChange?.(rootThreadId);
           return { task_name: taskName, nickname: displayName, item_id: itemId };
         },
@@ -690,6 +692,8 @@ export function createCollabStore(
             mode: "auto",
             input: [{ type: "text", text: trimmed }],
           });
+          if (agent.item_id) hooks?.retitleItem?.(rootId(threadId), agent.item_id, trimmed);
+          hooks?.onChange?.(rootId(threadId));
           return "";
         },
       });
