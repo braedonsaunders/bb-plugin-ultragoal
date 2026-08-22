@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Previous starts collapsed.
+
 ## 0.1.1
 
 - Plan rows are read-only; only the agent updates them. Now rows expand for worker detail.

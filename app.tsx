@@ -418,7 +418,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   const [collapsed, setCollapsed] = useState({
     now: false,
     next: false,
-    previous: false,
+    previous: true,
     settings: true,
   });
   const toggleCollapsed = (key: keyof typeof collapsed) => {
