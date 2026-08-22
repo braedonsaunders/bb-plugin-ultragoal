@@ -47,7 +47,7 @@ Work from current evidence in the worktree. Do not treat memory, intent, or a pl
 
 Do not stop to ask whether you should continue. A later plugin turn will continue the Goal while it is active. Treat that as permission to keep orchestrating, not as a new task.
 
-If it has been 5 minutes (or the Goal's progress interval) since the last user-visible update on this main thread, write a short visible chat status there before doing anything else: what finished, who is working, what is next. Do not hide that update in agent-only text or a tool result.
+Do not narrate ordinary orchestration turns. The Goal pane already shows Now and crew. Write a short visible chat update only when a slice actually completed, a worker failed, you are blocked, or a progress-check-in turn explicitly asks for one. Never post a "still in flight" / "nothing new has shipped" note.
 
 ## Completion
 

@@ -675,16 +675,28 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  function progressIsDue(goal: StoredGoal, minutes: number): boolean {
+    if (minutes <= 0) return false;
+    const lastAt = goal.lastProgressAt ?? goal.startedAt;
+    return Date.now() - lastAt >= minutes * 60_000;
+  }
+
   async function continueIfIdle(threadId: string, goal: StoredGoal): Promise<void> {
     await ensureCrew(threadId);
     const latestGoal = store.get(threadId) ?? goal;
     const snap = await viewFresh(latestGoal);
-    const text = isBudgetExhausted(snap) ? budgetLimitPrompt(snap) : continuationPrompt(snap);
+    const due = !isBudgetExhausted(snap) && progressIsDue(latestGoal, snap.settings.progressUpdateMinutes);
+    const text = isBudgetExhausted(snap)
+      ? budgetLimitPrompt(snap)
+      : due
+        ? progressPrompt(snap)
+        : continuationPrompt(snap);
     const sent = await sendSteering(threadId, text, "start");
     if (!sent) return;
     store.update(threadId, {
       lastContinueAt: Date.now(),
       lastContinueWasAutomatic: true,
+      lastProgressAt: due ? Date.now() : latestGoal.lastProgressAt,
     });
     const latest = store.get(threadId);
     if (latest) publish(threadId, await viewFresh(latest));
@@ -1006,8 +1018,8 @@ Keep the plan current as steps complete or the next best action changes. Append 
               ? `Verification is on. After a worker returns, a ${view(goal).settings.verifyProvider}/${view(goal).settings.verifyModel} verifier is launched automatically. Do not mark that slice complete until VERIFY_PASS. On VERIFY_FAIL, spawn a fix worker.`
               : "Verification is off for this Goal.",
             view(goal).settings.progressUpdateMinutes > 0
-              ? `If ${view(goal).settings.progressUpdateMinutes} minutes have passed since the last user-visible update on this main thread, write a short visible chat status now (done / running / next) so the user can see it. Do not hide it in agent-only text.`
-              : "Progress chat updates are off for this Goal.",
+              ? `Do not write a visible chat status on ordinary turns. A progress-check-in every ${view(goal).settings.progressUpdateMinutes} minutes will ask when a chat update is due. You may also write one short note when a slice completes or a worker fails.`
+              : "Progress chat updates are off for this Goal. Do not write routine status notes.",
             "Stay on the root to plan, wait, verify, and unblock.",
             "Call update_goal with status complete only when current evidence proves every requirement.",
             "Call update_goal with status blocked only after the same blocker repeats for three consecutive goal turns.",
@@ -1069,8 +1081,6 @@ Keep the plan current as steps complete or the next best action changes. Append 
     const accounted = await account(thread.id, { evenIfIdle: true });
     let goal = accounted ?? store.get(thread.id);
     if (!goal) return;
-    store.update(thread.id, { lastProgressAt: Date.now() });
-    goal = store.get(thread.id) ?? goal;
     const snap = await viewFresh(goal);
     publish(thread.id, snap);
     if (goal.status !== "active" && goal.status !== "budget_limited") return;

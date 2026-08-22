@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- Auto-continue stays on, but the root thread no longer posts a status dump every turn.
+- Visible chat updates only when a slice finishes, a worker fails, or the progress interval is due.
+
 ## 0.1.3
 
 - Goal pane returns the stored plan immediately; crew and tokens fill in over realtime.
