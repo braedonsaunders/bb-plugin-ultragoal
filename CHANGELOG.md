@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Plan steps that declare their worker ("Hunt B: … — worker thr_x") now link that worker to the slice. Orchestrators that write assignments into the plan instead of passing item_id get correctly titled Now rows, and the declared slice leaves Up next. The "worker thr_x" annotation is stripped from displayed titles.
+- Generic "Subagent task" rows are no longer synthesized for native Task calls that materialize real child threads (OpenCode ACP does this): the discovered child already renders a named row, so synthetics only cover the surplus of live calls over live child workers. Cursor, whose Task calls spawn no threads, is unaffected.
+- Slice titles keep their descriptive half: "Hunt B: feature-gate holes outside dashboard chips" no longer collapses to "Hunt B".
+
 ## 0.4.1
 
 - UltraGoal no longer spawns workers itself. Auto-staffing raced the orchestrator's own agentic spawning — it launched premature workers for unbriefed pending slices with thin one-line briefs and silently dropped their failures. The orchestrator spawns every worker via spawn_agent (or native spawns, which are tracked); the plugin only cleans up errored worker threads and keeps nudging the model to staff open slices.

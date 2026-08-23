@@ -424,8 +424,19 @@ export default function plugin(bb: BbPluginApi) {
   // plan items: native Task events carry no slice text, and guessing a pairing
   // is exactly what put wrong titles and wrong leads on Now rows. An honest
   // generic row beats a confident lie.
-  function nativeTaskAgents(threadId: string, tasks: LiveNativeTask[]): GoalAgent[] {
-    return tasks.map((task, index) => ({
+  //
+  // On providers where a Task call materializes a real child thread (OpenCode
+  // ACP does; Cursor does not), the discovered child already renders a named
+  // Now row, so a generic row per call would double-count. Precise pairing is
+  // impossible mid-run — the pending event carries no child id — so synthesize
+  // rows only for the surplus of live calls over live child workers.
+  function nativeTaskAgents(
+    threadId: string,
+    tasks: LiveNativeTask[],
+    liveChildWorkers: number,
+  ): GoalAgent[] {
+    const surplus = Math.max(0, tasks.length - liveChildWorkers);
+    return tasks.slice(tasks.length - surplus).map((task, index) => ({
       threadId,
       taskName: `task/${task.key}`,
       nickname: `Subagent ${index + 1}`,
@@ -435,6 +446,28 @@ export default function plugin(bb: BbPluginApi) {
       status: "running" as const,
       summary: null,
     }));
+  }
+
+  // Orchestrators sometimes declare assignments inside the plan itself
+  // ("Hunt A ... — worker thr_x"). An explicit thread id in an open step is a
+  // machine-readable link, so honor it: that worker holds that slice.
+  function applyDeclaredWorkers(threadId: string, agents: GoalAgent[]): void {
+    const open = items.list(threadId).filter((item) => item.status !== "completed");
+    const openIds = new Set(open.map((item) => item.id));
+    const byThread = new Map(
+      agents.filter((agent) => agent.role !== "verifier").map((agent) => [agent.threadId, agent]),
+    );
+    for (const item of open) {
+      for (const ref of item.step.match(/thr_[a-z0-9]+/gi) ?? []) {
+        const agent = byThread.get(ref);
+        if (!agent || agent.itemId === item.id) continue;
+        // Only relink a worker whose current slice is finished or missing.
+        if (agent.itemId && openIds.has(agent.itemId)) continue;
+        collab.setMeta(agent.threadId, { itemId: item.id });
+        agent.itemId = item.id;
+        bb.log.info(`Linked ${agent.nickname} to ${item.id} declared in its plan step`);
+      }
+    }
   }
 
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
@@ -449,6 +482,7 @@ export default function plugin(bb: BbPluginApi) {
       ]);
       await syncNativePlan(goal.threadId);
       const assigned = assignLiveAgents(goal.threadId, listed);
+      applyDeclaredWorkers(goal.threadId, assigned);
       const open = new Map(
         items.list(goal.threadId).filter((item) => item.status !== "completed").map((item) => [item.id, item]),
       );
@@ -459,9 +493,15 @@ export default function plugin(bb: BbPluginApi) {
         if (agent.title && agent.title !== agent.nickname) continue;
         collab.setWorkTitleForItem(goal.threadId, item.id, item.step);
       }
+      const liveChildWorkers = assigned.filter(
+        (agent) =>
+          agent.role !== "verifier" &&
+          agent.threadId !== goal.threadId &&
+          (agent.status === "running" || agent.status === "starting"),
+      ).length;
       agentCache.set(goal.threadId, [
         ...assigned,
-        ...nativeTaskAgents(goal.threadId, liveTasks),
+        ...nativeTaskAgents(goal.threadId, liveTasks, liveChildWorkers),
       ]);
     } catch (error) {
       bb.log.warn(
