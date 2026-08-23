@@ -1,7 +1,13 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { rpcContract, type GoalAgent, type GoalSnapshot, type GoalStatus } from "./contract.js";
-import { accountGoalProgress, readThreadTokens, threadIsRunning } from "./lib/accounting.js";
+import {
+  accountGoalProgress,
+  readThreadTokens,
+  sessionIdForThread,
+  threadIsRunning,
+} from "./lib/accounting.js";
+import { listOpenCodeChildren, type NativeChildSession } from "./lib/provider-children.js";
 import { usesNativeGoal } from "./lib/continue.js";
 import {
   budgetLimitPrompt,
@@ -427,32 +433,71 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
-  // One GoalAgent per live native Task call in the open turn. Never paired to
-  // plan items: native Task events carry no slice text, and guessing a pairing
-  // is exactly what put wrong titles and wrong leads on Now rows. An honest
-  // generic row beats a confident lie.
+  // One GoalAgent per live native Task call in the open turn.
   //
   // On providers where a Task call materializes a real child thread (OpenCode
-  // ACP does; Cursor does not), the discovered child already renders a named
-  // Now row, so a generic row per call would double-count. Precise pairing is
-  // impossible mid-run — the pending event carries no child id — so synthesize
+  // ACP sometimes does; Cursor never), the discovered child already renders a
+  // named Now row, so a generic row per call would double-count. Synthesize
   // rows only for the surplus of live calls over live child workers.
+  //
+  // Names come from the provider's own lifecycle store when it has one:
+  // OpenCode records each task subagent as a child session (with its real
+  // title) the moment it starts. bb's pending tool-call event carries nothing,
+  // so a session created within the pairing window of the call's start is that
+  // call's subagent. A named row also links to the open plan item whose step
+  // matches its title exactly, so the same slice cannot render twice.
+  const CHILD_SESSION_PAIRING_MS = 3 * 60_000;
+
+  function normalizedTitle(text: string): string {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  function itemIdMatchingTitle(threadId: string, title: string): string | null {
+    const normalized = normalizedTitle(title);
+    if (normalized.length < 12) return null;
+    for (const item of items.list(threadId)) {
+      if (item.status === "completed") continue;
+      const step = normalizedTitle(item.step);
+      if (step.startsWith(normalized) || normalized.startsWith(step)) return item.id;
+    }
+    return null;
+  }
+
   function nativeTaskAgents(
     threadId: string,
     tasks: LiveNativeTask[],
     liveChildWorkers: number,
+    childSessions: NativeChildSession[],
   ): GoalAgent[] {
     const surplus = Math.max(0, tasks.length - liveChildWorkers);
-    return tasks.slice(tasks.length - surplus).map((task, index) => ({
-      threadId,
-      taskName: `task/${task.key}`,
-      nickname: `Subagent ${index + 1}`,
-      title: null,
-      itemId: null,
-      role: "worker" as const,
-      status: "running" as const,
-      summary: null,
-    }));
+    const usedSessions = new Set<string>();
+    return tasks.slice(tasks.length - surplus).map((task, index) => {
+      let title: string | null = null;
+      let bestDelta = CHILD_SESSION_PAIRING_MS;
+      let best: NativeChildSession | null = null;
+      for (const session of childSessions) {
+        if (usedSessions.has(session.id)) continue;
+        const delta = Math.abs(session.createdAt - task.startedAt);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          best = session;
+        }
+      }
+      if (best) {
+        usedSessions.add(best.id);
+        title = best.title;
+      }
+      return {
+        threadId,
+        taskName: `task/${task.key}`,
+        nickname: `Subagent ${index + 1}`,
+        title,
+        itemId: title ? itemIdMatchingTitle(threadId, title) : null,
+        role: "worker" as const,
+        status: "running" as const,
+        summary: null,
+      };
+    });
   }
 
   // Orchestrators sometimes declare assignments inside the plan itself
@@ -479,14 +524,17 @@ export default function plugin(bb: BbPluginApi) {
 
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
     try {
-      const [listed, liveTasks] = await Promise.all([
+      const [listed, liveTasks, sessionId] = await Promise.all([
         // Now renders from liveness, so the crew's thread statuses must be
         // fresh, not cache defaults. Discovery registers children the
         // orchestrator spawned natively (outside spawn_agent) so they get
         // Now rows and auto-approval like any other worker.
         collab.listForRoot(goal.threadId, { discover: true, refreshLimit: 24 }),
         listLiveNativeTasks(bb, goal.threadId),
+        sessionIdForThread(bb, goal.threadId),
       ]);
+      const childSessions =
+        liveTasks.length > 0 && sessionId ? listOpenCodeChildren(sessionId) : [];
       await syncNativePlan(goal.threadId);
       const assigned = assignLiveAgents(goal.threadId, listed);
       applyDeclaredWorkers(goal.threadId, assigned);
@@ -508,7 +556,7 @@ export default function plugin(bb: BbPluginApi) {
       ).length;
       agentCache.set(goal.threadId, [
         ...assigned,
-        ...nativeTaskAgents(goal.threadId, liveTasks, liveChildWorkers),
+        ...nativeTaskAgents(goal.threadId, liveTasks, liveChildWorkers, childSessions),
       ]);
     } catch (error) {
       bb.log.warn(

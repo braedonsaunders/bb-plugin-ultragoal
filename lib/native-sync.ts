@@ -27,6 +27,7 @@ export interface LiveNativeTask {
   /** Provider item id of the Task tool call — stable for started/completed pairing. */
   key: string;
   startedSeq: number;
+  startedAt: number;
   tool: string;
 }
 
@@ -177,7 +178,12 @@ export async function listLiveNativeTasks(
   }
   return live
     .sort((a, b) => a[1].seq - b[1].seq)
-    .map(([key, value]) => ({ key, startedSeq: value.seq, tool: value.tool }));
+    .map(([key, value]) => ({
+      key,
+      startedSeq: value.seq,
+      startedAt: value.at,
+      tool: value.tool,
+    }));
 }
 
 /** True when any native Task call is pending in the open turn (pre-grace). */

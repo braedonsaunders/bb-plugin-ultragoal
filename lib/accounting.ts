@@ -56,7 +56,7 @@ async function listEvents(
 
 const sessionByThread = new Map<string, string>();
 
-async function sessionIdForThread(bb: BbPluginApi, threadId: string): Promise<string | null> {
+export async function sessionIdForThread(bb: BbPluginApi, threadId: string): Promise<string | null> {
   const cached = sessionByThread.get(threadId);
   if (cached) return cached;
   const id = await providerSessionId(async () =>
