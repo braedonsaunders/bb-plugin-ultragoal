@@ -2003,7 +2003,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
               .array(z.string())
               .optional()
               .describe(
-                "File paths/globs this slice owns. Keep scopes disjoint across parallel slices so workers cannot collide. Omit to keep existing.",
+                "File paths/globs this slice owns — the NARROW set it will actually touch. Scope gates concurrency: overlapping scopes serialize (deliberately, for slices sharing files); a whole-app scope serializes the entire goal. Prefer [] over a broad guess. Omit to keep existing.",
               ),
             check: z
               .string()

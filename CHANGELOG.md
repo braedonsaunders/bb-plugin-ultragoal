@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.1
+
+- Scope-width guidance: files scopes gate concurrency, so they must be the narrow set a slice actually touches — overlapping scopes serialize deliberately (slices sharing files belong in one queue), and a whole-app scope serializes the entire goal. Observed live: one slice scoped "apps/web" blocked eight ready slices; narrowing restored 4-wide staffing in seconds. Prefer an empty scope over a broad guess.
+
 ## 0.13.0
 
 Active supervision without the poll spam. Event gating (0.9.0) over-corrected: it killed the busy-poll loop but also idled the orchestrator's judgment — nobody reviewed worker direction, merged branches promptly, or narrated substance:
