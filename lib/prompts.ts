@@ -10,6 +10,12 @@ const CONTINUATION = readFileSync(join(templatesDir, "continuation.md"), "utf8")
 const BUDGET_LIMIT = readFileSync(join(templatesDir, "budget_limit.md"), "utf8");
 const OBJECTIVE_UPDATED = readFileSync(join(templatesDir, "objective_updated.md"), "utf8");
 const PROGRESS = readFileSync(join(templatesDir, "progress.md"), "utf8");
+const WORKER_BRIEF = readFileSync(join(templatesDir, "worker_brief.md"), "utf8");
+
+/** The generalized engineering quality bar injected into every worker brief. */
+export function workerQualityBrief(): string {
+  return WORKER_BRIEF.trim();
+}
 
 function escapeXml(input: string): string {
   return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");

@@ -3,6 +3,7 @@ import { isPromptLikeTitle, shortSliceTitle } from "./titles.js";
 import { z } from "zod";
 import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
 import { nextAuditorName, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
+import { workerQualityBrief } from "./prompts.js";
 
 const MIN_WAIT_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -513,9 +514,10 @@ export function createCollabStore(
       `The new agent's canonical task name is ${taskName}.`,
       `Your call sign is ${displayName}.`,
       role === "verifier"
-        ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes."
+        ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes. Fail work that ships stubs/placeholders/TODO behavior, weakens or skips tests to get green, leaves dead or duplicated code behind, or touches files unrelated to its slice."
         : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
       "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
+      role === "verifier" ? "" : workerQualityBrief(),
       role === "verifier"
         ? ""
         : "If your slice is a hunt/audit/review that uncovers discrete defects, call report_finding the moment you confirm each one (one call per defect; do not batch them into your final report) — a fix slice is staffed automatically per finding.",

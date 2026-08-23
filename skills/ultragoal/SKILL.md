@@ -21,7 +21,7 @@ The root thread is the orchestrator and PLANNER. It does not implement the Ultra
 6. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, add a fix slice.
 7. One agent = one slice, always: retired workers refuse follow-ups; `followup_task` only steers a worker about the slice it already owns. `spawn_agent` remains for ad-hoc helpers outside the plan — give each a humorous `display_name` related to its work (e.g. "Captain Typecheck"), and begin any worker prompt spawned another way with one line `SLICE (item_id=<id>): <one-line task>` so UltraGoal can track it.
 
-Workers complete their assigned slice and report evidence — commit SHA(s) and their check's passing output, not bare claims. They do not call `update_goal`, take over the parent plan, or re-orchestrate the whole UltraGoal.
+Workers complete their assigned slice and report evidence — commit SHA(s) and their check's passing output, not bare claims. Every worker brief carries a generalized engineering quality bar (reuse-first with a named exemplar, complete production-grade slices, clean cutover, green gates without weakening tests, atomic commits that never touch unedited files, report_finding for unrelated bugs) — the repo's own AGENTS.md/CLAUDE.md wins where they conflict. Workers do not call `update_goal`, take over the parent plan, or re-orchestrate the whole UltraGoal.
 
 ## Commands
 

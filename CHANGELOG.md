@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0
+
+Every worker brief now carries a generalized engineering quality bar (templates/goals/worker_brief.md), distilled from production AGENTS.md standards and kept repo-agnostic — the repository's own agent docs win wherever they conflict:
+
+- Reuse before building: name the exemplar file, compose its exact primitives, extend shared code instead of forking it, never a parallel source of truth.
+- Complete production-grade slices: no stubs/placeholders/TODO behavior/fake success paths; real error or disabled states; invariants enforced at the deepest boundary; deterministic, idempotent, fail-closed.
+- Clean cutover: replaced code gets deleted — no shims, dead files, unused exports, or shadow systems.
+- Honest gates: run the repo's own format/typecheck/lint/test/build; never commit on red; never ts-ignore/eslint-disable/--no-verify/weaken a test to pass; costly-if-silently-wrong changes ship invariant + boundary tests in the same change; UI slices verified in the running app.
+- Crew-safe git: focused atomic commits, stage only intentionally-changed files, never revert or reformat files you did not edit.
+- Unrelated bugs: fix small ones, report_finding the rest — never silently ignore.
+
+Verifiers audit the same bar (fail stubs, weakened tests, dead code, out-of-slice edits), and planner guidance now prefers the repo's own gates as slice checks.
+
 ## 0.6.1
 
 Live-goal monitoring caught a restaff hazard; two structural guards close it:
