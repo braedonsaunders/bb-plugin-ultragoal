@@ -1156,18 +1156,42 @@ function isLiveAgent(agent: GoalAgent): boolean {
 }
 
 function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
-  const named = agents.filter(isNamedWorker);
-  const assignedIds = new Set(
-    named.map((agent) => agent.itemId).filter((id): id is string => Boolean(id)),
+  const live = agents.filter(
+    (agent) =>
+      agent.role !== "verifier" &&
+      isLiveAgent(agent) &&
+      (isNamedWorker(agent) || isNativeTask(agent)),
   );
   const open = items.filter((item) => item.status === "in_progress");
-  const rows = assignedIds.size > 0 ? open.filter((item) => assignedIds.has(item.id)) : open;
   const seen = new Set<string>();
   const out: GoalItem[] = [];
-  for (const item of rows) {
-    if (seen.has(item.id)) continue;
-    seen.add(item.id);
-    out.push(item);
+  if (live.length === 0) {
+    for (const item of open) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      out.push(item);
+    }
+    return out;
+  }
+  // One Now row per live subagent: the item it holds, or a synthesized row
+  // when a live agent has no plan item yet.
+  const byId = new Map(open.map((item) => [item.id, item]));
+  for (const agent of live) {
+    const item = agent.itemId ? byId.get(agent.itemId) : undefined;
+    if (item) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      out.push(item);
+      continue;
+    }
+    const id = `live:${agent.taskName}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      step: agent.title?.trim() || "Subagent task",
+      status: "in_progress",
+    });
   }
   return out;
 }
@@ -1182,8 +1206,12 @@ function agentStatusLabel(status: GoalAgent["status"]): string {
   return "unknown";
 }
 
+function isNativeTask(agent: GoalAgent): boolean {
+  return agent.taskName.startsWith("task/");
+}
+
 function isNamedWorker(agent: GoalAgent): boolean {
-  return !agent.taskName.startsWith("task/") && !/^Subagent \d+$/i.test(agent.nickname);
+  return !isNativeTask(agent) && !/^Subagent \d+$/i.test(agent.nickname);
 }
 
 function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
@@ -1219,7 +1247,11 @@ function NowRow({
   onOpenAgent: (agent: GoalAgent) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const crew = agents.filter((agent) => agent.itemId === item.id && isNamedWorker(agent));
+  const crew = agents.filter(
+    (agent) =>
+      (agent.itemId === item.id || `live:${agent.taskName}` === item.id) &&
+      (isNamedWorker(agent) || isNativeTask(agent)),
+  );
   const lead = primaryAgent(crew);
   return (
     <li className="rounded-md">

@@ -37,6 +37,7 @@ interface GoalRow {
   auto_continue: number | null;
   last_progress_at: number | null;
   progress_update_minutes: number | null;
+  last_plan_seq?: number | null;
 }
 
 export interface StoredGoal extends GoalSnapshot {
@@ -51,6 +52,7 @@ export interface StoredGoal extends GoalSnapshot {
   autoContinueOverride: boolean | null;
   lastProgressAt: number | null;
   progressUpdateMinutesOverride: number | null;
+  lastPlanSeq: number | null;
 }
 
 function normalizeStatus(status: string): GoalStatus {
@@ -99,6 +101,7 @@ function rowToGoal(row: GoalRow): StoredGoal {
     verifyModelOverride: row.verify_model,
     autoContinueOverride: row.auto_continue == null ? null : row.auto_continue === 1,
     progressUpdateMinutesOverride: row.progress_update_minutes,
+    lastPlanSeq: row.last_plan_seq ?? null,
   };
 }
 
@@ -185,6 +188,8 @@ export function createGoalStore(bb: BbPluginApi) {
     `ALTER TABLE collab_agents ADD COLUMN last_verify_hash TEXT`,
     `ALTER TABLE goals ADD COLUMN last_progress_at INTEGER`,
     `ALTER TABLE goals ADD COLUMN progress_update_minutes INTEGER`,
+    `ALTER TABLE goals ADD COLUMN last_plan_seq INTEGER`,
+    `ALTER TABLE goal_items ADD COLUMN origin TEXT`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -231,6 +236,9 @@ export function createGoalStore(bb: BbPluginApi) {
       progress_update_minutes = excluded.progress_update_minutes
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
+  const writePlanSeq = db.prepare(
+    "UPDATE goals SET last_plan_seq = ? WHERE thread_id = ?",
+  );
 
   return {
     get(threadId: string): StoredGoal | null {
@@ -389,6 +397,10 @@ export function createGoalStore(bb: BbPluginApi) {
       };
       upsert.run(next);
       return rowToGoal(next);
+    },
+
+    setLastPlanSeq(threadId: string, seq: number): void {
+      writePlanSeq.run(seq, threadId);
     },
 
     clear(threadId: string): boolean {

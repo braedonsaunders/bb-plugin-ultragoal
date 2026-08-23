@@ -15,7 +15,7 @@ The root thread is the orchestrator. It does not implement the UltraGoal itself.
 
 1. Call `update_plan` with concrete remaining work.
 2. Mark independent slices `in_progress`.
-3. `spawn_agent` or `followup_task` one worker per in-progress slice (several in the same turn). Give each a humorous `display_name` (e.g. "Sir Syncs-a-Lot"). Do not use the Cursor Task tool — Now only tracks UltraGoal workers.
+3. `spawn_agent` or `followup_task` one worker per in-progress slice (several in the same turn). Give each a humorous `display_name` (e.g. "Sir Syncs-a-Lot"). Prefer these over the native Task tool — native Task subagents appear in Now automatically but cannot be messaged, retitled, or verified.
 4. Stay on the root: `list_agents` / `wait_agent`, merge results, `update_plan` as steps complete or the next best action changes, spawn the next slices.
 5. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, spawn a fix worker.
 6. Do implementation, edits, and deep investigation on workers. On the root, only plan, spawn, wait, verify, and unblock.

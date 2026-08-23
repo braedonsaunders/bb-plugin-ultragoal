@@ -14,6 +14,13 @@ import { lastUserText, parseSlashGoal } from "./lib/slash.js";
 import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
+import {
+  forgetNativeScan,
+  hasPendingNativeTasks,
+  listLiveNativeTasks,
+  readNativePlan,
+  type LiveNativeTask,
+} from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 
 function sliceTitleFromMessage(message: string): string {
@@ -359,9 +366,76 @@ export default function plugin(bb: BbPluginApi) {
     return [...live, ...rest, ...extra];
   }
 
+  const NATIVE_PLAN_FRESH_MS = 10 * 60_000;
+
+  // Codex-Goal-style event projection: mirror the model-owned plan snapshot
+  // (turn/plan/updated) into the UltraGoal plan, latest sequence wins, applied
+  // exactly once per snapshot.
+  async function syncNativePlan(threadId: string): Promise<void> {
+    const goal = store.get(threadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    const snapshot = await readNativePlan(bb, threadId);
+    if (!snapshot) return;
+    if (goal.lastPlanSeq == null) {
+      store.setLastPlanSeq(threadId, snapshot.seq);
+      // A stale first snapshot predates this goal's tracked plan; baseline it
+      // instead of resurrecting old steps.
+      if (Date.now() - snapshot.createdAt > NATIVE_PLAN_FRESH_MS) return;
+      items.applyNativePlan(threadId, snapshot.steps);
+      return;
+    }
+    if (snapshot.seq <= goal.lastPlanSeq) return;
+    store.setLastPlanSeq(threadId, snapshot.seq);
+    if (items.applyNativePlan(threadId, snapshot.steps)) {
+      bb.log.info(`Mirrored native plan snapshot seq ${snapshot.seq} on ${threadId}`);
+    }
+  }
+
+  // One GoalAgent per live native Task call in the open turn, paired in start
+  // order with in-progress plan items that no live UltraGoal worker holds.
+  function nativeTaskAgents(
+    threadId: string,
+    tasks: LiveNativeTask[],
+    agents: GoalAgent[],
+  ): GoalAgent[] {
+    if (tasks.length === 0) return [];
+    const held = new Set(
+      agents
+        .filter(
+          (agent) =>
+            agent.role !== "verifier" &&
+            (agent.status === "running" || agent.status === "starting") &&
+            agent.itemId,
+        )
+        .map((agent) => agent.itemId as string),
+    );
+    const openItems = items
+      .list(threadId)
+      .filter((item) => item.status === "in_progress" && !held.has(item.id));
+    let slot = 0;
+    return tasks.map((task, index) => {
+      const item = openItems[slot];
+      if (item) slot += 1;
+      return {
+        threadId,
+        taskName: `task/${task.key}`,
+        nickname: `Subagent ${index + 1}`,
+        title: item ? shortSliceTitle(item.step) || null : null,
+        itemId: item?.id ?? null,
+        role: "worker" as const,
+        status: "running" as const,
+        summary: null,
+      };
+    });
+  }
+
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
     try {
-      const listed = await collab.listForRoot(goal.threadId);
+      const [listed, liveTasks] = await Promise.all([
+        collab.listForRoot(goal.threadId),
+        listLiveNativeTasks(bb, goal.threadId),
+      ]);
+      await syncNativePlan(goal.threadId);
       const assigned = assignLiveAgents(goal.threadId, listed);
       const open = new Map(
         items.list(goal.threadId).filter((item) => item.status !== "completed").map((item) => [item.id, item]),
@@ -373,7 +447,10 @@ export default function plugin(bb: BbPluginApi) {
         if (agent.title && agent.title !== agent.nickname) continue;
         collab.setWorkTitleForItem(goal.threadId, item.id, item.step);
       }
-      agentCache.set(goal.threadId, assigned);
+      agentCache.set(goal.threadId, [
+        ...assigned,
+        ...nativeTaskAgents(goal.threadId, liveTasks, assigned),
+      ]);
     } catch (error) {
       bb.log.warn(
         `Could not list Goal agents on ${goal.threadId}: ${
@@ -732,6 +809,9 @@ export default function plugin(bb: BbPluginApi) {
     if (minutes <= 0 || !snap.settings.autoContinue) return false;
     const lastAt = goal.lastProgressAt ?? goal.lastContinueAt ?? goal.startedAt;
     if (Date.now() - lastAt < minutes * 60_000) return false;
+    // Steered input interrupts pending native Task subagents on Cursor and
+    // orphans their tool calls; hold the check-in until they finish.
+    if (hasPendingNativeTasks(threadId)) return false;
     const runningNow = await threadIsRunning(bb, threadId);
     const sent = await sendSteering(
       threadId,
@@ -1117,7 +1197,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
             liveAgents.length > 0
               ? `${liveAgents.length} subagent(s) are live. Wait or follow up; do not redo their slices on the root.`
               : "No subagents are live. Spawn one worker per in-progress slice before doing the work yourself.",
-            "Call spawn_agent or followup_task for each in-progress slice in this turn. Give each a humorous display_name. Do not use the Cursor Task tool for UltraGoal work — that does not update Now.",
+            "Prefer spawn_agent or followup_task for each in-progress slice and give each a humorous display_name — those workers get named Now rows, follow-ups, and verification. Native Task subagents are tracked in Now automatically but cannot be messaged or verified.",
             view(goal).settings.verifyEnabled
               ? `Verification is on. After a worker returns, a ${view(goal).settings.verifyProvider}/${view(goal).settings.verifyModel} verifier is launched automatically. Do not mark that slice complete until VERIFY_PASS. On VERIFY_FAIL, spawn a fix worker.`
               : "Verification is off for this UltraGoal.",
@@ -1228,6 +1308,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
 
   bb.events.on("thread.deleted", ({ thread }) => {
     running.delete(thread.id);
+    forgetNativeScan(thread.id);
     items.clear(thread.id);
     if (store.clear(thread.id)) publish(thread.id, null);
   });

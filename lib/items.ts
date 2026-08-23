@@ -12,6 +12,11 @@ interface ItemRow {
   sort_order: number;
   created_at: number;
   updated_at: number;
+  origin: string | null;
+}
+
+function normalizedStep(step: string): string {
+  return step.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function rowToItem(row: ItemRow): GoalItem {
@@ -29,12 +34,16 @@ export function createItemStore(bb: BbPluginApi) {
     "SELECT * FROM goal_items WHERE thread_id = ? ORDER BY sort_order ASC, created_at ASC",
   );
   const insertStmt = db.prepare(`
-    INSERT INTO goal_items (id, thread_id, step, status, sort_order, created_at, updated_at)
-    VALUES (@id, @thread_id, @step, @status, @sort_order, @created_at, @updated_at)
+    INSERT INTO goal_items (id, thread_id, step, status, sort_order, created_at, updated_at, origin)
+    VALUES (@id, @thread_id, @step, @status, @sort_order, @created_at, @updated_at, @origin)
   `);
   const updateStmt = db.prepare(`
     UPDATE goal_items
     SET step = @step, status = @status, sort_order = @sort_order, updated_at = @updated_at
+    WHERE id = @id AND thread_id = @thread_id
+  `);
+  const setStatusStmt = db.prepare(`
+    UPDATE goal_items SET status = @status, updated_at = @updated_at
     WHERE id = @id AND thread_id = @thread_id
   `);
   const removeStmt = db.prepare("DELETE FROM goal_items WHERE id = ? AND thread_id = ?");
@@ -101,6 +110,7 @@ export function createItemStore(bb: BbPluginApi) {
         sort_order: order,
         created_at: slot.prior?.created_at ?? now,
         updated_at: now,
+        origin: slot.prior?.origin ?? null,
       }));
 
       clearStmt.run(threadId);
@@ -138,6 +148,7 @@ export function createItemStore(bb: BbPluginApi) {
           sort_order: order,
           created_at: now,
           updated_at: now,
+          origin: null,
         });
         order += 1;
       }
@@ -157,9 +168,76 @@ export function createItemStore(bb: BbPluginApi) {
         sort_order: existing.length,
         created_at: now,
         updated_at: now,
+        origin: null,
       };
       insertStmt.run(row);
       return rowToItem(row);
+    },
+
+    /**
+     * Non-destructive mirror of the model-owned native plan snapshot
+     * (turn/plan/updated). Matched steps take the snapshot status, except
+     * completed items never reopen. Unmatched steps are inserted with
+     * origin='native'. Open native-origin items missing from the snapshot are
+     * marked completed (the model checked them off or dropped them).
+     * Returns true when anything changed.
+     */
+    applyNativePlan(
+      threadId: string,
+      steps: Array<{ step: string; status: GoalItemStatus }>,
+    ): boolean {
+      const existing = listStmt.all(threadId) as ItemRow[];
+      const byStep = new Map<string, ItemRow>();
+      for (const row of existing) {
+        const key = normalizedStep(row.step);
+        if (!byStep.has(key)) byStep.set(key, row);
+      }
+      const now = Date.now();
+      const matched = new Set<string>();
+      let changed = false;
+      let order = existing.length;
+      for (const entry of steps) {
+        const text = currentSliceTitle(entry.step);
+        if (!text) continue;
+        const prior = byStep.get(normalizedStep(text));
+        if (prior) {
+          matched.add(prior.id);
+          if (prior.status !== entry.status && prior.status !== "completed") {
+            setStatusStmt.run({
+              id: prior.id,
+              thread_id: threadId,
+              status: entry.status,
+              updated_at: now,
+            });
+            changed = true;
+          }
+          continue;
+        }
+        insertStmt.run({
+          id: newId(),
+          thread_id: threadId,
+          step: text,
+          status: entry.status,
+          sort_order: order,
+          created_at: now,
+          updated_at: now,
+          origin: "native",
+        });
+        order += 1;
+        changed = true;
+      }
+      for (const row of existing) {
+        if (row.origin !== "native" || matched.has(row.id)) continue;
+        if (row.status === "completed") continue;
+        setStatusStmt.run({
+          id: row.id,
+          thread_id: threadId,
+          status: "completed",
+          updated_at: now,
+        });
+        changed = true;
+      }
+      return changed;
     },
 
     setStatus(threadId: string, itemId: string, status: GoalItemStatus): GoalItem | null {

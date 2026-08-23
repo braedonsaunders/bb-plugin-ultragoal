@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Codex-Goal-style event projection: Now derives live subagents from the root thread's own tool-call events, scoped to the open turn, so every native Cursor Task shows as its own row while it runs and disappears when it finishes or the turn ends.
+- The model-owned plan (turn/plan/updated) is mirrored into the UltraGoal plan, latest snapshot wins, without touching completed history.
+- UltraGoal no longer steers a progress check-in while native Task subagents are pending; those injections were interrupting Cursor's spawned workers mid-run.
+- Pending Task calls orphaned by a steering interrupt age out instead of lingering as ghost Now rows.
+
 ## 0.2.7
 
 - spawn_agent and followup_task open a new Now row when the old slice is taken or finished, so the pane tracks the current leftovers.
