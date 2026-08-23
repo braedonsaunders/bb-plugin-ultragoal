@@ -71,6 +71,9 @@ export const goalSettingsSchema = z.object({
   progressUpdateMinutes: z.number().int(),
   /** Ready-queue scheduler slot count. 0 disables plugin-side staffing. */
   maxWorkers: z.number().int(),
+  /** Worker execution pin. Empty = inherit the goal thread's provider/model. */
+  workerProvider: z.string(),
+  workerModel: z.string(),
 });
 
 export const goalDecisionSchema = z.object({
@@ -202,6 +205,8 @@ export const rpcContract = defineRpcContract({
         autoContinue: z.boolean().optional(),
         progressUpdateMinutes: z.number().int().min(0).max(240).optional(),
         maxWorkers: z.number().int().min(0).max(16).optional(),
+        workerProvider: z.string().nullable().optional(),
+        workerModel: z.string().nullable().optional(),
         tokenBudget: z.number().int().positive().nullable().optional(),
       })
       .strict(),

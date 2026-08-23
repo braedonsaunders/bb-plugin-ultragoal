@@ -38,6 +38,8 @@ interface GoalRow {
   last_progress_at: number | null;
   progress_update_minutes: number | null;
   max_workers: number | null;
+  worker_provider: string | null;
+  worker_model: string | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
@@ -56,6 +58,8 @@ export interface StoredGoal
   lastProgressAt: number | null;
   progressUpdateMinutesOverride: number | null;
   maxWorkersOverride: number | null;
+  workerProviderOverride: string | null;
+  workerModelOverride: string | null;
 }
 
 function normalizeStatus(status: string): GoalStatus {
@@ -98,6 +102,8 @@ function rowToGoal(row: GoalRow): StoredGoal {
       autoContinue: true,
       progressUpdateMinutes: 5,
       maxWorkers: 5,
+      workerProvider: "",
+      workerModel: "",
     },
     lastProgressAt: row.last_progress_at,
     verifyEnabledOverride: row.verify_enabled == null ? null : row.verify_enabled === 1,
@@ -106,6 +112,8 @@ function rowToGoal(row: GoalRow): StoredGoal {
     autoContinueOverride: row.auto_continue == null ? null : row.auto_continue === 1,
     progressUpdateMinutesOverride: row.progress_update_minutes,
     maxWorkersOverride: row.max_workers,
+    workerProviderOverride: row.worker_provider,
+    workerModelOverride: row.worker_model,
   };
 }
 
@@ -239,6 +247,8 @@ export function createGoalStore(bb: BbPluginApi) {
       answered_at INTEGER
     )`,
     `CREATE INDEX IF NOT EXISTS goal_decisions_thread ON goal_decisions(thread_id, status)`,
+    `ALTER TABLE goals ADD COLUMN worker_provider TEXT`,
+    `ALTER TABLE goals ADD COLUMN worker_model TEXT`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -253,14 +263,16 @@ export function createGoalStore(bb: BbPluginApi) {
       last_seen_tokens, last_accounted_at, last_continue_was_automatic,
       blocked_streak, last_block_key, turn_count, max_turns, max_minutes,
       verify_enabled, verify_provider, verify_model, auto_continue,
-      last_progress_at, progress_update_minutes, max_workers
+      last_progress_at, progress_update_minutes, max_workers,
+      worker_provider, worker_model
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
       @last_seen_tokens, @last_accounted_at, @last_continue_was_automatic,
       @blocked_streak, @last_block_key, 0, 40, 180,
       @verify_enabled, @verify_provider, @verify_model, @auto_continue,
-      @last_progress_at, @progress_update_minutes, @max_workers
+      @last_progress_at, @progress_update_minutes, @max_workers,
+      @worker_provider, @worker_model
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -283,7 +295,9 @@ export function createGoalStore(bb: BbPluginApi) {
       auto_continue = excluded.auto_continue,
       last_progress_at = excluded.last_progress_at,
       progress_update_minutes = excluded.progress_update_minutes,
-      max_workers = excluded.max_workers
+      max_workers = excluded.max_workers,
+      worker_provider = excluded.worker_provider,
+      worker_model = excluded.worker_model
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
 
@@ -324,6 +338,8 @@ export function createGoalStore(bb: BbPluginApi) {
         last_progress_at: existing?.lastProgressAt ?? null,
         progress_update_minutes: existing?.progressUpdateMinutesOverride ?? null,
         max_workers: existing?.maxWorkersOverride ?? null,
+        worker_provider: existing?.workerProviderOverride ?? null,
+        worker_model: existing?.workerModelOverride ?? null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -355,6 +371,8 @@ export function createGoalStore(bb: BbPluginApi) {
         last_progress_at: now,
         progress_update_minutes: null,
         max_workers: null,
+        worker_provider: null,
+        worker_model: null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -383,6 +401,8 @@ export function createGoalStore(bb: BbPluginApi) {
         lastProgressAt: number | null;
         progressUpdateMinutesOverride: number | null;
         maxWorkersOverride: number | null;
+        workerProviderOverride: string | null;
+        workerModelOverride: string | null;
       }>,
     ): StoredGoal | null {
       const existing = this.get(threadId);
@@ -448,6 +468,14 @@ export function createGoalStore(bb: BbPluginApi) {
           patch.maxWorkersOverride === undefined
             ? existing.maxWorkersOverride
             : patch.maxWorkersOverride,
+        worker_provider:
+          patch.workerProviderOverride === undefined
+            ? existing.workerProviderOverride
+            : patch.workerProviderOverride,
+        worker_model:
+          patch.workerModelOverride === undefined
+            ? existing.workerModelOverride
+            : patch.workerModelOverride,
       };
       upsert.run(next);
       return rowToGoal(next);

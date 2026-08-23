@@ -12,6 +12,8 @@ export interface GoalSettingOverrides {
   autoContinue: boolean | null;
   progressUpdateMinutes: number | null;
   maxWorkers: number | null;
+  workerProvider: string | null;
+  workerModel: string | null;
 }
 
 export interface ResolvedGoalSettings {
@@ -21,6 +23,8 @@ export interface ResolvedGoalSettings {
   autoContinue: boolean;
   progressUpdateMinutes: number;
   maxWorkers: number;
+  workerProvider: string;
+  workerModel: string;
 }
 
 export interface GoalSettingDefaults {
@@ -44,5 +48,7 @@ export function resolveGoalSettings(
     progressUpdateMinutes:
       overrides.progressUpdateMinutes ?? defaults.progressUpdateMinutes,
     maxWorkers: overrides.maxWorkers ?? defaults.maxWorkers,
+    workerProvider: overrides.workerProvider?.trim() ?? "",
+    workerModel: overrides.workerModel?.trim() ?? "",
   };
 }

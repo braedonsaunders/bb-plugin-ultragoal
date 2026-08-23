@@ -1,6 +1,18 @@
 # Changelog
 
+## 0.11.0
+
+Worker execution is pinned — changing the composer's model can no longer hijack a goal's crew:
+
+- bb's spawn API drops provider/model fields that carry no provenance and re-derives them from the project's stored defaults, which track the composer. When the user switched the composer to Codex to start a manual thread, every subsequently scheduled worker spawned as Codex instead of the goal's model. All plugin spawns (workers and verifiers) now pass executionInputSources: explicit, so the requested execution always survives.
+- Resolution order for a worker's execution: spawn_agent's model arg, then the goal's Worker-model pin, then the goal thread's own provider (inherit — the default).
+- Settings panel gains a "Worker model" control beside the verifier's: Inherit (goal thread's provider/model) or Pin with the same provider/model picker.
+
 ## 0.10.2
+
+Finished workers release their provider runtime. Every completed slice left its agent session loaded, and after a day of goals the host hit memory saturation (93 provider processes, ~64MB free) — at which point NEW worker spawns silently failed at turn start, presenting as workers that "complete" without ever running. Now: a worker's runtime is stopped after its slice integrates (the worktree environment outlives the thread, so the Refinery is unaffected), wedged workers retired by the nudge cap release theirs too, and errored workers were already stopped. One live sweep freed ~2.9GB.
+
+## 0.10.1
 
 Finished workers release their provider runtime. Every completed slice left its agent session loaded, and after a day of goals the host hit memory saturation (93 provider processes, ~64MB free) — at which point NEW worker spawns silently failed at turn start, presenting as workers that "complete" without ever running. Now: a worker's runtime is stopped after its slice integrates (the worktree environment outlives the thread, so the Refinery is unaffected), wedged workers retired by the nudge cap release theirs too, and errored workers were already stopped. One live sweep freed ~2.9GB.
 

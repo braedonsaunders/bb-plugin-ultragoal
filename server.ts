@@ -145,6 +145,8 @@ function snapshotOf(
         autoContinue: goal.autoContinueOverride,
         progressUpdateMinutes: goal.progressUpdateMinutesOverride,
         maxWorkers: goal.maxWorkersOverride,
+        workerProvider: goal.workerProviderOverride,
+        workerModel: goal.workerModelOverride,
       },
       snapshotDefaults,
     ),
@@ -309,6 +311,15 @@ export default function plugin(bb: BbPluginApi) {
     },
     itemStatus(rootThreadId, itemId) {
       return items.list(rootThreadId).find((item) => item.id === itemId)?.status ?? null;
+    },
+    workerExecution(rootThreadId) {
+      const goal = store.get(rootThreadId);
+      if (!goal) return { providerId: null, model: null };
+      const resolved = view(goal).settings;
+      return {
+        providerId: resolved.workerProvider || null,
+        model: resolved.workerModel || null,
+      };
     },
     itemBrief(rootThreadId, itemId) {
       const item = items.list(rootThreadId).find((entry) => entry.id === itemId);
@@ -1710,6 +1721,8 @@ export default function plugin(bb: BbPluginApi) {
       autoContinue,
       progressUpdateMinutes,
       maxWorkers,
+      workerProvider,
+      workerModel,
       tokenBudget,
     }) {
       const existing = store.get(threadId);
@@ -1721,6 +1734,8 @@ export default function plugin(bb: BbPluginApi) {
         autoContinueOverride: autoContinue,
         progressUpdateMinutesOverride: progressUpdateMinutes,
         maxWorkersOverride: maxWorkers,
+        workerProviderOverride: workerProvider,
+        workerModelOverride: workerModel,
         tokenBudget,
       });
       const snap = next ? await viewFresh(next) : null;

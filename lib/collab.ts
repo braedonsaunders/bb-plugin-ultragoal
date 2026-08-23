@@ -87,6 +87,8 @@ export function createCollabStore(
     ) => string | null;
     /** Status of a plan item, so retired workers can refuse new slices. */
     itemStatus?: (rootThreadId: string, itemId: string) => string | null;
+    /** Goal-level worker execution pin; null fields inherit the root thread. */
+    workerExecution?: (rootThreadId: string) => { providerId: string | null; model: string | null };
     /** DAG metadata of a plan item, injected into worker briefs. */
     itemBrief?: (
       rootThreadId: string,
@@ -558,11 +560,22 @@ export function createCollabStore(
           .then((environment) => environment.hostId)
           .catch(() => undefined)
       : undefined;
+    // Execution is pinned with explicit provenance: the server drops
+    // provider/model fields that carry no executionInputSources and re-derives
+    // them from the project's stored defaults — which follow whatever the user
+    // last picked in the composer. Order: tool arg, goal pin, root thread.
+    const pin = hooks?.workerExecution?.(rootThreadId) ?? { providerId: null, model: null };
+    const execProviderId = pin.providerId ?? parent.providerId;
+    const execModel = model ?? pin.model ?? undefined;
     const spawnArgs = {
       projectId: parent.projectId ?? args.projectId,
       parentThreadId: threadId,
-      providerId: parent.providerId,
-      model: model ?? undefined,
+      providerId: execProviderId,
+      model: execModel,
+      executionInputSources: {
+        ...(execProviderId ? { providerId: "explicit" as const } : {}),
+        ...(execModel ? { model: "explicit" as const } : {}),
+      },
       permissionMode: "full" as const,
       // Non-forked workers get their own managed worktree: sharing the root's
       // environment would put concurrent writers in one directory.
@@ -708,6 +721,7 @@ export function createCollabStore(
         parentThreadId: args.rootThreadId,
         providerId: args.providerId,
         model: args.model,
+        executionInputSources: { providerId: "explicit" as const, model: "explicit" as const },
         permissionMode: "full",
         environment: verifyEnvironmentId
           ? { type: "reuse" as const, environmentId: verifyEnvironmentId }

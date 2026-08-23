@@ -932,6 +932,8 @@ function GoalSettingsPanel({
     autoContinue?: boolean;
     progressUpdateMinutes?: number;
     maxWorkers?: number;
+    workerProvider?: string | null;
+    workerModel?: string | null;
     tokenBudget?: number | null;
   }) => {
     setSaving(true);
@@ -1004,6 +1006,47 @@ function GoalSettingsPanel({
               0 turns this off. Default 5. Posts a visible update on this thread.
             </span>
           </label>
+          <div className="text-[13px] text-foreground">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                Worker model
+              </span>
+              <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                Pin
+                <input
+                  type="checkbox"
+                  checked={Boolean(settings.workerProvider)}
+                  disabled={saving}
+                  onChange={(event) => {
+                    if (event.target.checked) {
+                      const provider = providers[0];
+                      const model = provider?.models[0];
+                      if (provider && model) {
+                        void save({ workerProvider: provider.id, workerModel: model.id });
+                      }
+                    } else {
+                      void save({ workerProvider: null, workerModel: null });
+                    }
+                  }}
+                />
+              </label>
+            </div>
+            {settings.workerProvider ? (
+              <VerifierModelSwitcher
+                providers={providers}
+                providerId={settings.workerProvider}
+                model={settings.workerModel}
+                disabled={saving}
+                onChange={(providerId, model) => {
+                  void save({ workerProvider: providerId, workerModel: model });
+                }}
+              />
+            ) : (
+              <div className="rounded-md border border-border px-2 py-1.5 text-[12px] text-muted-foreground">
+                Inherit — workers use this goal thread's provider and model.
+              </div>
+            )}
+          </div>
           <label className="block text-[13px] text-foreground">
             <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
               Worker slots
