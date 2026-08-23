@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+Provenance over heuristics — structural facts replace string classifiers:
+
+- Worker nicknames are provenance-based: an explicit display_name is used verbatim; everything else (discovered natives, scheduler/rescue spawns) gets a work-related name generated from its slice text. The linguistic "is this string name-like?" classifier is gone; discovery no longer copies thread titles into display_name, and a one-time migration renames existing crew whose display_name was that copy.
+- Restaffing is one rule in one place: any in_progress slice unheld past the stale window is restaffed by the scheduler, whatever its origin — the special-cased "rescue only while the root is blocked" branch is deleted. Pending slices still require the DAG contract; legacy plans keep model staffing.
+- The prose done-report fallback is provenance-gated: workers spawned through the plugin's contract must report ULTRAGOAL_DONE; prose interpretation remains only for native/discovered workers that never received the contract.
+- Twin-item fix: a discovered worker's prompt-source claim re-links an open slice whose previous workers are all dead, instead of minting a duplicate item (orchestrators respawn died natives under the same title, which put two live workers on the same work).
+- New CLI: `bb ultragoal workers <0-16>` sets the goal's concurrent worker slots.
+
 ## 0.5.0
 
 The model plans, deterministic code schedules. Research synthesis across Anthropic's multi-agent guidance, shipped industry systems (Codex cloud, Gas Town/beads, MultiDevin), and the academic scheduling literature (LLMCompiler, ADaPT, MAST) is in docs/architecture-research.md; this release implements it:

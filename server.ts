@@ -269,15 +269,32 @@ export default function plugin(bb: BbPluginApi) {
       const title =
         source === "prompt" ? titleFromSliceMarker(message) : titleFromFirstLine(message);
       if (!title) return null;
-      // Match an existing unheld open slice by text before minting a duplicate.
+      // Match an existing open slice by text before minting a duplicate. A
+      // tool-source claim requires the slice to be truly unheld; a discovered
+      // worker's prompt-source claim re-links a slice whose previous workers
+      // are all dead — orchestrators respawn died natives under the same
+      // title, and minting a twin item put two live workers on the same work.
       const normalized = title.toLowerCase().replace(/\s+/g, " ").trim();
+      const liveHolders = new Set(
+        (agentCache.get(rootThreadId) ?? [])
+          .filter(
+            (agent) =>
+              agent.role !== "verifier" &&
+              (agent.status === "running" || agent.status === "starting") &&
+              agent.threadId !== workerThreadId,
+          )
+          .map((agent) => agent.itemId)
+          .filter(Boolean),
+      );
       const match = items
         .list(rootThreadId)
         .find(
           (item) =>
             item.status !== "completed" &&
             item.step.toLowerCase().replace(/\s+/g, " ").trim() === normalized &&
-            workersOnItem(rootThreadId, item.id).length === 0,
+            (source === "prompt"
+              ? !liveHolders.has(item.id)
+              : workersOnItem(rootThreadId, item.id).length === 0),
         );
       if (match) {
         items.setStatus(rootThreadId, match.id, "in_progress");
@@ -682,7 +699,12 @@ export default function plugin(bb: BbPluginApi) {
       let staffed = false;
       for (const item of list) {
         if (slots <= 0) break;
-        if (!item.managed || item.status === "completed" || heldLive.has(item.id)) continue;
+        if (item.status === "completed" || heldLive.has(item.id)) continue;
+        // Pending slices are staffed only under the DAG contract (the model
+        // still owns staffing for legacy plans); an abandoned in_progress
+        // slice is restaffed whatever its origin — a dead worker is a dead
+        // worker.
+        if (item.status === "pending" && !item.managed) continue;
         const lastTry = lastStaffTry.get(item.id);
         if (lastTry != null && now - lastTry < STAFF_RETRY_MS) continue;
         if (item.deps.some((dep) => !completedIds.has(dep))) continue;
@@ -749,10 +771,8 @@ export default function plugin(bb: BbPluginApi) {
   const STALL_NUDGE_AFTER_MS = 3 * 60_000;
   const STALL_NUDGE_COOLDOWN_MS = 15 * 60_000;
   const RESCUE_AFTER_MS = 10 * 60_000;
-  const RESCUE_RETRY_MS = 10 * 60_000;
   const firstSeenIdle = new Map<string, number>();
   const lastStallNudge = new Map<string, number>();
-  const rescuedItems = new Map<string, number>();
   const healing = new Set<string>();
 
   async function healStalls(rootThreadId: string): Promise<void> {
@@ -790,7 +810,7 @@ export default function plugin(bb: BbPluginApi) {
           if (!result) continue;
           const itemId = itemIdMatchingTitle(rootThreadId, session.title);
           if (!itemId || liveHeld.has(itemId)) continue;
-          if (completeItemFor(rootThreadId, itemId, result.output)) {
+          if (completeItemFor(rootThreadId, itemId, result.output, { allowProse: true })) {
             bb.log.info(
               `Harvested done report for slice ${itemId} from native session ${session.id} on ${rootThreadId}`,
             );
@@ -839,45 +859,6 @@ export default function plugin(bb: BbPluginApi) {
               error instanceof Error ? error.message : String(error)
             }`,
           );
-        }
-      }
-
-      // Legacy rescue: unmanaged slices are still the orchestrator's to staff,
-      // so the plugin only steps in while the root turn is blocked on open
-      // native task calls and cannot re-staff them itself. Managed slices are
-      // the scheduler's job below, root blocked or not.
-      if ((liveTaskCounts.get(rootThreadId) ?? 0) > 0) {
-        const managed = new Set(
-          items.list(rootThreadId).filter((item) => item.managed).map((item) => item.id),
-        );
-        for (const item of openItems) {
-          if (managed.has(item.id)) continue;
-          const holder = agents.find(
-            (agent) => agent.role !== "verifier" && agent.itemId === item.id,
-          );
-          if (holder && holder.status !== "error") continue;
-          if (holder) collab.forget(holder.threadId);
-          const lastTry = rescuedItems.get(item.id);
-          if (lastTry != null && now - lastTry < RESCUE_RETRY_MS) continue;
-          const updatedAt = items.updatedAt(rootThreadId, item.id);
-          if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
-          rescuedItems.set(item.id, now);
-          const result = await collab.spawnWorker({
-            parentThreadId: rootThreadId,
-            itemId: item.id,
-            displayName: workRelatedName(item.step, agents.map((agent) => agent.nickname)),
-            message: [
-              `SLICE (item_id=${item.id}): ${item.step}`,
-              "The previous worker on this slice died mid-work and the orchestrator is busy. Pick the slice up from the current worktree state and finish it.",
-            ].join("\n\n"),
-          });
-          if ("error" in result) {
-            bb.log.warn(`Could not rescue slice ${item.id} on ${rootThreadId}: ${result.error}`);
-          } else {
-            bb.log.info(
-              `Rescued abandoned slice ${item.id} on ${rootThreadId} with ${result.nickname} (${result.threadId})`,
-            );
-          }
         }
       }
 
@@ -1002,7 +983,7 @@ export default function plugin(bb: BbPluginApi) {
     rootThreadId: string,
     itemId: string | null,
     report: string | null | undefined,
-    options?: { requirePass?: boolean },
+    options?: { requirePass?: boolean; allowProse?: boolean },
   ): boolean {
     if (!itemId) return false;
     const goal = store.get(rootThreadId);
@@ -1011,11 +992,11 @@ export default function plugin(bb: BbPluginApi) {
       if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
     } else {
       if (view(goal).settings.verifyEnabled) return false;
-      // The injected report contract decides first; prose is a fallback for
-      // workers spawned without it.
+      // The injected report contract decides. Prose interpretation exists only
+      // for native/discovered workers that never received the contract.
       const contract = structuredReport(report);
       if (contract === "blocked") return false;
-      if (contract !== "done" && !reportSaysDone(report)) return false;
+      if (contract !== "done" && !(options?.allowProse && reportSaysDone(report))) return false;
     }
     const item = items
       .list(rootThreadId)
@@ -1055,7 +1036,8 @@ export default function plugin(bb: BbPluginApi) {
       reconciledReports.add(key);
       try {
         const output = (await bb.sdk.threads.output({ threadId: agent.threadId })).output ?? null;
-        if (completeItemFor(rootThreadId, agent.itemId, output)) changed = true;
+        const allowProse = !agent.taskName.startsWith("/root");
+        if (completeItemFor(rootThreadId, agent.itemId, output, { allowProse })) changed = true;
       } catch {
         // Unreadable worker output leaves the slice open for the orchestrator.
       }
@@ -2069,7 +2051,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
     }
     if (parentRoot && parentRoot !== thread.id && !pendingInteraction) {
       if (child.role !== "verifier") {
-        completeItemFor(parentRoot, child.item_id, lastAssistantText);
+        completeItemFor(parentRoot, child.item_id, lastAssistantText, {
+          allowProse: !child.task_name.startsWith("/root"),
+        });
         await maybeVerifyWorker(thread.id);
       } else {
         const sourceItemId = child.source_thread_id
@@ -2218,6 +2202,18 @@ Keep the plan current as steps complete or the next best action changes. When a 
         };
       }
 
+      if (action === "workers") {
+        const parsed = Number.parseInt(objective ?? "", 10);
+        if (!Number.isFinite(parsed) || parsed < 0 || parsed > 16) {
+          return { exitCode: 1, stderr: "Usage: bb ultragoal workers <0-16>" };
+        }
+        const goal = store.update(threadId, { maxWorkersOverride: parsed });
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        publish(threadId, view(goal));
+        void scheduleReady(threadId);
+        return { exitCode: 0, stdout: formatGoalCard(view(goal)) };
+      }
+
       if (action === "pause") {
         const goal = await pauseGoal(threadId, "Paused from the CLI.");
         return {
@@ -2251,6 +2247,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       { name: "pane", summary: "Dump the sidebar projection as JSON", usage: "bb ultragoal pane [--thread <id>]" },
       { name: "set", summary: "Set or replace the UltraGoal", usage: "bb ultragoal set <objective> [--thread <id>]" },
       { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
+      { name: "workers", summary: "Set the goal's concurrent worker slots", usage: "bb ultragoal workers <0-16> [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -2299,7 +2296,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers";
   threadId: string | undefined;
   objective?: string;
   error?: string;
@@ -2320,7 +2317,7 @@ function parseCli(
   if (!action || action === "status") {
     return { action: "status", threadId };
   }
-  if (action === "set" || action === "edit") {
+  if (action === "set" || action === "edit" || action === "workers") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
   if (action === "pane" || action === "pause" || action === "resume" || action === "clear") {

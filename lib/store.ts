@@ -219,6 +219,10 @@ export function createGoalStore(bb: BbPluginApi) {
       UNIQUE(thread_id, fingerprint)
     )`,
     `CREATE INDEX IF NOT EXISTS goal_findings_thread ON goal_findings(thread_id, status)`,
+    // Pre-0.5.1 discovery copied a child thread's title into display_name;
+    // equality with task_name is the structural marker of that copy. Null it
+    // so the naming pass generates a real (work-related) name.
+    `UPDATE collab_agents SET display_name = NULL WHERE display_name = task_name AND (role IS NULL OR role != 'verifier')`,
   ]);
   importLegacyGoalDatabase(db);
 

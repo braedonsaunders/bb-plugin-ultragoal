@@ -43,15 +43,6 @@ interface CollabRow {
   last_verify_hash: string | null;
 }
 
-function needsHumorousName(name: string | null | undefined): boolean {
-  const value = name?.trim() ?? "";
-  if (!value) return true;
-  if (/^thr_[a-z0-9]+$/i.test(value)) return true;
-  if (/^[a-z0-9_]+$/.test(value)) return true;
-  if (/^(new thread|subagent|agent|background agent|child thread|worker)$/i.test(value)) return true;
-  return false;
-}
-
 function nicknameOf(taskName: string, fallback?: string | null): string {
   const leaf = taskName.split("/").filter(Boolean).at(-1);
   return fallback?.trim() || leaf || taskName;
@@ -325,7 +316,7 @@ export function createCollabStore(
             parent_thread_id: child.parentThreadId ?? root,
             task_name: child.title || child.titleFallback || child.id,
             created_at: child.createdAt ?? 0,
-            display_name: child.title || child.titleFallback || null,
+            display_name: null,
             item_id: null,
             role: "worker",
             source_thread_id: null,
@@ -359,8 +350,8 @@ export function createCollabStore(
       all.map((row) => row.display_name?.trim()).filter((name): name is string => Boolean(name)),
     );
     for (const row of all) {
-      if (!needsHumorousName(row.display_name)) continue;
-      const displayName = nextHumorousName(usedNames);
+      if (row.role === "verifier" || row.display_name?.trim()) continue;
+      const displayName = workRelatedName(row.task_name, usedNames);
       usedNames.add(displayName);
       row.display_name = displayName;
       setMeta.run({ thread_id: row.thread_id, display_name: displayName, item_id: row.item_id });
