@@ -35,7 +35,7 @@ export function formatGoalCard(goal: GoalSnapshot): string {
           ? ""
           : blockers.length > 0
             ? ` (blocked by ${blockers.join(", ")})`
-            : item.managed && item.status === "pending"
+            : item.status === "pending"
               ? " (ready)"
               : "";
       lines.push(`- [${mark}] ${item.id} ${item.step}${gate}${names}`);
@@ -96,7 +96,6 @@ export function goalToolResponse(
               deps: item.deps,
               files: item.files,
               check: item.check,
-              scheduler_managed: item.managed,
             })),
             agents: goal.agents,
             settings: goal.settings,

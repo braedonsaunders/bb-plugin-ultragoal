@@ -1,27 +1,10 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { GoalItemStatus } from "../contract.js";
 
-// Mirrors how the native Codex Goal works inside bb: the harness never asks
-// the model to mirror state into plugin tools. It passively projects thread
-// events, latest sequence wins. Two projections matter here:
-//   1. turn/plan/updated — the model-owned plan (Cursor "Update TODOs",
-//      Codex update_plan) folded into a snapshot, exactly like bb's
-//      thread-view/todo-snapshot-extraction.
-//   2. item/started + item/completed toolCall events for native subagent
-//      Task calls, scoped to the open turn. A task is live iff it started in
-//      the open turn and has not completed. When the turn ends, liveness is
-//      empty by construction — stale ghosts are impossible.
-
-export interface NativePlanStep {
-  step: string;
-  status: GoalItemStatus;
-}
-
-export interface NativePlanSnapshot {
-  seq: number;
-  createdAt: number;
-  steps: NativePlanStep[];
-}
+// Passive projection of provider thread events, latest sequence wins:
+// item/started + item/completed toolCall events for native subagent Task
+// calls, scoped to the open turn. A task is live iff it started in the open
+// turn and has not completed. When the turn ends, liveness is empty by
+// construction — stale ghosts are impossible.
 
 export interface LiveNativeTask {
   /** Provider item id of the Task tool call — stable for started/completed pairing. */
@@ -208,46 +191,4 @@ export function hasPendingNativeTasks(threadId: string): boolean {
 
 export function forgetNativeScan(threadId: string): void {
   scans.delete(threadId);
-}
-
-function planStatus(value: unknown): GoalItemStatus {
-  if (value === "completed") return "completed";
-  if (value === "active" || value === "in_progress" || value === "failed") {
-    return "in_progress";
-  }
-  return "pending";
-}
-
-/**
- * Latest model-owned plan snapshot (turn/plan/updated), or null when the
- * provider has never emitted one.
- */
-export async function readNativePlan(
-  bb: BbPluginApi,
-  threadId: string,
-): Promise<NativePlanSnapshot | null> {
-  const rows = await listEvents(bb, {
-    threadId,
-    types: ["turn/plan/updated"],
-    order: "desc",
-    limit: "1",
-  });
-  const row = rows[0];
-  if (!row) return null;
-  const data = row.data;
-  if (!data || typeof data !== "object") return null;
-  const plan = (data as Record<string, unknown>).plan;
-  if (!Array.isArray(plan)) return null;
-  const steps: NativePlanStep[] = [];
-  for (const entry of plan) {
-    if (!entry || typeof entry !== "object") continue;
-    const rec = entry as Record<string, unknown>;
-    const step = typeof rec.step === "string" ? rec.step.trim() : "";
-    if (!step) continue;
-    steps.push({ step, status: planStatus(rec.status) });
-  }
-  if (steps.length === 0) return null;
-  const createdAt =
-    typeof row.createdAt === "number" && Number.isFinite(row.createdAt) ? row.createdAt : 0;
-  return { seq: seqOf(row), createdAt, steps };
 }

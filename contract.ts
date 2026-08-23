@@ -22,8 +22,6 @@ export const goalItemSchema = z.object({
   files: z.array(z.string()).default([]),
   /** Runnable command that proves the slice done (its machine-checkable gate). */
   check: z.string().nullable().default(null),
-  /** True when the planner declared DAG metadata: the scheduler staffs it. */
-  managed: z.boolean().default(false),
 });
 
 export const goalAgentStatusSchema = z.enum([

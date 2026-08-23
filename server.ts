@@ -10,7 +10,6 @@ import {
 import {
   getOpenCodeTaskCalls,
   listOpenCodeChildren,
-  listOpenCodeTaskResults,
   sessionIsLive,
   type NativeChildSession,
   type NativeTaskCall,
@@ -33,7 +32,6 @@ import {
   forgetNativeScan,
   hasPendingNativeTasks,
   listLiveNativeTasks,
-  readNativePlan,
   type LiveNativeTask,
 } from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
@@ -78,7 +76,6 @@ function structuredReport(text: string | null | undefined): "done" | "blocked" |
   if (/\bULTRAGOAL_DONE\b/.test(tail)) return "done";
   return null;
 }
-import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
 import {
   createGoalStore,
   validateObjective,
@@ -311,7 +308,7 @@ export default function plugin(bb: BbPluginApi) {
     },
     itemBrief(rootThreadId, itemId) {
       const item = items.list(rootThreadId).find((entry) => entry.id === itemId);
-      if (!item || !item.managed) return null;
+      if (!item) return null;
       return { files: item.files, check: item.check };
     },
   });
@@ -340,7 +337,6 @@ export default function plugin(bb: BbPluginApi) {
         await refreshRunning(threadId);
         const goal = store.get(threadId);
         if (!goal) return;
-        await seedEmptyPlan(threadId, goal);
         await ensureCrew(threadId);
         const latest = store.get(threadId);
         if (latest) publish(threadId, await viewFresh(latest));
@@ -458,31 +454,6 @@ export default function plugin(bb: BbPluginApi) {
     const liveKeys = new Set(live.map((agent) => agent.taskName));
     const rest = [...picked.values()].filter((agent) => !liveKeys.has(agent.taskName));
     return [...live, ...rest, ...extra];
-  }
-
-  const NATIVE_PLAN_FRESH_MS = 10 * 60_000;
-
-  // Codex-Goal-style event projection: mirror the model-owned plan snapshot
-  // (turn/plan/updated) into the UltraGoal plan, latest sequence wins, applied
-  // exactly once per snapshot.
-  async function syncNativePlan(threadId: string): Promise<void> {
-    const goal = store.get(threadId);
-    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
-    const snapshot = await readNativePlan(bb, threadId);
-    if (!snapshot) return;
-    if (goal.lastPlanSeq == null) {
-      store.setLastPlanSeq(threadId, snapshot.seq);
-      // A stale first snapshot predates this goal's tracked plan; baseline it
-      // instead of resurrecting old steps.
-      if (Date.now() - snapshot.createdAt > NATIVE_PLAN_FRESH_MS) return;
-      items.applyNativePlan(threadId, snapshot.steps);
-      return;
-    }
-    if (snapshot.seq <= goal.lastPlanSeq) return;
-    store.setLastPlanSeq(threadId, snapshot.seq);
-    if (items.applyNativePlan(threadId, snapshot.steps)) {
-      bb.log.info(`Mirrored native plan snapshot seq ${snapshot.seq} on ${threadId}`);
-    }
   }
 
   // One GoalAgent per live native Task call in the open turn.
@@ -700,11 +671,6 @@ export default function plugin(bb: BbPluginApi) {
       for (const item of list) {
         if (slots <= 0) break;
         if (item.status === "completed" || heldLive.has(item.id)) continue;
-        // Pending slices are staffed only under the DAG contract (the model
-        // still owns staffing for legacy plans); an abandoned in_progress
-        // slice is restaffed whatever its origin — a dead worker is a dead
-        // worker.
-        if (item.status === "pending" && !item.managed) continue;
         const lastTry = lastStaffTry.get(item.id);
         if (lastTry != null && now - lastTry < STAFF_RETRY_MS) continue;
         if (item.deps.some((dep) => !completedIds.has(dep))) continue;
@@ -744,20 +710,6 @@ export default function plugin(bb: BbPluginApi) {
             ),
           );
           if (declaredLive) continue;
-          // An unmanaged slice the crew never touched is a native-todo mirror
-          // line: while the root runs free it is the orchestrator's to staff
-          // (and often a ghost of work already live under another item id).
-          // The plugin takes it over only when the root is blocked and cannot
-          // — the original rescue semantics.
-          const everHeld =
-            holders.length > 0 || collab.workersOnItem(rootThreadId, item.id).length > 0;
-          if (
-            !item.managed &&
-            !everHeld &&
-            (liveTaskCounts.get(rootThreadId) ?? 0) === 0
-          ) {
-            continue;
-          }
           const updatedAt = items.updatedAt(rootThreadId, item.id);
           if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
           for (const holder of holders) collab.forget(holder.threadId);
@@ -808,42 +760,6 @@ export default function plugin(bb: BbPluginApi) {
     try {
       const agents = agentCache.get(rootThreadId) ?? [];
       const now = Date.now();
-
-      // Harvest first: a task call that completed handed the subagent's final
-      // report back to the parent. If that report says the slice is done,
-      // close it here — the orchestrator's todo list often lags many minutes
-      // behind while it is blocked inside the next task call.
-      const rootSessionId = await sessionIdForThread(bb, rootThreadId);
-      let harvested = false;
-      if (rootSessionId && rootSessionId.startsWith("ses_")) {
-        const sessions = listOpenCodeChildren(rootSessionId);
-        const results = new Map(
-          listOpenCodeTaskResults(rootSessionId).map((result) => [result.sessionId, result]),
-        );
-        const liveHeld = new Set(
-          agents
-            .filter(
-              (agent) =>
-                agent.role !== "verifier" &&
-                (agent.status === "running" || agent.status === "starting"),
-            )
-            .map((agent) => agent.itemId),
-        );
-        for (const session of sessions) {
-          if (sessionIsLive(session)) continue;
-          const result = results.get(session.id);
-          if (!result) continue;
-          const itemId = itemIdMatchingTitle(rootThreadId, session.title);
-          if (!itemId || liveHeld.has(itemId)) continue;
-          if (completeItemFor(rootThreadId, itemId, result.output, { allowProse: true })) {
-            bb.log.info(
-              `Harvested done report for slice ${itemId} from native session ${session.id} on ${rootThreadId}`,
-            );
-            harvested = true;
-          }
-        }
-      }
-      if (harvested) publish(rootThreadId, view(store.get(rootThreadId) ?? goal));
 
       const openItems = items
         .list(rootThreadId)
@@ -910,7 +826,6 @@ export default function plugin(bb: BbPluginApi) {
         liveTasks.length > 0 && sessionId
           ? getOpenCodeTaskCalls(sessionId)
           : new Map<string, NativeTaskCall>();
-      await syncNativePlan(goal.threadId);
       const assigned = assignLiveAgents(goal.threadId, listed);
       applyDeclaredWorkers(goal.threadId, assigned);
       const open = new Map(
@@ -991,16 +906,6 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
-  const DONE_SIGNAL =
-    /\b(is done|done\.|shipped|completed|complete\.|landed|implemented|fixed and verified|verify_pass|committed|commits)\b/i;
-  const BLOCK_SIGNAL = /\b(blocked|failed|cannot|can't|unable|verify_fail|not done)\b/i;
-
-  function reportSaysDone(text: string | null | undefined): boolean {
-    const head = (text ?? "").trim().slice(0, 600);
-    if (!head) return false;
-    return DONE_SIGNAL.test(head) && !BLOCK_SIGNAL.test(head);
-  }
-
   // Close the loop Codex Goal closes inside the provider: a finished worker
   // finishes its plan item. With verification on, only VERIFY_PASS completes
   // the slice; with it off, the worker's own done report does.
@@ -1008,7 +913,7 @@ export default function plugin(bb: BbPluginApi) {
     rootThreadId: string,
     itemId: string | null,
     report: string | null | undefined,
-    options?: { requirePass?: boolean; allowProse?: boolean },
+    options?: { requirePass?: boolean },
   ): boolean {
     if (!itemId) return false;
     const goal = store.get(rootThreadId);
@@ -1017,11 +922,9 @@ export default function plugin(bb: BbPluginApi) {
       if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
     } else {
       if (view(goal).settings.verifyEnabled) return false;
-      // The injected report contract decides. Prose interpretation exists only
-      // for native/discovered workers that never received the contract.
+      // The injected report contract is the only completion signal.
       const contract = structuredReport(report);
-      if (contract === "blocked") return false;
-      if (contract !== "done" && !(options?.allowProse && reportSaysDone(report))) return false;
+      if (contract !== "done") return false;
     }
     const item = items
       .list(rootThreadId)
@@ -1061,8 +964,7 @@ export default function plugin(bb: BbPluginApi) {
       reconciledReports.add(key);
       try {
         const output = (await bb.sdk.threads.output({ threadId: agent.threadId })).output ?? null;
-        const allowProse = !agent.taskName.startsWith("/root");
-        if (completeItemFor(rootThreadId, agent.itemId, output, { allowProse })) changed = true;
+        if (completeItemFor(rootThreadId, agent.itemId, output)) changed = true;
       } catch {
         // Unreadable worker output leaves the slice open for the orchestrator.
       }
@@ -1294,8 +1196,6 @@ export default function plugin(bb: BbPluginApi) {
       lastBlockKey: null,
       lastContinueWasAutomatic: false,
     });
-    const current = store.get(threadId);
-    if (current) await seedEmptyPlan(threadId, current);
     await ensureCrew(threadId);
     const latest = store.get(threadId);
     if (latest && options?.start !== false) {
@@ -1305,43 +1205,6 @@ export default function plugin(bb: BbPluginApi) {
       }
     }
     return store.get(threadId);
-  }
-
-  async function seedEmptyPlan(threadId: string, goal: StoredGoal): Promise<void> {
-    if (items.list(threadId).length > 0) {
-      await hydrateCompleted(threadId);
-      return;
-    }
-    try {
-      const result = await bb.sdk.threads.output({ threadId });
-      const seeded = seedPlanFromOutput(result.output, goal.reason);
-      if (seeded.length === 0) return;
-      items.replace(threadId, seeded);
-      const latest = store.get(threadId);
-      if (latest) publish(threadId, view(latest));
-      bb.log.info(`Seeded ${seeded.length} Goal plan items on ${threadId} from last output`);
-    } catch (error) {
-      bb.log.warn(
-        `Could not seed Goal plan on ${threadId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
-
-  async function hydrateCompleted(threadId: string): Promise<void> {
-    try {
-      const result = await bb.sdk.threads.output({ threadId });
-      const completed = extractCompleted(result.output);
-      if (completed.length === 0) return;
-      const before = items.list(threadId).length;
-      items.merge(threadId, completed);
-      if (items.list(threadId).length === before) return;
-      const latest = store.get(threadId);
-      if (latest) publish(threadId, view(latest));
-    } catch {
-      // Completed-item hydration is best-effort.
-    }
   }
 
   async function userSetGoal(
@@ -2076,9 +1939,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     }
     if (parentRoot && parentRoot !== thread.id && !pendingInteraction) {
       if (child.role !== "verifier") {
-        completeItemFor(parentRoot, child.item_id, lastAssistantText, {
-          allowProse: !child.task_name.startsWith("/root"),
-        });
+        completeItemFor(parentRoot, child.item_id, lastAssistantText);
         await maybeVerifyWorker(thread.id);
       } else {
         const sourceItemId = child.source_thread_id
@@ -2170,8 +2031,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       }
 
       if (action === "status") {
-        const goal = (await account(threadId)) ?? store.get(threadId);
-        if (goal) await seedEmptyPlan(threadId, goal);
+        await account(threadId);
         const latest = store.get(threadId);
         return {
           exitCode: 0,

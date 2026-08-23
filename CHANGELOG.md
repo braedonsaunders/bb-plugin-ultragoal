@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0
+
+Clean cut: the DAG contract is the only path. Every compatibility shim is deleted, not deprecated:
+
+- The `managed` opt-in distinction is gone — every plan item is scheduler-managed. Pending slices staff the moment their deps are complete; abandoned in_progress slices restaff after the stale window, whatever their origin. The legacy STAFFING nudge that told the model to spawn workers itself is deleted.
+- The native-todo plan mirror (turn/plan/updated projection) is deleted. update_plan is the single plan source on every provider; a model using its native todo tool gets an empty pane and a nudge that demands the real contract. Native Task calls still render in Now as live work — observability stays; state authority does not.
+- Prose report parsing is deleted (done/blocked signal regexes, the harvest of native session reports by title match). A slice completes on ULTRAGOAL_DONE (or VERIFY_PASS when verification is on) — full stop.
+- Output-seeding shims are deleted (seeding an empty plan from previous output prose, hydrating completed items from output text; lib/plan-seed.ts removed).
+
 ## 0.7.0
 
 Every worker brief now carries a generalized engineering quality bar (templates/goals/worker_brief.md), distilled from production AGENTS.md standards and kept repo-agnostic — the repository's own agent docs win wherever they conflict:

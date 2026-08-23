@@ -62,7 +62,7 @@ function planInstruction(goal: GoalSnapshot): string {
         ? ""
         : blockers.length > 0
           ? ` (blocked by ${blockers.join(", ")})`
-          : item.managed && item.status === "pending"
+          : item.status === "pending"
             ? " (ready)"
             : "";
     return `- [${mark}] item_id=${item.id} ${item.step}${gate}${names}`;
@@ -86,20 +86,19 @@ function planInstruction(goal: GoalSnapshot): string {
     liveWorkers.filter((agent) => agent.itemId).map((agent) => agent.itemId as string),
   );
   const open = goal.items.filter((item) => item.status !== "completed");
-  const managedOpen = open.filter((item) => item.managed);
-  const ready = managedOpen.filter(
+  const ready = open.filter(
     (item) =>
       item.status === "pending" &&
       !heldByLive.has(item.id) &&
       item.deps.every((dep) => completedIds.has(dep)),
   );
-  const blocked = managedOpen.filter(
+  const blocked = open.filter(
     (item) => item.status === "pending" && item.deps.some((dep) => !completedIds.has(dep)),
   );
   const maxWorkers = goal.settings.maxWorkers;
 
   const schedulerLines: string[] = [];
-  if (managedOpen.length > 0 && maxWorkers > 0) {
+  if (open.length > 0 && maxWorkers > 0) {
     schedulerLines.push(
       `SCHEDULER: the UltraGoal scheduler staffs ready slices automatically (deps complete, file scopes disjoint) — one fresh worker per slice, up to ${maxWorkers} concurrent (${liveWorkers.length} live now). Do not spawn workers for plan items yourself; write the plan and the scheduler dispatches. Do not implement slices on the root thread.`,
     );
@@ -116,18 +115,6 @@ function planInstruction(goal: GoalSnapshot): string {
     }
   }
 
-  // Legacy plans (written before the DAG contract) still rely on the model to
-  // staff; the durable fix is re-emitting the plan with DAG metadata.
-  const unstaffedLegacy = open.filter(
-    (item) => !item.managed && !heldByLive.has(item.id),
-  );
-  const staffingLines =
-    unstaffedLegacy.length > 0
-      ? [
-          `STAFFING: ${unstaffedLegacy.length} open slice${unstaffedLegacy.length === 1 ? " has" : "s have"} no DAG metadata and no live worker. Re-emit the full plan via update_plan with deps/files/check on every item so the scheduler can staff them; until then spawn_agent one fresh worker per slice NOW, all in this turn. Do not implement any of these on the root thread.`,
-          ...unstaffedLegacy.map((item) => `- item_id=${item.id}: ${item.step}`),
-        ]
-      : [];
   const findingsLine =
     goal.findings.open > 0
       ? [
@@ -139,7 +126,6 @@ function planInstruction(goal: GoalSnapshot): string {
     ...lines,
     ...agentLines,
     ...schedulerLines,
-    ...staffingLines,
     ...findingsLine,
   ].join("\n");
 }

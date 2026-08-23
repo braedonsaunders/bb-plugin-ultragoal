@@ -71,7 +71,7 @@ The split follows the research in [docs/architecture-research.md](docs/architect
 5. When verification is on (default), a second model audits each finished worker. The orchestrator should not mark that slice complete until `VERIFY_PASS`.
 6. If several minutes pass with no visible main-thread update, the plugin nudges the orchestrator to post one.
 
-Plans written before the DAG contract (no `deps`/`files`/`check` on any item) keep the old behavior: the orchestrator is nudged to staff slices itself and to re-emit the plan with DAG metadata.
+`update_plan` is the only plan source: there is no native-todo mirror, no prose report parsing, and no legacy staffing path. Every open slice is the scheduler's to staff the moment its deps are complete.
 
 ## Requirements
 

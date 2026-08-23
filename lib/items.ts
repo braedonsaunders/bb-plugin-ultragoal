@@ -35,9 +35,6 @@ function parseList(json: string | null): string[] {
   }
 }
 
-function isManaged(row: Pick<ItemRow, "deps" | "files" | "check_cmd">): boolean {
-  return row.deps != null || row.files != null || row.check_cmd != null;
-}
 
 function normalizedStep(step: string): string {
   return step.trim().toLowerCase().replace(/\s+/g, " ");
@@ -51,7 +48,6 @@ function rowToItem(row: ItemRow): GoalItem {
     deps: parseList(row.deps),
     files: parseList(row.files),
     check: row.check_cmd?.trim() || null,
-    managed: isManaged(row),
   };
 }
 
@@ -205,36 +201,6 @@ export function createItemStore(bb: BbPluginApi) {
       return rowToItem(next);
     },
 
-    merge(
-      threadId: string,
-      plan: Array<{ step: string; status: GoalItemStatus }>,
-    ): GoalItem[] {
-      const existing = listStmt.all(threadId) as ItemRow[];
-      const seen = new Set(existing.map((row) => row.step.trim().toLowerCase()));
-      const now = Date.now();
-      let order = existing.length;
-      for (const item of plan) {
-        const step = currentSliceTitle(item.step);
-        if (!step || seen.has(step.toLowerCase())) continue;
-        seen.add(step.toLowerCase());
-        insertStmt.run({
-          id: newId(),
-          thread_id: threadId,
-          step,
-          status: item.status,
-          sort_order: order,
-          created_at: now,
-          updated_at: now,
-          origin: null,
-          deps: null,
-          files: null,
-          check_cmd: null,
-        });
-        order += 1;
-      }
-      return (listStmt.all(threadId) as ItemRow[]).map(rowToItem);
-    },
-
     add(
       threadId: string,
       step: string,
@@ -260,75 +226,6 @@ export function createItemStore(bb: BbPluginApi) {
       };
       insertStmt.run(row);
       return rowToItem(row);
-    },
-
-    /**
-     * Non-destructive mirror of the model-owned native plan snapshot
-     * (turn/plan/updated). Matched steps take the snapshot status, except
-     * completed items never reopen. Unmatched steps are inserted with
-     * origin='native'. Open native-origin items missing from the snapshot are
-     * marked completed (the model checked them off or dropped them).
-     * Returns true when anything changed.
-     */
-    applyNativePlan(
-      threadId: string,
-      steps: Array<{ step: string; status: GoalItemStatus }>,
-    ): boolean {
-      const existing = listStmt.all(threadId) as ItemRow[];
-      const byStep = new Map<string, ItemRow>();
-      for (const row of existing) {
-        const key = normalizedStep(row.step);
-        if (!byStep.has(key)) byStep.set(key, row);
-      }
-      const now = Date.now();
-      const matched = new Set<string>();
-      let changed = false;
-      let order = existing.length;
-      for (const entry of steps) {
-        const text = currentSliceTitle(entry.step);
-        if (!text) continue;
-        const prior = byStep.get(normalizedStep(text));
-        if (prior) {
-          matched.add(prior.id);
-          if (prior.status !== entry.status && prior.status !== "completed") {
-            setStatusStmt.run({
-              id: prior.id,
-              thread_id: threadId,
-              status: entry.status,
-              updated_at: now,
-            });
-            changed = true;
-          }
-          continue;
-        }
-        insertStmt.run({
-          id: newId(),
-          thread_id: threadId,
-          step: text,
-          status: entry.status,
-          sort_order: order,
-          created_at: now,
-          updated_at: now,
-          origin: "native",
-          deps: null,
-          files: null,
-          check_cmd: null,
-        });
-        order += 1;
-        changed = true;
-      }
-      for (const row of existing) {
-        if (row.origin !== "native" || matched.has(row.id)) continue;
-        if (row.status === "completed") continue;
-        setStatusStmt.run({
-          id: row.id,
-          thread_id: threadId,
-          status: "completed",
-          updated_at: now,
-        });
-        changed = true;
-      }
-      return changed;
     },
 
     setStatus(threadId: string, itemId: string, status: GoalItemStatus): GoalItem | null {

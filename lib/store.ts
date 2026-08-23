@@ -38,7 +38,6 @@ interface GoalRow {
   last_progress_at: number | null;
   progress_update_minutes: number | null;
   max_workers: number | null;
-  last_plan_seq?: number | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
@@ -57,7 +56,6 @@ export interface StoredGoal
   lastProgressAt: number | null;
   progressUpdateMinutesOverride: number | null;
   maxWorkersOverride: number | null;
-  lastPlanSeq: number | null;
 }
 
 function normalizeStatus(status: string): GoalStatus {
@@ -108,7 +106,6 @@ function rowToGoal(row: GoalRow): StoredGoal {
     autoContinueOverride: row.auto_continue == null ? null : row.auto_continue === 1,
     progressUpdateMinutesOverride: row.progress_update_minutes,
     maxWorkersOverride: row.max_workers,
-    lastPlanSeq: row.last_plan_seq ?? null,
   };
 }
 
@@ -197,9 +194,7 @@ export function createGoalStore(bb: BbPluginApi) {
     `ALTER TABLE goals ADD COLUMN progress_update_minutes INTEGER`,
     `ALTER TABLE goals ADD COLUMN last_plan_seq INTEGER`,
     `ALTER TABLE goal_items ADD COLUMN origin TEXT`,
-    // DAG metadata: NULL on all three marks a legacy (pre-scheduler) item that
-    // keeps nudge-based staffing; any non-NULL value opts the item into the
-    // plugin's ready-queue scheduler.
+    // DAG metadata; NULL normalizes to empty (deps/files) and none (check).
     `ALTER TABLE goal_items ADD COLUMN deps TEXT`,
     `ALTER TABLE goal_items ADD COLUMN files TEXT`,
     `ALTER TABLE goal_items ADD COLUMN check_cmd TEXT`,
@@ -270,9 +265,6 @@ export function createGoalStore(bb: BbPluginApi) {
       max_workers = excluded.max_workers
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
-  const writePlanSeq = db.prepare(
-    "UPDATE goals SET last_plan_seq = ? WHERE thread_id = ?",
-  );
 
   return {
     get(threadId: string): StoredGoal | null {
@@ -438,10 +430,6 @@ export function createGoalStore(bb: BbPluginApi) {
       };
       upsert.run(next);
       return rowToGoal(next);
-    },
-
-    setLastPlanSeq(threadId: string, seq: number): void {
-      writePlanSeq.run(seq, threadId);
     },
 
     clear(threadId: string): boolean {
