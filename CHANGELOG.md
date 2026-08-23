@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.2
+
+Finished workers release their provider runtime. Every completed slice left its agent session loaded, and after a day of goals the host hit memory saturation (93 provider processes, ~64MB free) — at which point NEW worker spawns silently failed at turn start, presenting as workers that "complete" without ever running. Now: a worker's runtime is stopped after its slice integrates (the worktree environment outlives the thread, so the Refinery is unaffected), wedged workers retired by the nudge cap release theirs too, and errored workers were already stopped. One live sweep freed ~2.9GB.
+
 ## 0.10.1
 
 Owner decisions moved from a sidebar card to the native center-pane question surface:

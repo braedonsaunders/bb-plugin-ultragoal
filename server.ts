@@ -874,12 +874,22 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  async function releaseWorkerRuntime(workerThreadId: string): Promise<void> {
+    try {
+      await bb.sdk.threads.stop({ threadId: workerThreadId });
+      bb.log.info(`Released runtime of finished worker ${workerThreadId}`);
+    } catch {
+      // Releasing is best-effort; an already-stopped thread is fine.
+    }
+  }
+
   function queueIntegration(rootThreadId: string, workerThreadId: string, itemId: string | null): void {
     if (!itemId) return;
     const prev = integrating.get(rootThreadId) ?? Promise.resolve();
     const next = prev
       .then(() => integrateWorker(rootThreadId, workerThreadId, itemId))
-      .catch(() => {});
+      .catch(() => {})
+      .then(() => releaseWorkerRuntime(workerThreadId));
     integrating.set(rootThreadId, next);
   }
 
@@ -968,6 +978,7 @@ export default function plugin(bb: BbPluginApi) {
         // fresh worker (which also carries the current brief contract).
         if ((row?.nudge_count ?? 0) >= MAX_STALL_NUDGES) {
           collab.forget(agent.threadId);
+          void releaseWorkerRuntime(agent.threadId);
           bb.log.info(
             `Retired unresponsive worker ${agent.nickname} (${agent.threadId}) after ${row?.nudge_count} nudges on ${rootThreadId}; slice ${agent.itemId} returns to the scheduler`,
           );
