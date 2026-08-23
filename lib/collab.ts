@@ -2,7 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { isPromptLikeTitle, shortSliceTitle } from "./titles.js";
 import { z } from "zod";
 import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
-import { nextAuditorName, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
+import { auditorNameFor, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
 import { workerQualityBrief } from "./prompts.js";
 
 const MIN_WAIT_TIMEOUT_MS = 1_000;
@@ -43,6 +43,7 @@ interface CollabRow {
   source_thread_id: string | null;
   last_verify_hash: string | null;
   retired_at?: number | null;
+  verify_fails?: number | null;
 }
 
 function nicknameOf(taskName: string, fallback?: string | null): string {
@@ -123,6 +124,9 @@ export function createCollabStore(
   );
   const setHash = db.prepare(
     "UPDATE collab_agents SET last_verify_hash = @last_verify_hash WHERE thread_id = @thread_id",
+  );
+  const bumpFails = db.prepare(
+    "UPDATE collab_agents SET verify_fails = COALESCE(verify_fails, 0) + 1 WHERE thread_id = ?",
   );
   // Retire, never delete: a deleted row lets discovery resurrect the dead
   // thread and re-claim its slice.
@@ -652,6 +656,12 @@ export function createCollabStore(
       setHash.run({ thread_id: threadId, last_verify_hash: hash });
     },
 
+    /** Records one failed verification for a worker; returns the new total. */
+    bumpVerifyFails(threadId: string): number {
+      bumpFails.run(threadId);
+      return (byThread.get(threadId) as CollabRow | undefined)?.verify_fails ?? 1;
+    },
+
     verifiersFor(sourceThreadId: string): CollabRow[] {
       return bySource.all(sourceThreadId) as CollabRow[];
     },
@@ -663,6 +673,8 @@ export function createCollabStore(
       providerId: string;
       model: string;
       prompt: string;
+      /** The slice text under audit, for a work-related auditor name. */
+      workText?: string;
     }): Promise<{ threadId: string; nickname: string } | null> {
       const root = await bb.sdk.threads.get({ threadId: args.rootThreadId });
       if (!root.projectId) {
@@ -677,7 +689,7 @@ export function createCollabStore(
       const usedNames = (byRoot.all(args.rootThreadId) as CollabRow[])
         .map((row) => row.display_name)
         .filter((name): name is string => Boolean(name));
-      const displayName = nextAuditorName(usedNames);
+      const displayName = auditorNameFor(args.workText ?? "", usedNames);
       const slug = slugFromName(displayName);
       const taskName = `/root/${slug}`;
       const child = await bb.sdk.threads.spawn({

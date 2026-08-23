@@ -756,6 +756,7 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  const MAX_VERIFY_FAILS = 3;
   const STALL_NUDGE_AFTER_MS = 3 * 60_000;
   const STALL_NUDGE_COOLDOWN_MS = 15 * 60_000;
   const RESCUE_AFTER_MS = 10 * 60_000;
@@ -776,6 +777,16 @@ export default function plugin(bb: BbPluginApi) {
         .list(rootThreadId)
         .filter((item) => item.status === "in_progress");
 
+      const liveVerifierSources = new Set(
+        agents
+          .filter(
+            (agent) =>
+              agent.role === "verifier" &&
+              (agent.status === "running" || agent.status === "starting"),
+          )
+          .map((agent) => collab.rowOf(agent.threadId)?.source_thread_id)
+          .filter(Boolean),
+      );
       for (const agent of agents) {
         if (agent.role !== "worker" || agent.threadId === rootThreadId) continue;
         if (agent.status !== "idle") {
@@ -783,6 +794,12 @@ export default function plugin(bb: BbPluginApi) {
           continue;
         }
         if (!agent.itemId || !openItems.some((item) => item.id === agent.itemId)) continue;
+        // Under judgment is not stalled: the verifier's verdict drives the
+        // next step (VERIFY_PASS closes the slice; VERIFY_FAIL is routed back
+        // with the findings). Past the fail cap the slice is the
+        // orchestrator's call, not a nudge loop's.
+        if (liveVerifierSources.has(agent.threadId)) continue;
+        if ((collab.rowOf(agent.threadId)?.verify_fails ?? 0) >= MAX_VERIFY_FAILS) continue;
         const since = firstSeenIdle.get(agent.threadId);
         if (since == null) {
           firstSeenIdle.set(agent.threadId, now);
@@ -1005,6 +1022,10 @@ export default function plugin(bb: BbPluginApi) {
       return;
     }
     if (!output) return;
+    // A verifier judges a completion claim, not every pause: mid-work idles
+    // spawn no auditors. This is what kept minting verifier after verifier
+    // while the stall machinery resumed a worker that was merely being judged.
+    if (structuredReport(output) !== "done") return;
     const digest = hashText(output);
     if (row.last_verify_hash === digest) return;
 
@@ -1028,6 +1049,7 @@ export default function plugin(bb: BbPluginApi) {
         itemId: row.item_id,
         providerId: resolved.verifyProvider,
         model: resolved.verifyModel,
+        workText: item?.step ?? "",
         prompt: [
           "Independent verification of a finished Goal worker.",
           `Parent objective: ${goal.objective}`,
@@ -1962,7 +1984,52 @@ Keep the plan current as steps complete or the next best action changes. When a 
         const sourceItemId = child.source_thread_id
           ? (collab.rowOf(child.source_thread_id)?.item_id ?? child.item_id)
           : child.item_id;
-        completeItemFor(parentRoot, sourceItemId, lastAssistantText, { requirePass: true });
+        const passed = completeItemFor(parentRoot, sourceItemId, lastAssistantText, {
+          requirePass: true,
+        });
+        // A failed verdict goes back to the worker WITH the findings — a
+        // blind resume just repeats the same mistake. Three failed cycles
+        // hand the slice to the orchestrator instead of looping forever.
+        if (
+          !passed &&
+          child.source_thread_id &&
+          /\bVERIFY_FAIL\b/i.test(lastAssistantText ?? "")
+        ) {
+          const fails = collab.bumpVerifyFails(child.source_thread_id);
+          if (fails < MAX_VERIFY_FAILS) {
+            try {
+              await bb.sdk.threads.send({
+                threadId: child.source_thread_id,
+                mode: "auto",
+                permissionMode: "full",
+                input: [
+                  {
+                    type: "text",
+                    text: [
+                      `Your slice failed independent verification (attempt ${fails}/${MAX_VERIFY_FAILS}). The verifier's findings:`,
+                      (lastAssistantText ?? "").slice(-1800),
+                      "Address every finding, re-run your check, and end with ULTRAGOAL_DONE: <evidence — commit SHA(s) and the passing check output>.",
+                    ].join("\n\n"),
+                    mentions: [],
+                  },
+                ],
+              });
+              bb.log.info(
+                `Routed VERIFY_FAIL ${fails}/${MAX_VERIFY_FAILS} to worker ${child.source_thread_id} on ${parentRoot}`,
+              );
+            } catch (error) {
+              bb.log.warn(
+                `Could not route VERIFY_FAIL to ${child.source_thread_id}: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          } else {
+            bb.log.warn(
+              `Slice held by ${child.source_thread_id} failed verification ${fails}x on ${parentRoot}; leaving it to the orchestrator`,
+            );
+          }
+        }
       }
       void publishFresh(parentRoot);
       void nudgeRoot(parentRoot);

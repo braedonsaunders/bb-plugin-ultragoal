@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2
+
+The verification loop stops fighting the stall machinery (observed live on the parlour greenfield goal as the same workers "finishing" over and over while auditors multiplied past the name pool):
+
+- A verifier judges a completion claim, not every pause: verifiers spawn only when a worker's report ends with ULTRAGOAL_DONE. Mid-work idles mint no auditors.
+- A worker under live verification is not stalled — the stall nudge skips it; the verdict drives the next step.
+- VERIFY_FAIL is routed back to the worker WITH the verifier's findings (a blind resume just repeats the mistake), capped at three failed cycles before the slice is left to the orchestrator.
+- Auditor names derive from the work under audit ("The Scaffold Skeptic", "Inspector Deploy") instead of exhausting an 8-name pool into "Auditor 20 the Unconvinced".
+
 ## 0.8.1
 
 Live cutover of the running goal surfaced four defects; all fixed structurally:

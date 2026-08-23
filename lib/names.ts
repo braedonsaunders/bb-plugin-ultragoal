@@ -108,6 +108,27 @@ const AUDITORS = [
   "The Red-Team Notary",
 ];
 
+const AUDITOR_TEMPLATES = [
+  (k: string) => `The ${k} Skeptic`,
+  (k: string) => `Inspector ${k}`,
+  (k: string) => `${k} Auditor`,
+  (k: string) => `The ${k} Cross-Examiner`,
+  (k: string) => `Doubting ${k}`,
+  (k: string) => `${k} Notary`,
+];
+
+/** Skeptic name derived from the work under audit; pool as fallback. */
+export function auditorNameFor(work: string, used: Iterable<string>): string {
+  const taken = new Set([...used].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  for (const keyword of keywordsOf(work).slice(0, 4)) {
+    for (const template of [...AUDITOR_TEMPLATES].sort(() => Math.random() - 0.5)) {
+      const name = template(keyword);
+      if (name.length <= 40 && !taken.has(name.toLowerCase())) return name;
+    }
+  }
+  return nextAuditorName(used);
+}
+
 export function nextAuditorName(used: Iterable<string>): string {
   const taken = new Set([...used].map((name) => name.trim().toLowerCase()).filter(Boolean));
   const available = AUDITORS.filter((name) => !taken.has(name.toLowerCase()));

@@ -222,6 +222,7 @@ export function createGoalStore(bb: BbPluginApi) {
     // its (dead) thread, so rows are retired, never deleted. Migrations are
     // positional — new statements append at the END, never mid-array.
     `ALTER TABLE collab_agents ADD COLUMN retired_at INTEGER`,
+    `ALTER TABLE collab_agents ADD COLUMN verify_fails INTEGER`,
   ]);
   importLegacyGoalDatabase(db);
 
