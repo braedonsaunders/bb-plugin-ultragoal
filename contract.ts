@@ -76,6 +76,24 @@ export const goalSettingsSchema = z.object({
   workerModel: z.string(),
 });
 
+// One rendered line of a worker thread's own history, mapped from its
+// timeline. Kinds mirror the subagents plugin's transcript so the drill-in
+// reads the same across both panels.
+export const workerTranscriptEntrySchema = z.object({
+  id: z.string(),
+  kind: z.enum(["user", "message", "reasoning", "tool", "command", "file", "other"]),
+  title: z.string().nullable(),
+  text: z.string().nullable(),
+  status: z.enum(["pending", "completed", "failed"]),
+});
+
+export const workerTranscriptSchema = z.object({
+  workerThreadId: z.string(),
+  threadStatus: z.string(),
+  entries: z.array(workerTranscriptEntrySchema),
+  truncated: z.boolean(),
+});
+
 export const goalDecisionSchema = z.object({
   id: z.string(),
   question: z.string(),
@@ -127,6 +145,8 @@ export const goalSnapshotSchema = z.object({
 });
 
 export type GoalStatus = z.infer<typeof goalStatusSchema>;
+export type WorkerTranscriptEntry = z.infer<typeof workerTranscriptEntrySchema>;
+export type WorkerTranscript = z.infer<typeof workerTranscriptSchema>;
 export type GoalDecision = z.infer<typeof goalDecisionSchema>;
 export type GoalFindingStatus = z.infer<typeof goalFindingStatusSchema>;
 export type GoalFinding = z.infer<typeof goalFindingSchema>;
@@ -211,6 +231,12 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
     output: z.object({ goal: goalSnapshotSchema.nullable() }),
+  },
+  workerTranscript: {
+    input: z
+      .object({ threadId: z.string().min(1), workerThreadId: z.string().min(1) })
+      .strict(),
+    output: workerTranscriptSchema,
   },
   listModels: {
     input: z.object({ threadId: z.string().min(1).optional() }).strict(),

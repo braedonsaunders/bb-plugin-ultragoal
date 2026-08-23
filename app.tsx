@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import {
+  Markdown,
   definePluginApp,
   experimental_useSidebarThreads,
   useBbNavigate,
@@ -8,7 +9,7 @@ import {
   useRpc,
   type PluginPendingInteractionProps,
 } from "@get-bb/plugin-sdk/app";
-import type { GoalAgent, GoalItem, GoalSnapshot, NowRow } from "./contract";
+import type { GoalAgent, GoalItem, GoalSnapshot, NowRow, WorkerTranscript, WorkerTranscriptEntry } from "./contract";
 import { rpcContract } from "./contract";
 import { providerLabel, providerMarkSpec } from "./lib/provider-marks";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles";
@@ -441,6 +442,13 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       goal.agentRunning,
   );
 
+  const [workerView, setWorkerView] = useState<{
+    threadId: string;
+    title: string;
+    nickname: string;
+  } | null>(null);
+  useEffect(() => setWorkerView(null), [threadId]);
+
   const apply = (next: GoalSnapshot | null) => {
     setGoal(next);
   };
@@ -486,6 +494,17 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       <div ref={rootRef} className="flex h-full w-full min-w-0 flex-col justify-center overflow-x-hidden px-4 text-sm text-muted-foreground">
         No UltraGoal is set on this thread.
       </div>
+    );
+  }
+
+  if (workerView) {
+    return (
+      <WorkerDetail
+        rootThreadId={threadId}
+        worker={workerView}
+        onBack={() => setWorkerView(null)}
+        onOpenThread={(id) => navigate.toThread(id)}
+      />
     );
   }
 
@@ -715,7 +734,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
               rows={nowRows}
               collapsed={collapsed.now}
               onToggleCollapsed={() => toggleCollapsed("now")}
-              onOpenThread={(id) => navigate.toThread(id)}
+              onOpenWorker={setWorkerView}
             />
             <ItemGroup
               title="Up next"
@@ -1140,14 +1159,213 @@ function SectionHeading({
   );
 }
 
+const TRANSCRIPT_POLL_MS = 6000;
+const TRANSCRIPT_COLLAPSED_LINES = 3;
+
+const TRANSCRIPT_LABEL: Record<WorkerTranscriptEntry["kind"], string> = {
+  user: "Steer",
+  message: "",
+  reasoning: "Thinking",
+  tool: "Tool",
+  command: "Shell",
+  file: "Edit",
+  other: "Step",
+};
+
+function useWorkerTranscript(rootThreadId: string, workerThreadId: string) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [transcript, setTranscript] = useState<WorkerTranscript | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setTranscript(await rpc.call("workerTranscript", { threadId: rootThreadId, workerThreadId }));
+    } catch {
+      // Keep whatever is on screen; the next tick retries.
+    }
+  }, [rpc, rootThreadId, workerThreadId]);
+
+  useEffect(() => {
+    setTranscript(null);
+    void load();
+  }, [load]);
+
+  const live =
+    transcript?.threadStatus === "active" ||
+    transcript?.threadStatus === "starting" ||
+    transcript === null;
+  useEffect(() => {
+    if (!live) return;
+    const id = window.setInterval(() => void load(), TRANSCRIPT_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [load, live]);
+
+  return transcript;
+}
+
+function WorkerTranscriptRow({ entry }: { entry: WorkerTranscriptEntry }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (entry.kind === "message") {
+    return (
+      <div className="px-3 py-2.5 text-[12.5px] leading-relaxed text-foreground">
+        <Markdown content={entry.text ?? ""} />
+      </div>
+    );
+  }
+
+  if (entry.kind === "user") {
+    return (
+      <div className="px-3 py-2 text-[11.5px] leading-relaxed text-muted-foreground">
+        <div className="mb-0.5 text-[9.5px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
+          {TRANSCRIPT_LABEL.user}
+        </div>
+        <div className="whitespace-pre-wrap break-words">{(entry.text ?? "").slice(0, 1200)}</div>
+      </div>
+    );
+  }
+
+  if (entry.kind === "reasoning") {
+    return (
+      <div className="px-3 py-2 text-[11.5px] leading-relaxed text-muted-foreground/90">
+        <div className="mb-0.5 text-[9.5px] font-medium uppercase tracking-[0.14em] text-muted-foreground/60">
+          {TRANSCRIPT_LABEL.reasoning}
+        </div>
+        <div className="whitespace-pre-wrap break-words">{entry.text}</div>
+      </div>
+    );
+  }
+
+  const body = entry.text?.trim() ?? "";
+  const lines = body.length > 0 ? body.split("\n") : [];
+  const overflows = lines.length > TRANSCRIPT_COLLAPSED_LINES || body.length > 400;
+  const shown =
+    expanded || !overflows ? body : lines.slice(0, TRANSCRIPT_COLLAPSED_LINES).join("\n");
+
+  return (
+    <div className="px-3 py-1.5">
+      <div className="flex min-w-0 items-baseline gap-1.5">
+        <span
+          className={`shrink-0 text-[9.5px] font-medium uppercase tracking-[0.14em] ${
+            entry.status === "failed" ? "text-destructive" : "text-muted-foreground/60"
+          }`}
+        >
+          {TRANSCRIPT_LABEL[entry.kind]}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+          {entry.title ?? "—"}
+        </span>
+        {entry.status === "pending" ? (
+          <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-foreground" />
+        ) : null}
+      </div>
+      {body.length > 0 ? (
+        <div className="mt-1 rounded-md bg-muted/30 px-2 py-1.5">
+          <div className="whitespace-pre-wrap break-words font-mono text-[10.5px] leading-relaxed text-muted-foreground">
+            {shown}
+            {overflows && !expanded ? "…" : null}
+          </div>
+          {overflows ? (
+            <button
+              type="button"
+              className="mt-1 text-[10px] text-muted-foreground/70 hover:text-foreground"
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded ? "Show less" : "Show more"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** The drill-in: a worker's own chat history filling the pane, subagents-style. */
+function WorkerDetail({
+  rootThreadId,
+  worker,
+  onBack,
+  onOpenThread,
+}: {
+  rootThreadId: string;
+  worker: { threadId: string; title: string; nickname: string };
+  onBack: () => void;
+  onOpenThread: (threadId: string) => void;
+}) {
+  const transcript = useWorkerTranscript(rootThreadId, worker.threadId);
+  const entries = transcript?.entries ?? [];
+  const live =
+    transcript?.threadStatus === "active" || transcript?.threadStatus === "starting";
+
+  return (
+    <div className="flex h-full w-full min-w-0 min-h-0 animate-in flex-col overflow-x-hidden bg-background duration-150 fade-in-0 slide-in-from-right-4">
+      <div className="shrink-0 border-b border-border">
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            className="flex items-center gap-1 px-2 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-state-hover"
+            onClick={onBack}
+          >
+            <span aria-hidden="true">‹</span>
+            <span>Goal</span>
+          </button>
+          <button
+            type="button"
+            className="px-2 py-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+            onClick={() => onOpenThread(worker.threadId)}
+          >
+            Open thread ↗
+          </button>
+        </div>
+        <div className="flex min-w-0 items-start gap-2 border-t border-border/50 px-3 py-2.5">
+          <span
+            className={`mt-[6px] h-1.5 w-1.5 shrink-0 rounded-full ${
+              live ? "animate-pulse bg-foreground" : "bg-muted-foreground/50"
+            }`}
+          />
+          <div className="min-w-0 flex-1">
+            <div className="break-words text-[13px] leading-snug text-foreground">
+              {worker.nickname}
+            </div>
+            <div className="mt-0.5 line-clamp-2 text-[10.5px] text-muted-foreground">
+              {worker.title}
+            </div>
+          </div>
+          <span className="mt-[1px] shrink-0 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+            {transcript?.threadStatus ?? "…"}
+          </span>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {transcript === null ? (
+          <div className="px-3 py-4 text-[11.5px] text-muted-foreground">Loading…</div>
+        ) : null}
+        {transcript?.truncated ? (
+          <div className="border-b border-border/50 px-3 py-1.5 text-[10px] text-muted-foreground/70">
+            Showing the most recent {entries.length} steps.
+          </div>
+        ) : null}
+        {entries.map((entry) => (
+          <WorkerTranscriptRow key={entry.id} entry={entry} />
+        ))}
+        {transcript !== null && entries.length === 0 ? (
+          <div className="px-3 py-4 text-[11.5px] leading-relaxed text-muted-foreground">
+            No history yet — the worker has not produced any steps.
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 // Now rows arrive fully computed from the server (lib/projection.ts): one row
 // per live subagent, already titled. The UI only renders.
 function NowRowView({
   row,
-  onOpenThread,
+  onOpenWorker,
 }: {
   row: NowRow;
-  onOpenThread: (threadId: string) => void;
+  onOpenWorker: (worker: { threadId: string; title: string; nickname: string }) => void;
 }) {
   const [open, setOpen] = useState(false);
   const live = row.kind !== "unattended";
@@ -1156,7 +1374,17 @@ function NowRowView({
       <button
         type="button"
         className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left hover:bg-state-hover"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          if (row.threadId) {
+            onOpenWorker({
+              threadId: row.threadId,
+              title: row.title,
+              nickname: row.nickname || "Worker",
+            });
+            return;
+          }
+          setOpen((value) => !value);
+        }}
         aria-expanded={open}
       >
         <span className="w-2 shrink-0 text-[9px] text-muted-foreground">{open ? "▾" : "▸"}</span>
@@ -1188,7 +1416,13 @@ function NowRowView({
             <button
               type="button"
               className="block w-full min-w-0 text-left hover:text-foreground"
-              onClick={() => onOpenThread(row.threadId as string)}
+              onClick={() =>
+                onOpenWorker({
+                  threadId: row.threadId as string,
+                  title: row.title,
+                  nickname: row.nickname || "Worker",
+                })
+              }
             >
               <div className="truncate text-[12px] leading-4 text-foreground">
                 {row.nickname}
@@ -1219,12 +1453,12 @@ function NowSection({
   rows,
   collapsed,
   onToggleCollapsed,
-  onOpenThread,
+  onOpenWorker,
 }: {
   rows: NowRow[];
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  onOpenThread: (threadId: string) => void;
+  onOpenWorker: (worker: { threadId: string; title: string; nickname: string }) => void;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -1238,7 +1472,7 @@ function NowSection({
       {collapsed ? null : (
         <ul>
           {rows.map((row) => (
-            <NowRowView key={row.key} row={row} onOpenThread={onOpenThread} />
+            <NowRowView key={row.key} row={row} onOpenWorker={onOpenWorker} />
           ))}
         </ul>
       )}

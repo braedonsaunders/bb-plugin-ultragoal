@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0
+
+Clicking a Now row opens the worker's chat history right in the pane — the drill-in behavior adopted from the subagents plugin (its panel is the exemplar; the transcript components are composed the same way):
+
+- A worker row click replaces the pane with that worker's transcript: assistant messages render as Markdown, steering/user messages, thinking, and collapsible shell/tool/edit steps, live-polled while the thread runs, with a "Showing the most recent N steps" cap.
+- Back returns to the goal pane; "Open thread ↗" in the detail header is the full-thread jump that row clicks used to do.
+- New workerTranscript rpc maps the worker thread's timeline into the shared entry shape, scoped to threads in the goal's own tree.
+
 ## 0.11.1
 
 - Restaffed workers are pointed at their predecessor's slice branch (bb names worker branches after the item id), so a continuation checks out or cherry-picks the furthest prior work instead of redoing the slice in a fresh worktree. (Field case: a provider upgrade made every pre-upgrade session unresumable — steering them died instantly; the three-strike retire converges such zombies onto fresh sessions, and continuations must inherit the stranded branch work.)

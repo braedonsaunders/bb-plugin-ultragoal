@@ -1745,6 +1745,73 @@ export default function plugin(bb: BbPluginApi) {
     async listModels({ threadId }) {
       return { providers: await listExecutionCatalog(bb, threadId) };
     },
+    async workerTranscript({ threadId, workerThreadId }) {
+      // Scope: only threads in this goal's tree are readable through the pane.
+      const row = collab.rowOf(workerThreadId);
+      let inTree = row?.root_thread_id === threadId;
+      if (!inTree) {
+        try {
+          const worker = await bb.sdk.threads.get({ threadId: workerThreadId });
+          inTree = worker.parentThreadId === threadId;
+        } catch {
+          inTree = false;
+        }
+      }
+      if (!inTree) {
+        return { workerThreadId, threadStatus: "unknown", entries: [], truncated: false };
+      }
+      let threadStatus = "unknown";
+      try {
+        threadStatus = (await bb.sdk.threads.get({ threadId: workerThreadId })).status ?? "unknown";
+      } catch {
+        // Status stays unknown; the timeline may still read.
+      }
+      const first = (...values: unknown[]): string | null => {
+        for (const value of values) {
+          if (typeof value === "string" && value.trim()) return value;
+        }
+        return null;
+      };
+      const rows = await readTimeline(workerThreadId);
+      const mapped = rows
+        .map((raw, index) => {
+          const entry = raw as Record<string, unknown>;
+          const kindRaw = `${entry.kind ?? ""} ${entry.type ?? ""}`.toLowerCase();
+          const role = String(entry.role ?? "");
+          const text = first(entry.text, entry.output, entry.summary, entry.content);
+          const title = first(entry.title, entry.command, entry.toolName, entry.name, entry.label);
+          let kind: "user" | "message" | "reasoning" | "tool" | "command" | "file" | "other";
+          if (kindRaw.includes("conversation")) kind = role === "user" ? "user" : "message";
+          else if (kindRaw.includes("reasoning") || kindRaw.includes("thinking")) kind = "reasoning";
+          else if (kindRaw.includes("command") || kindRaw.includes("shell")) kind = "command";
+          else if (kindRaw.includes("file")) kind = "file";
+          else if (kindRaw.includes("tool") || kindRaw.includes("mcp")) kind = "tool";
+          else kind = "other";
+          const statusRaw = String(entry.status ?? "").toLowerCase();
+          const status =
+            statusRaw === "failed" || statusRaw === "error"
+              ? ("failed" as const)
+              : statusRaw === "pending" || statusRaw === "running"
+                ? ("pending" as const)
+                : ("completed" as const);
+          return {
+            id: String(entry.id ?? `row_${index}`),
+            kind,
+            title,
+            text,
+            status,
+          };
+        })
+        .filter((entry) => entry.text || entry.title);
+      const MAX_ENTRIES = 300;
+      const truncated = mapped.length > MAX_ENTRIES;
+      return {
+        workerThreadId,
+        threadStatus,
+        entries: truncated ? mapped.slice(-MAX_ENTRIES) : mapped,
+        truncated,
+      };
+    },
     async listCrews() {
       // Every root that ever staffed a crew, not just active goals: clearing
       // a goal must not dump its (hidden) worker threads into the sidebar.
