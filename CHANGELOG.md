@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5
+
+- Up next rows that are started but unattended now carry an explicit "in progress" label. The dot-in-box marker alone read like a checked checkbox, making in-progress items look completed.
+
 ## 0.4.4
 
 - Zero type errors against the pinned SDK; the repo typechecks and builds clean. Real fixes, not suppressions: collab tools return proper tool-result payloads, spawn/fork/send calls match the SDK's exact argument shapes, pending interactions are checked through the interactions API instead of a nonexistent thread flag, provider/model listing passes well-formed scopes, and the stored goal type no longer pretends to carry live snapshot fields.

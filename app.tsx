@@ -1296,6 +1296,13 @@ function ItemGroup({
               >
                 {shortSliceTitle(item.step) || currentSliceTitle(item.step)}
               </span>
+              {active ? (
+                // Started but no live worker holds it. Spell it out: the dot
+                // marker alone reads like a checked box at this size.
+                <span className="mt-0.5 shrink-0 rounded-sm bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
+                  in progress
+                </span>
+              ) : null}
             </li>
           );
         })}
