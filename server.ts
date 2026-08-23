@@ -958,7 +958,7 @@ export default function plugin(bb: BbPluginApi) {
         threadId,
         mode,
         permissionMode: "full",
-        input: [{ type: "text", text, visibility: "agent-only" }],
+        input: [{ type: "text", text, visibility: "agent-only", mentions: [] }],
       });
       return true;
     } catch (error) {
@@ -1098,6 +1098,7 @@ export default function plugin(bb: BbPluginApi) {
       await resumeGoal(threadId, { start: false });
       return true;
     }
+    if (slash.kind !== "set" && slash.kind !== "edit") return true;
     const result = await userSetGoal(threadId, slash.objective);
     if ("error" in result) {
       bb.log.warn(`Goal set failed on ${threadId}: ${result.error}`);
@@ -1446,7 +1447,10 @@ Keep the plan current as steps complete or the next best action changes. When a 
       bb.log.info(`Skipping Goal continue on ${thread.id}: native Codex Goal`);
       return;
     }
-    if (thread.hasPendingInteraction) {
+    const pendingInteractions = await bb.sdk.threads.interactions
+      .list({ threadId: thread.id })
+      .catch(() => []);
+    if (Array.isArray(pendingInteractions) && pendingInteractions.length > 0) {
       bb.log.info(`Skipping Goal continue on ${thread.id}: pending interaction`);
       return;
     }
@@ -1688,7 +1692,7 @@ async function listExecutionCatalog(
     }
   }
 
-  const scope = { environmentId };
+  const scope = environmentId ? { environmentId } : {};
   let providers: Array<{ id: string; displayName: string; available?: boolean }> = [];
   try {
     const options = await bb.sdk.system.executionOptions(scope);
@@ -1723,7 +1727,7 @@ async function listProviderModels(
   providerId: string,
   environmentId?: string,
 ): Promise<CatalogModel[]> {
-  const args = { providerId, environmentId };
+  const args = environmentId ? { providerId, environmentId } : { providerId };
   try {
     return modelsFromOptions(await bb.sdk.system.executionOptions(args), providerId);
   } catch {

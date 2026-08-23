@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import {
   definePluginApp,
   experimental_useSidebarThreads,
@@ -1316,7 +1316,9 @@ export default definePluginApp((app) => {
     title: "Threads",
     description: "Built-in list with provider icons before titles.",
     component: (props) => {
-      const Original = props.experimental_Original;
+      // The SDK types experimental_Original as a bare ComponentType; it does
+      // accept the slot props at runtime.
+      const Original = props.experimental_Original as ComponentType<typeof props>;
       return (
         <>
           <SidebarProviderIcons />

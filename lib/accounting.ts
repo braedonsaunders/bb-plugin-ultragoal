@@ -46,7 +46,7 @@ async function listEvents(
 ): Promise<Array<Record<string, unknown>>> {
   try {
     const result = await bb.sdk.threads.events.list(args as never);
-    if (Array.isArray(result)) return result as Array<Record<string, unknown>>;
+    if (Array.isArray(result)) return result as unknown as Array<Record<string, unknown>>;
     const wrapped = result as { events?: unknown[]; items?: unknown[] };
     return (wrapped.events ?? wrapped.items ?? []) as Array<Record<string, unknown>>;
   } catch {

@@ -40,7 +40,10 @@ interface GoalRow {
   last_plan_seq?: number | null;
 }
 
-export interface StoredGoal extends GoalSnapshot {
+// The persistent record. Live fields (agentRunning, items, agents, now, next)
+// are computed per snapshot in server.ts, never stored.
+export interface StoredGoal
+  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next"> {
   lastSeenTokens: number | null;
   lastAccountedAt: number | null;
   lastContinueWasAutomatic: boolean;

@@ -664,7 +664,7 @@ export function createCollabStore(
             projectId: parent.projectId ?? projectId,
             parentThreadId: threadId,
             providerId: parent.providerId,
-            model: model ?? parent.model ?? undefined,
+            model: model ?? undefined,
             permissionMode: "full" as const,
             environment: parent.environmentId
               ? { type: "reuse" as const, environmentId: parent.environmentId }
@@ -680,8 +680,7 @@ export function createCollabStore(
               : await bb.sdk.threads
                   .fork({
                     sourceThreadId: threadId,
-                    parentThreadId: threadId,
-                    prompt,
+                    input: [{ type: "text", text: prompt, mentions: [] }],
                     title: shortSliceTitle(trimmed) || displayName,
                     permissionMode: "full",
                     visibility: "hidden",
@@ -710,7 +709,14 @@ export function createCollabStore(
           }
           if (itemId) hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
           hooks?.onChange?.(rootThreadId);
-          return { task_name: taskName, nickname: displayName, item_id: itemId };
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ task_name: taskName, nickname: displayName, item_id: itemId }),
+              },
+            ],
+          };
         },
       });
 
@@ -738,7 +744,7 @@ export function createCollabStore(
           await bb.sdk.threads.queuedMessages.create({
             threadId: agent.thread_id,
             permissionMode: "full",
-            input: [{ type: "text", text: trimmed }],
+            input: [{ type: "text", text: trimmed, mentions: [] }],
           });
           return "";
         },
@@ -792,7 +798,7 @@ export function createCollabStore(
             threadId: agent.thread_id,
             mode: "auto",
             permissionMode: "full",
-            input: [{ type: "text", text: trimmed }],
+            input: [{ type: "text", text: trimmed, mentions: [] }],
           });
           hooks?.onChange?.(rootThreadId);
           return "";
@@ -821,7 +827,7 @@ export function createCollabStore(
               agent_status: await statusOf(row.thread_id),
             })),
           );
-          return { agents };
+          return { content: [{ type: "text", text: JSON.stringify({ agents }) }] };
         },
       });
 
@@ -848,7 +854,7 @@ export function createCollabStore(
           const timeout = Math.max(MIN_WAIT_TIMEOUT_MS, timeout_ms ?? DEFAULT_WAIT_TIMEOUT_MS);
           const rows = byRoot.all(rootId(threadId)) as CollabRow[];
           if (rows.length === 0) {
-            return { message: "No live agents.", timed_out: false };
+            return { content: [{ type: "text", text: "No live agents." }] };
           }
           const deadline = Date.now() + timeout;
           const updated: string[] = [];
@@ -869,11 +875,12 @@ export function createCollabStore(
             }),
           );
           if (updated.length === 0) {
-            return { message: "Timed out before any mailbox update.", timed_out: true };
+            return {
+              content: [{ type: "text", text: "Timed out before any mailbox update." }],
+            };
           }
           return {
-            message: `Updates from ${updated.join(", ")}.`,
-            timed_out: false,
+            content: [{ type: "text", text: `Updates from ${updated.join(", ")}.` }],
           };
         },
       });
@@ -892,11 +899,11 @@ export function createCollabStore(
         async execute({ target }, { threadId }) {
           const agent = resolve(threadId, target);
           if (!agent) {
-            return { previous_status: "not_found" };
+            return { content: [{ type: "text", text: `Agent not found: ${target}` }], isError: true };
           }
           const previous_status = await statusOf(agent.thread_id);
           await bb.sdk.threads.stop({ threadId: agent.thread_id });
-          return { previous_status };
+          return { content: [{ type: "text", text: JSON.stringify({ previous_status }) }] };
         },
       });
     },

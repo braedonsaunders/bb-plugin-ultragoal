@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.4
+
+- Zero type errors against the pinned SDK; the repo typechecks and builds clean. Real fixes, not suppressions: collab tools return proper tool-result payloads, spawn/fork/send calls match the SDK's exact argument shapes, pending interactions are checked through the interactions API instead of a nonexistent thread flag, provider/model listing passes well-formed scopes, and the stored goal type no longer pretends to carry live snapshot fields.
+
 ## 0.4.3
 
 - Token accounting works on every provider, not just Cursor. Usage is read straight from each provider's own session store — OpenCode's opencode.db message tokens, Claude Code's ~/.claude/projects JSONL usage lines, Codex's rollout total_token_usage — keyed by the thread's provider session id, on top of the existing Cursor readers. Goals orchestrated by OpenCode/Claude/Codex no longer sit at "Tokens 0".
