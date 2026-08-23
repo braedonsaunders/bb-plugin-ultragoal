@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- Sidebar provider marks moved out into their own plugin, [Thread Provider Icons](https://github.com/braedonsaunders/bb-plugin-thread-provider-icons). Drawing every thread's provider logo was generic chrome that had nothing to do with goals, and bundling it meant you could not have the icons without UltraGoal or UltraGoal without the icons. Install `thread-provider-icons` to keep them. UltraGoal's own sidebar marks — the goal pill and worker-row hiding — are unchanged, as is the provider icon in the thread header.
+
 ## 0.5.1
 
 Provenance over heuristics — structural facts replace string classifiers:
