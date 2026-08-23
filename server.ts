@@ -974,6 +974,9 @@ export default function plugin(bb: BbPluginApi) {
         if (agent.role !== "worker" || agent.threadId === rootThreadId) continue;
         if (agent.status !== "idle") {
           firstSeenIdle.delete(agent.threadId);
+          if (agent.status === "running" || agent.status === "starting") {
+            collab.resetNudges(agent.threadId);
+          }
           continue;
         }
         if (!agent.itemId || !openItems.some((item) => item.id === agent.itemId)) continue;

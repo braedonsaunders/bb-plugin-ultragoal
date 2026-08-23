@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1
+
+- Progress clears the strike count: a worker seen actually running resets its nudge tally, so the three-strike retire measures wedged-ness, not work style. (Codex workers legitimately work in short turns; under the old rule they collected three resume-nudges while making real progress and got retired mid-slice.)
+
 ## 0.12.0
 
 Clicking a Now row opens the worker's chat history right in the pane — the drill-in behavior adopted from the subagents plugin (its panel is the exemplar; the transcript components are composed the same way):

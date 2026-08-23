@@ -135,6 +135,9 @@ export function createCollabStore(
   const bumpNudgeStmt = db.prepare(
     "UPDATE collab_agents SET last_nudge_at = @at, nudge_count = COALESCE(nudge_count, 0) + 1 WHERE thread_id = @thread_id",
   );
+  const resetNudgeStmt = db.prepare(
+    "UPDATE collab_agents SET nudge_count = 0 WHERE thread_id = ? AND COALESCE(nudge_count, 0) > 0",
+  );
   // Retire, never delete: a deleted row lets discovery resurrect the dead
   // thread and re-claim its slice.
   const removeRow = db.prepare(
@@ -672,6 +675,14 @@ export function createCollabStore(
 
     setVerifyHash(threadId: string, hash: string) {
       setHash.run({ thread_id: threadId, last_verify_hash: hash });
+    },
+
+    /** A worker seen actually running has proven it can resume: its nudges
+     * count wedged-ness, not work style, so progress clears the strike count.
+     * Without this, a worker that legitimately works in short turns collects
+     * three nudges and gets wrongly retired. */
+    resetNudges(threadId: string): void {
+      resetNudgeStmt.run(threadId);
     },
 
     /** Records a stall nudge; returns the new total. */
