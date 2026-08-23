@@ -243,6 +243,24 @@ export function createCollabStore(
     { status: GoalAgentStatus; summary: string | null; title: string | null; at: number }
   >();
 
+  /** First user message of a thread — the spawn prompt for a child worker. */
+  async function spawnPromptOf(threadId: string): Promise<string | null> {
+    try {
+      const timeline = await bb.sdk.threads.timeline({ threadId });
+      for (const raw of timeline.rows as readonly unknown[]) {
+        const row = raw as { kind?: string; role?: string; text?: string };
+        if (row?.kind !== "conversation" || row.role !== "user") continue;
+        const text = row.text?.trim();
+        if (text) return text;
+      }
+    } catch {
+      // Best-effort; the child still renders without a slice link.
+    }
+    return null;
+  }
+
+  const claimTried = new Set<string>();
+
   function displayTitle(title: string | null | undefined): string | null {
     const text = title?.trim();
     if (!text || isPromptLikeTitle(text)) return null;
@@ -373,6 +391,37 @@ export function createCollabStore(
         };
       }),
     );
+
+    // Children spawned outside spawn_agent carry their slice in the spawn
+    // prompt ("SLICE (item_id=itm_...): ..."). Claim it once so the Now row
+    // shows the task, the plan item leaves Next, and idle completion works.
+    if (hooks?.claimItem) {
+      const byId = new Map(all.map((row) => [row.thread_id, row]));
+      for (const agent of agents) {
+        if (agent.role === "verifier" || agent.itemId) continue;
+        if (agent.status !== "running" && agent.status !== "starting") continue;
+        if (claimTried.has(agent.threadId)) continue;
+        claimTried.add(agent.threadId);
+        const prompt = await spawnPromptOf(agent.threadId);
+        if (!prompt) continue;
+        const requested = /\bitem_id=([A-Za-z0-9_]+)/.exec(prompt)?.[1] ?? null;
+        const claimed =
+          hooks.claimItem(root, {
+            itemId: requested,
+            message: prompt,
+            workerThreadId: agent.threadId,
+          }) ?? requested;
+        if (!claimed) continue;
+        const row = byId.get(agent.threadId);
+        if (row) row.item_id = claimed;
+        agent.itemId = claimed;
+        setMeta.run({
+          thread_id: agent.threadId,
+          display_name: row?.display_name ?? null,
+          item_id: claimed,
+        });
+      }
+    }
 
     const rank: Record<GoalAgentStatus, number> = {
       running: 0,

@@ -188,7 +188,18 @@ export default function plugin(bb: BbPluginApi) {
     },
     claimItem(rootThreadId, { itemId, message, workerThreadId }) {
       const title = sliceTitleFromMessage(message);
-      if (!title) return itemId;
+      if (!title) {
+        // No extractable slice text, but an explicit item reference still
+        // claims: promote it so the slice leaves Next while it is worked.
+        if (itemId) {
+          const prior = items.list(rootThreadId).find((item) => item.id === itemId);
+          if (prior && prior.status !== "completed") {
+            items.setStatus(rootThreadId, itemId, "in_progress");
+            collab.setWorkTitleForItem(rootThreadId, itemId, prior.step);
+          }
+        }
+        return itemId;
+      }
       const preferred = itemId ? items.list(rootThreadId).find((item) => item.id === itemId) : undefined;
       const occupants = itemId ? workersOnItem(rootThreadId, itemId) : [];
       const exclusive =

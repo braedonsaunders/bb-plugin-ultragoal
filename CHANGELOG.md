@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6
+
+- Discovered native children claim their slice from the spawn prompt (SLICE item_id and text), so their Now rows show the task instead of repeating the agent name, the plan item leaves Up next while it is worked, and idle completion closes it.
+- An explicit item reference in a spawn prompt claims even when no slice title can be extracted.
+
 ## 0.3.5
 
 - Children the orchestrator spawns natively (outside spawn_agent) are discovered on every pane refresh, so they get Now rows and — critically — auto-approval. Their approval prompts (command runs, file changes) no longer sit waiting for the user.
