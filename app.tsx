@@ -1156,34 +1156,24 @@ function isLiveAgent(agent: GoalAgent): boolean {
 }
 
 function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
+  // Every open in-progress slice is a Now row, so Now always reconciles with
+  // the done/total counter. Live agents without a plan item get a synthesized
+  // row on top of that.
+  const seen = new Set<string>();
+  const out: GoalItem[] = [];
+  for (const item of items) {
+    if (item.status !== "in_progress" || seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
   const live = agents.filter(
     (agent) =>
       agent.role !== "verifier" &&
       isLiveAgent(agent) &&
       (isNamedWorker(agent) || isNativeTask(agent)),
   );
-  const open = items.filter((item) => item.status === "in_progress");
-  const seen = new Set<string>();
-  const out: GoalItem[] = [];
-  if (live.length === 0) {
-    for (const item of open) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      out.push(item);
-    }
-    return out;
-  }
-  // One Now row per live subagent: the item it holds, or a synthesized row
-  // when a live agent has no plan item yet.
-  const byId = new Map(open.map((item) => [item.id, item]));
   for (const agent of live) {
-    const item = agent.itemId ? byId.get(agent.itemId) : undefined;
-    if (item) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      out.push(item);
-      continue;
-    }
+    if (agent.itemId && seen.has(agent.itemId)) continue;
     const id = `live:${agent.taskName}`;
     if (seen.has(id)) continue;
     seen.add(id);

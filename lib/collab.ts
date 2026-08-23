@@ -449,6 +449,7 @@ export function createCollabStore(
         parentThreadId: args.rootThreadId,
         providerId: root.providerId,
         ...(model ? { model } : {}),
+        permissionMode: "full",
         environment: root.environmentId
           ? { type: "reuse" as const, environmentId: root.environmentId }
           : { type: "project-default" as const },
@@ -509,6 +510,7 @@ export function createCollabStore(
         parentThreadId: args.rootThreadId,
         providerId: args.providerId,
         model: args.model,
+        permissionMode: "full",
         environment: root.environmentId
           ? { type: "reuse" as const, environmentId: root.environmentId }
           : { type: "project-default" as const },
@@ -640,6 +642,7 @@ export function createCollabStore(
             parentThreadId: threadId,
             providerId: parent.providerId,
             model: model ?? parent.model ?? undefined,
+            permissionMode: "full" as const,
             environment: parent.environmentId
               ? { type: "reuse" as const, environmentId: parent.environmentId }
               : { type: "project-default" as const },
@@ -657,8 +660,12 @@ export function createCollabStore(
                     parentThreadId: threadId,
                     prompt,
                     title: shortSliceTitle(trimmed) || displayName,
+                    permissionMode: "full",
                     visibility: "hidden",
                     workspace: "reuse",
+                    // Plugin-origin children skip bb's parent "needs help"
+                    // notifications; UltraGoal handles its own crew.
+                    origin: "plugin",
                   })
                   .catch(() => bb.sdk.threads.spawn(spawnArgs));
           insert.run({
@@ -707,6 +714,7 @@ export function createCollabStore(
           }
           await bb.sdk.threads.queuedMessages.create({
             threadId: agent.thread_id,
+            permissionMode: "full",
             input: [{ type: "text", text: trimmed }],
           });
           return "";
@@ -743,6 +751,7 @@ export function createCollabStore(
           await bb.sdk.threads.send({
             threadId: agent.thread_id,
             mode: "auto",
+            permissionMode: "full",
             input: [{ type: "text", text: trimmed }],
           });
           const rootThreadId = rootId(threadId);

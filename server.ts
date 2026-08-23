@@ -593,6 +593,75 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  // UltraGoal runs unattended: approval gates (command, file-change,
+  // permission, plan) on the goal tree are resolved automatically, session-wide
+  // when the provider allows it. User questions are left for the user.
+  async function approveInteractions(threadId: string): Promise<number> {
+    let rows: Array<Record<string, unknown>> = [];
+    try {
+      const listed = await bb.sdk.threads.interactions.list({ threadId });
+      rows = (Array.isArray(listed) ? listed : []) as Array<Record<string, unknown>>;
+    } catch {
+      return 0;
+    }
+    let approved = 0;
+    for (const row of rows) {
+      const id = typeof row.id === "string" ? row.id : null;
+      const payload = (row.payload ?? null) as
+        | { kind?: string; availableDecisions?: unknown }
+        | null;
+      if (!id || payload?.kind !== "approval") continue;
+      const decisions = Array.isArray(payload.availableDecisions)
+        ? payload.availableDecisions
+        : [];
+      const decision = decisions.includes("allow_for_session")
+        ? ("allow_for_session" as const)
+        : ("allow_once" as const);
+      try {
+        await bb.sdk.threads.interactions.resolve({
+          threadId,
+          interactionId: id,
+          resolution: { decision, grantedPermissions: null } as never,
+        });
+        approved += 1;
+      } catch (error) {
+        bb.log.warn(
+          `Could not auto-approve interaction ${id} on ${threadId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    if (approved > 0) {
+      bb.log.info(`Auto-approved ${approved} interaction(s) on ${threadId}`);
+    }
+    return approved;
+  }
+
+  async function approveGoalTree(rootId: string): Promise<void> {
+    const goal = store.get(rootId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    const ids = new Set<string>([rootId]);
+    for (const agent of agentCache.get(rootId) ?? []) {
+      if (agent.threadId !== rootId) ids.add(agent.threadId);
+    }
+    await Promise.all([...ids].map((id) => approveInteractions(id)));
+  }
+
+  async function approvalPulse(): Promise<void> {
+    for (const threadId of store.listActiveThreadIds()) {
+      try {
+        await approveGoalTree(threadId);
+      } catch (error) {
+        bb.log.warn(
+          `Goal approval pulse failed on ${threadId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   async function nudgeRoot(rootId: string): Promise<void> {
     const goal = store.get(rootId);
     if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
@@ -787,6 +856,7 @@ export default function plugin(bb: BbPluginApi) {
       await bb.sdk.threads.send({
         threadId,
         mode,
+        permissionMode: "full",
         input: [{ type: "text", text, visibility: "agent-only" }],
       });
       return true;
@@ -1225,6 +1295,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
 
   bb.events.on("thread.active", async ({ thread }) => {
     running.set(thread.id, true);
+    if (store.get(thread.id) || collab.rowOf(thread.id)) {
+      void approveInteractions(thread.id);
+    }
     const existing = store.get(thread.id);
     if (existing && (existing.status === "active" || existing.status === "budget_limited")) {
       const next = store.update(thread.id, { lastAccountedAt: Date.now() });
@@ -1240,6 +1313,13 @@ Keep the plan current as steps complete or the next best action changes. When a 
   bb.events.on("thread.idle", async ({ thread }) => {
     const child = collab.rowOf(thread.id);
     const parentRoot = child?.root_thread_id;
+    const pendingInteraction = (thread as { hasPendingInteraction?: boolean })
+      .hasPendingInteraction === true;
+    if (pendingInteraction && (child || store.get(thread.id))) {
+      const approved = await approveInteractions(thread.id);
+      // Approval resumes the provider turn; let the next idle event finish up.
+      if (approved > 0) return;
+    }
     if (parentRoot && parentRoot !== thread.id && !thread.hasPendingInteraction) {
       if (child.role !== "verifier") await maybeVerifyWorker(thread.id);
       void publishFresh(parentRoot);
@@ -1401,6 +1481,15 @@ Keep the plan current as steps complete or the next best action changes. When a 
       while (!signal.aborted) {
         await pulseStaleProgress();
         await sleep(20_000, signal);
+      }
+    },
+  });
+
+  bb.background.service("approval-pulse", {
+    async start(signal) {
+      while (!signal.aborted) {
+        await approvalPulse();
+        await sleep(5_000, signal);
       }
     },
   });
