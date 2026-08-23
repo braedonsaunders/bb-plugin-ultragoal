@@ -2027,6 +2027,52 @@ Keep the plan current as steps complete or the next best action changes. When a 
       return "Plan updated";
     },
   });
+  async function registerFinding(
+    rootThreadId: string,
+    input: { title: string; file: string; evidence: string; fixFiles?: string[]; check?: string | null },
+  ): Promise<{ created: boolean; findingId: string; fixItemId: string | null; status: string }> {
+    const result = findings.report(rootThreadId, {
+      title: input.title,
+      file: input.file,
+      evidence: input.evidence,
+    });
+    if (!result.created) {
+      return {
+        created: false,
+        findingId: result.finding.id,
+        fixItemId: result.finding.itemId,
+        status: result.finding.status,
+      };
+    }
+    const fixItem = items.add(
+      rootThreadId,
+      `Fix: ${input.title} [${input.file.replace(/[:#]\d+([-:]\d+)?$/, "")}]`,
+      "pending",
+      {
+        deps: [],
+        files:
+          input.fixFiles && input.fixFiles.length > 0
+            ? input.fixFiles
+            : [input.file.replace(/[:#]\d+([-:]\d+)?$/, "")],
+        check: input.check ?? null,
+      },
+    );
+    if (fixItem) findings.linkItem(rootThreadId, result.finding.id, fixItem.id);
+    markGoalEvent(rootThreadId);
+    bb.log.info(
+      `Finding ${result.finding.id} registered on ${rootThreadId}${fixItem ? ` -> fix slice ${fixItem.id}` : ""}`,
+    );
+    void publishFresh(rootThreadId);
+    void scheduleReady(rootThreadId);
+    void nudgeRoot(rootThreadId);
+    return {
+      created: true,
+      findingId: result.finding.id,
+      fixItemId: fixItem?.id ?? null,
+      status: "open",
+    };
+  }
+
   bb.agents.registerTool({
     name: "report_finding",
     description:
@@ -2060,18 +2106,24 @@ Keep the plan current as steps complete or the next best action changes. When a 
           isError: true,
         };
       }
-      const result = findings.report(rootThreadId, { title, file, evidence });
-      if (!result.created) {
+      const registered = await registerFinding(rootThreadId, {
+        title,
+        file,
+        evidence,
+        fixFiles: fix_files,
+        check,
+      });
+      if (!registered.created) {
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
                 status: "duplicate",
-                finding_id: result.finding.id,
-                finding_status: result.finding.status,
+                finding_id: registered.findingId,
+                finding_status: registered.status,
                 note:
-                  result.finding.status === "fixed"
+                  registered.status === "fixed"
                     ? "This finding was already fixed. Verify it actually regressed before re-reporting; if it did, report with a more specific title."
                     : "Already known; its fix is tracked.",
               }),
@@ -2079,32 +2131,14 @@ Keep the plan current as steps complete or the next best action changes. When a 
           ],
         };
       }
-      const fixItem = items.add(
-        rootThreadId,
-        `Fix: ${title} [${file.replace(/[:#]\d+([-:]\d+)?$/, "")}]`,
-        "pending",
-        {
-          deps: [],
-          files: fix_files && fix_files.length > 0 ? fix_files : [file.replace(/[:#]\d+([-:]\d+)?$/, "")],
-          check: check ?? null,
-        },
-      );
-      if (fixItem) findings.linkItem(rootThreadId, result.finding.id, fixItem.id);
-      markGoalEvent(rootThreadId);
-      bb.log.info(
-        `Finding ${result.finding.id} reported on ${rootThreadId}${fixItem ? ` -> fix slice ${fixItem.id}` : ""}`,
-      );
-      void publishFresh(rootThreadId);
-      void scheduleReady(rootThreadId);
-      void nudgeRoot(rootThreadId);
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify({
               status: "new",
-              finding_id: result.finding.id,
-              fix_item_id: fixItem?.id ?? null,
+              finding_id: registered.findingId,
+              fix_item_id: registered.fixItemId,
             }),
           },
         ],
@@ -2584,6 +2618,45 @@ Keep the plan current as steps complete or the next best action changes. When a 
         return { exitCode: 0, stdout: `Decision ${decisionId} answered: ${answer}` };
       }
 
+      if (action === "finding") {
+        const tokens = (objective ?? "").length > 0 ? parsed.rawRest ?? [] : parsed.rawRest ?? [];
+        let file = "";
+        let evidence = "";
+        let check: string | null = null;
+        let fixFiles: string[] = [];
+        const titleParts: string[] = [];
+        for (let i = 0; i < tokens.length; i += 1) {
+          const token = tokens[i];
+          if (token === "--file") { file = tokens[++i] ?? ""; continue; }
+          if (token === "--evidence") { evidence = tokens[++i] ?? ""; continue; }
+          if (token === "--check") { check = tokens[++i] ?? null; continue; }
+          if (token === "--fix-files") {
+            fixFiles = (tokens[++i] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+            continue;
+          }
+          titleParts.push(token);
+        }
+        const title = titleParts.join(" ").trim();
+        if (!title || !file || !evidence) {
+          return {
+            exitCode: 1,
+            stderr:
+              'Usage: bb ultragoal finding "<title>" --file <path[:line]> --evidence "<proof>" [--fix-files a,b] [--check <cmd>] [--thread <id>]',
+          };
+        }
+        const goal = store.get(threadId);
+        if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) {
+          return { exitCode: 1, stderr: "No active UltraGoal on this thread." };
+        }
+        const registered = await registerFinding(threadId, { title, file, evidence, fixFiles, check });
+        return {
+          exitCode: 0,
+          stdout: registered.created
+            ? `Finding ${registered.findingId} registered; fix slice ${registered.fixItemId} staffed by the scheduler.`
+            : `Duplicate of ${registered.findingId} (${registered.status}).`,
+        };
+      }
+
       if (action === "workers") {
         const parsed = Number.parseInt(objective ?? "", 10);
         if (!Number.isFinite(parsed) || parsed < 0 || parsed > 16) {
@@ -2632,6 +2705,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
       { name: "workers", summary: "Set the goal's concurrent worker slots", usage: "bb ultragoal workers <0-16> [--thread <id>]" },
       { name: "decide", summary: "Answer an open owner decision", usage: "bb ultragoal decide <decision_id> <answer> [--thread <id>]" },
+      { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -2680,9 +2754,10 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding";
   threadId: string | undefined;
   objective?: string;
+  rawRest?: string[];
   error?: string;
 } {
   let threadId = fallbackThreadId;
@@ -2703,6 +2778,9 @@ function parseCli(
   }
   if (action === "set" || action === "edit" || action === "workers" || action === "decide") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
+  }
+  if (action === "finding") {
+    return { action, threadId, objective: rest.slice(1).join(" ").trim(), rawRest: rest.slice(1) };
   }
   if (action === "pane" || action === "pause" || action === "resume" || action === "clear") {
     return { action, threadId };

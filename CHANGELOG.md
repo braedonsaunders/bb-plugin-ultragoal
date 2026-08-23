@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.0
+
+External auditors are first-class finding sources:
+
+- New CLI: `bb ultragoal finding "<title>" --file <path[:line]> --evidence "<proof>" [--fix-files a,b] [--check <cmd>]` files a finding directly from outside the goal — scheduled audit bots and humans no longer depend on the orchestrator noticing a handoff message. Same fingerprint dedupe, auto fix slice, scheduler staffing, and completion gate as the report_finding tool (both now share one registration path).
+- Orchestrator contract: inbound defect reports and audit handoffs from ANY thread, automation, or human are work, not FYI — each defect becomes report_finding immediately with a visible acknowledgment. (Field case: a scheduled read-only audit thread messaged five serious defects — including a P0 payment-amount bug — and the root let them scroll by; only owner messages were first-class before.)
+
 ## 0.13.1
 
 - Scope-width guidance: files scopes gate concurrency, so they must be the narrow set a slice actually touches — overlapping scopes serialize deliberately (slices sharing files belong in one queue), and a whole-app scope serializes the entire goal. Observed live: one slice scoped "apps/web" blocked eight ready slices; narrowing restored 4-wide staffing in seconds. Prefer an empty scope over a broad guess.
