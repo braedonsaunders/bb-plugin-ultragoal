@@ -1158,6 +1158,7 @@ function NowRowView({
   onOpenThread: (threadId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const live = row.kind !== "unattended";
   return (
     <li className="rounded-md">
       <button
@@ -1169,24 +1170,24 @@ function NowRowView({
         <span className="w-2 shrink-0 text-[9px] text-muted-foreground">{open ? "▾" : "▸"}</span>
         <span
           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border ${
-            row.live ? "border-foreground" : "border-muted-foreground/60"
+            live ? "border-foreground" : "border-muted-foreground/60"
           }`}
         >
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              row.live ? "bg-foreground" : "bg-muted-foreground/60"
+              live ? "bg-foreground" : "bg-muted-foreground/60"
             }`}
           />
         </span>
         <span
           className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${
-            row.live ? "text-foreground" : "text-foreground/80"
+            live ? "text-foreground" : "text-foreground/80"
           }`}
         >
           {row.title}
         </span>
         <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
-          {row.live ? row.nickname : row.nickname ? `${row.nickname} · idle` : "idle"}
+          {live ? row.nickname : row.nickname ? `${row.nickname} · idle` : "idle"}
         </span>
       </button>
       {open ? (
@@ -1200,7 +1201,7 @@ function NowRowView({
               <div className="truncate text-[12px] leading-4 text-foreground">
                 {row.nickname}
                 <span className="ml-1.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-                  {row.live ? "running" : "idle"}
+                  {live ? "running" : "idle"}
                 </span>
               </div>
               <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
@@ -1209,9 +1210,11 @@ function NowRowView({
             </button>
           ) : (
             <div className="text-[11px] text-muted-foreground">
-              {row.live
-                ? "Native subagent running inside the root thread."
-                : "Started, but no worker is on it right now."}
+              {row.kind === "orchestrator"
+                ? "The orchestrator is working this slice in the root thread."
+                : row.kind === "task"
+                  ? "Native subagent running inside the root thread."
+                  : "Started, but nothing is on it right now."}
             </div>
           )}
         </div>

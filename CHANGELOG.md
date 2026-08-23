@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.7
+
+- Now rows are attributed to whoever is actually on the work. A started slice no live worker holds is the orchestrator's own work while the root turn is running — it renders live as "Orchestrator", not "idle". Only when the root is idle too does a slice show as unattended.
+
 ## 0.4.6
 
 - Up next is untouched work only. Started slices no live worker holds now render in Now as dimmed idle rows ("begun, then left unattended") instead of sitting under Up next, where they read as not started — or worse, as checked off. Idle rows link to their last worker's thread when one claimed the slice.

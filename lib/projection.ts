@@ -4,13 +4,14 @@ import { shortSliceTitle } from "./titles.js";
 // The pane model is computed here and nowhere else. One fold, one set of
 // rules, shipped to the UI inside the snapshot so server and pane can never
 // disagree:
-//   - Now is all in-progress work. A live row (live: true) exists iff a worker
-//     agent is genuinely live. Every started item no live worker holds also
-//     gets a row (live: false) — begun, then left unattended — so an
-//     in-progress slice can never sit under "Up next".
-//   - A live row's title is its claimed plan item's step (authoritative), else
-//     the worker thread's own title, else an honest "Subagent task". Titles
-//     are never guessed from prose here.
+//   - Now is all in-progress work, attributed to whoever is on it. Live worker
+//     agents get worker/task rows. A started item no live worker holds belongs
+//     to the orchestrator while the root turn is running (the model marked it
+//     active and is working it itself); only when the root is idle too is it
+//     honestly unattended. An in-progress slice never sits under "Up next".
+//   - A worker row's title is its claimed plan item's step (authoritative),
+//     else the worker thread's own title, else an honest "Subagent task".
+//     Titles are never guessed from prose here.
 //   - Next is untouched work only: pending items no live worker holds.
 
 function isLive(agent: GoalAgent): boolean {
@@ -26,6 +27,7 @@ export function projectPane(
   rootThreadId: string,
   items: GoalItem[],
   agents: GoalAgent[],
+  rootRunning: boolean,
 ): PaneModel {
   const open = new Map(
     items.filter((item) => item.status !== "completed").map((item) => [item.id, item]),
@@ -51,13 +53,26 @@ export function projectPane(
       nickname: agent.nickname,
       threadId: isChildThread ? agent.threadId : null,
       itemId: item?.id ?? null,
-      live: true,
+      kind: isChildThread ? "worker" : "task",
     });
   }
   for (const item of items) {
     if (item.status !== "in_progress" || heldByLive.has(item.id)) continue;
-    // The idle holder, if one claimed this slice, gives the row a name and a
-    // thread to open; the row still renders as idle, never as running.
+    if (rootRunning) {
+      // The model marked this slice active and no live worker holds it: the
+      // orchestrator itself is working it in the root thread.
+      now.push({
+        key: `item:${item.id}`,
+        title: shortSliceTitle(item.step) || item.step.trim(),
+        nickname: "Orchestrator",
+        threadId: null,
+        itemId: item.id,
+        kind: "orchestrator",
+      });
+      continue;
+    }
+    // Root idle and no live worker: genuinely unattended. The idle holder, if
+    // one claimed this slice, gives the row a name and a thread to open.
     const holder = agents.find(
       (agent) => agent.role !== "verifier" && agent.itemId === item.id,
     );
@@ -67,7 +82,7 @@ export function projectPane(
       nickname: holder?.nickname ?? "",
       threadId: holder && holder.threadId !== rootThreadId ? holder.threadId : null,
       itemId: item.id,
-      live: false,
+      kind: "unattended",
     });
   }
   const next = items.filter((item) => item.status === "pending" && !heldByLive.has(item.id));

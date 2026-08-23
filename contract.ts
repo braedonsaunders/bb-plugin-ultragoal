@@ -41,17 +41,20 @@ export const goalAgentSchema = z.object({
   summary: z.string().nullable(),
 });
 
-// One rendered row in Now: in-progress work. Either a genuinely live subagent
-// and its slice (live: true), or a started slice no live worker holds
-// (live: false — begun, then left unattended). Computed server-side in
-// lib/projection.ts; the UI renders it verbatim.
+// One rendered row in Now: in-progress work, attributed to whoever is on it.
+//   worker       — a live worker child thread.
+//   task         — a live native Task call inside the root thread.
+//   orchestrator — a started slice no live worker holds while the root turn is
+//                  running: the orchestrator itself is working it.
+//   unattended   — a started slice nobody is on (root idle, no live worker).
+// Computed server-side in lib/projection.ts; the UI renders it verbatim.
 export const nowRowSchema = z.object({
   key: z.string(),
   title: z.string(),
   nickname: z.string(),
   threadId: z.string().nullable(),
   itemId: z.string().nullable(),
-  live: z.boolean(),
+  kind: z.enum(["worker", "task", "orchestrator", "unattended"]),
 });
 
 export const goalSettingsSchema = z.object({

@@ -98,9 +98,10 @@ function snapshotOf(
   items: ItemStore,
   agentRunning: boolean,
   agents: GoalAgent[],
+  rootRunning: boolean,
 ): GoalSnapshot {
   const itemList = items.list(goal.threadId);
-  const pane = projectPane(goal.threadId, itemList, agents);
+  const pane = projectPane(goal.threadId, itemList, agents, rootRunning);
   return {
     threadId: goal.threadId,
     objective: goal.objective,
@@ -334,7 +335,13 @@ export default function plugin(bb: BbPluginApi) {
 
   function view(goal: StoredGoal): GoalSnapshot {
     const agents = withWorkTitles(goal.threadId, agentCache.get(goal.threadId) ?? []);
-    return snapshotOf(goal, items, goalIsBusy(goal.threadId, agents), agents);
+    return snapshotOf(
+      goal,
+      items,
+      goalIsBusy(goal.threadId, agents),
+      agents,
+      running.get(goal.threadId) === true,
+    );
   }
 
   function isRootNativeAgent(rootThreadId: string, agent: GoalAgent): boolean {
