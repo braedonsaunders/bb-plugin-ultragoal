@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.4.11
+## 0.5.0
+
+The model plans, deterministic code schedules. Research synthesis across Anthropic's multi-agent guidance, shipped industry systems (Codex cloud, Gas Town/beads, MultiDevin), and the academic scheduling literature (LLMCompiler, ADaPT, MAST) is in docs/architecture-research.md; this release implements it:
+
+- **Dependency-DAG plan.** update_plan items now carry `deps` (item_ids or `"#N"` list positions; `[]` = ready now), `files` (the disjoint file scope the slice owns), and `check` (a runnable done-gate). Omitted fields keep the item's existing metadata; deps pointing outside the plan are dropped so a typo cannot deadlock a slice. Items with no metadata stay on the legacy nudge-staffing path, so live pre-0.5 goals migrate on their next full plan update.
+- **Ready-queue scheduler.** The plugin staffs one fresh worker per ready slice — deps complete, file scopes disjoint from in-flight work — up to the goal's worker slots (setting + per-goal override, default 5), and re-staffs managed slices whose workers died (husk detection distinguishes dead workers from idle ones awaiting close). Dispatch is event-driven: a finishing worker immediately unblocks and staffs its dependents. Under-parallelization stops being a model-memory problem: the orchestrator's job is to plan wide (the WIDTH nudge demands further decomposition while slots sit idle, and never padding fake parallelism onto sequential work); staffing is no longer its job at all.
+- **Streaming findings queue.** Hunt/audit workers call the new report_finding tool per confirmed defect — fingerprint-deduplicated across sweeps (same file + same defect = same finding) — and each fresh finding auto-creates a ready, file-scoped fix slice that the scheduler staffs while the hunt continues. This kills the serial "fix whatever the hunt proves" tail. Open findings hard-block update_goal complete; resolve_finding (with evidence) handles non-defects, and a completed fix slice closes its findings automatically.
+- **Attestation-grade reports.** Worker briefs demand evidence — commit SHAs and the slice's check output — and inject the slice's scope and done-check into the spawn prompt. ULTRAGOAL_DONE without evidence is a claim, not a completion.
+- **Work-related humorous names.** Plugin-spawned workers derive their display names from the slice's own text ("Captain Suites", "The Idempotency Reckoning") instead of a generic pool, and the orchestrator guidance asks for the same.
+- Pane: Up next shows a "blocked" chip for slices with unmet deps; Settings gains a Worker slots input; the header shows the slot count; `bb ultragoal pane` includes findings counts.
 
 Now is verified against the provider's own subagent lifecycle, and stalls get healed instead of displayed:
 

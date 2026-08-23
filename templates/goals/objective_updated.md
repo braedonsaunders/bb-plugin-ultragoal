@@ -11,6 +11,6 @@ Budget:
 - Token budget: {{ token_budget }}
 - Tokens remaining: {{ remaining_tokens }}
 
-Adjust the current turn to pursue the updated objective. You are the root orchestrator: update the plan, interrupt or reassign workers that served only the previous objective, and spawn_agent for the new remaining slices. Avoid continuing work that only served the previous objective unless it also helps the updated objective.
+Adjust the current turn to pursue the updated objective. You are the root orchestrator: rewrite the plan via update_plan (independent, file-disjoint slices with deps/files/check — the scheduler staffs the ready ones) and interrupt workers that served only the previous objective. Avoid continuing work that only served the previous objective unless it also helps the updated objective.
 
 Do not call update_goal unless the updated goal is actually complete.

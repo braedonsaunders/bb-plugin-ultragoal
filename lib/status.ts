@@ -1,4 +1,4 @@
-import type { GoalSnapshot, GoalStatus } from "../contract.js";
+import type { GoalFinding, GoalSnapshot, GoalStatus } from "../contract.js";
 import { remainingTokens } from "./prompts.js";
 
 export function formatGoalCard(goal: GoalSnapshot): string {
@@ -20,14 +20,31 @@ export function formatGoalCard(goal: GoalSnapshot): string {
   if (goal.reason) lines.push(`Reason: ${goal.reason}`);
   if (goal.items.length > 0) {
     const done = goal.items.filter((item) => item.status === "completed").length;
+    const completedIds = new Set(
+      goal.items.filter((item) => item.status === "completed").map((item) => item.id),
+    );
     lines.push(`Plan: ${done}/${goal.items.length}`);
     for (const item of goal.items) {
       const mark =
         item.status === "completed" ? "x" : item.status === "in_progress" ? ">" : " ";
       const crew = goal.agents.filter((agent) => agent.itemId === item.id);
       const names = crew.length > 0 ? ` — ${crew.map((agent) => agent.nickname).join(", ")}` : "";
-      lines.push(`- [${mark}] ${item.id} ${item.step}${names}`);
+      const blockers = item.deps.filter((dep) => !completedIds.has(dep));
+      const gate =
+        item.status === "completed"
+          ? ""
+          : blockers.length > 0
+            ? ` (blocked by ${blockers.join(", ")})`
+            : item.managed && item.status === "pending"
+              ? " (ready)"
+              : "";
+      lines.push(`- [${mark}] ${item.id} ${item.step}${gate}${names}`);
     }
+  }
+  if (goal.findings.open + goal.findings.fixed + goal.findings.dismissed > 0) {
+    lines.push(
+      `Findings: ${goal.findings.open} open, ${goal.findings.fixed} fixed, ${goal.findings.dismissed} dismissed`,
+    );
   }
   if (goal.agents.length > 0) {
     const live = goal.agents.filter(
@@ -54,6 +71,7 @@ export function formatGoalCard(goal: GoalSnapshot): string {
 export function goalToolResponse(
   goal: GoalSnapshot | null,
   reportCompletionBudget = false,
+  openFindings: GoalFinding[] = [],
 ): string {
   const remaining = goal ? remainingTokens(goal) : null;
   const completionBudgetReport =
@@ -75,9 +93,20 @@ export function goalToolResponse(
               item_id: item.id,
               step: item.step,
               status: item.status,
+              deps: item.deps,
+              files: item.files,
+              check: item.check,
+              scheduler_managed: item.managed,
             })),
             agents: goal.agents,
             settings: goal.settings,
+            findings: goal.findings,
+            openFindings: openFindings.slice(0, 20).map((finding) => ({
+              finding_id: finding.id,
+              title: finding.title,
+              file: finding.file,
+              fix_item_id: finding.itemId,
+            })),
           }
         : null,
       remainingTokens: remaining,

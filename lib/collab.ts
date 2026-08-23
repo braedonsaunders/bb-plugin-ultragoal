@@ -2,7 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { isPromptLikeTitle, shortSliceTitle } from "./titles.js";
 import { z } from "zod";
 import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
-import { nextAuditorName, nextHumorousName, slugFromName } from "./names.js";
+import { nextAuditorName, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
 
 const MIN_WAIT_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -14,7 +14,7 @@ You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\`
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 This is the default way UltraGoal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
 ONE AGENT = ONE SLICE, ALWAYS. Spawn a fresh agent for every slice and let it die when the slice is done. Never send a finished worker a new slice — retired workers refuse follow-ups, and thread reuse is what breaks the live Now view.
-Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal when that slice is still open and unassigned. If the slice is taken or finished, UltraGoal opens a new Now row from your message. Prefer this over the native Task tool — native Task subagents are tracked in Now automatically but cannot be messaged or verified.
+Give every worker a short humorous display_name RELATED TO ITS SLICE'S WORK (a typecheck fixer might be "Captain Typecheck"; a date-bug hunter "The Timezone Reckoning") and pass item_id from get_goal when that slice is still open and unassigned. If the slice is taken or finished, UltraGoal opens a new Now row from your message. Prefer this over the native Task tool — native Task subagents are tracked in Now automatically but cannot be messaged or verified.
 When verification is on, a separate verifier is launched after each worker returns. Do not mark that slice complete until the verifier reports VERIFY_PASS.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
@@ -91,6 +91,11 @@ export function createCollabStore(
     ) => string | null;
     /** Status of a plan item, so retired workers can refuse new slices. */
     itemStatus?: (rootThreadId: string, itemId: string) => string | null;
+    /** DAG metadata of a plan item, injected into worker briefs. */
+    itemBrief?: (
+      rootThreadId: string,
+      itemId: string,
+    ) => { files: string[]; check: string | null } | null;
   },
 ) {
   const db = bb.storage.database();
@@ -475,7 +480,7 @@ export function createCollabStore(
     const usedNames = (byRoot.all(rootId(threadId)) as CollabRow[])
       .map((row) => row.display_name)
       .filter((name): name is string => Boolean(name));
-    const displayName = (display_name?.trim() || nextHumorousName(usedNames)).slice(0, 64);
+    const displayName = (display_name?.trim() || workRelatedName(trimmed, usedNames)).slice(0, 64);
     const slug = /^[a-z0-9_]+$/.test(task_name) ? task_name : slugFromName(displayName);
     const taskName = `${parentPath === "/root" ? "/root" : parentPath}/${slug}`;
     const rootThreadId = rootId(threadId);
@@ -498,8 +503,22 @@ export function createCollabStore(
     if (byName.get(rootId(threadId), taskName)) {
       return { error: `An agent named ${taskName} already exists.` };
     }
+    const brief =
+      role !== "verifier" && itemId ? hooks?.itemBrief?.(rootThreadId, itemId) ?? null : null;
+    const briefLines: string[] = [];
+    if (brief?.files?.length) {
+      briefLines.push(
+        `Scope: touch only files within: ${brief.files.join(", ")}. If the slice requires edits outside this scope, stop and report ULTRAGOAL_BLOCKED with the reason instead of expanding scope.`,
+      );
+    }
+    if (brief?.check) {
+      briefLines.push(
+        `Done-check: \`${brief.check}\` must pass. Run it yourself and include its result in your final report.`,
+      );
+    }
     const prompt = [
       trimmed,
+      ...briefLines,
       `The new agent's canonical task name is ${taskName}.`,
       `Your call sign is ${displayName}.`,
       role === "verifier"
@@ -508,7 +527,10 @@ export function createCollabStore(
       "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
       role === "verifier"
         ? ""
-        : "When the slice is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <one-sentence evidence>. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
+        : "If your slice is a hunt/audit/review that uncovers discrete defects, call report_finding the moment you confirm each one (one call per defect; do not batch them into your final report) — a fix slice is staffed automatically per finding.",
+      role === "verifier"
+        ? ""
+        : "When the slice is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <evidence — commit SHA(s) and your check's passing output/summary>. A bare claim without evidence does not close the slice. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -708,7 +730,7 @@ export function createCollabStore(
             .string()
             .optional()
             .describe(
-              "Short humorous name shown in the UltraGoal pane and sidebar, such as 'Sir Syncs-a-Lot'. The orchestrator should always set this.",
+              "Short humorous name shown in the UltraGoal pane and sidebar, punning on the slice's actual work (e.g. 'Captain Typecheck' for a typecheck fix). The orchestrator should always set this.",
             ),
           item_id: z
             .string()

@@ -37,13 +37,14 @@ interface GoalRow {
   auto_continue: number | null;
   last_progress_at: number | null;
   progress_update_minutes: number | null;
+  max_workers: number | null;
   last_plan_seq?: number | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
 // are computed per snapshot in server.ts, never stored.
 export interface StoredGoal
-  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next"> {
+  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings"> {
   lastSeenTokens: number | null;
   lastAccountedAt: number | null;
   lastContinueWasAutomatic: boolean;
@@ -55,6 +56,7 @@ export interface StoredGoal
   autoContinueOverride: boolean | null;
   lastProgressAt: number | null;
   progressUpdateMinutesOverride: number | null;
+  maxWorkersOverride: number | null;
   lastPlanSeq: number | null;
 }
 
@@ -97,6 +99,7 @@ function rowToGoal(row: GoalRow): StoredGoal {
       verifyModel: "",
       autoContinue: true,
       progressUpdateMinutes: 5,
+      maxWorkers: 5,
     },
     lastProgressAt: row.last_progress_at,
     verifyEnabledOverride: row.verify_enabled == null ? null : row.verify_enabled === 1,
@@ -104,6 +107,7 @@ function rowToGoal(row: GoalRow): StoredGoal {
     verifyModelOverride: row.verify_model,
     autoContinueOverride: row.auto_continue == null ? null : row.auto_continue === 1,
     progressUpdateMinutesOverride: row.progress_update_minutes,
+    maxWorkersOverride: row.max_workers,
     lastPlanSeq: row.last_plan_seq ?? null,
   };
 }
@@ -193,6 +197,28 @@ export function createGoalStore(bb: BbPluginApi) {
     `ALTER TABLE goals ADD COLUMN progress_update_minutes INTEGER`,
     `ALTER TABLE goals ADD COLUMN last_plan_seq INTEGER`,
     `ALTER TABLE goal_items ADD COLUMN origin TEXT`,
+    // DAG metadata: NULL on all three marks a legacy (pre-scheduler) item that
+    // keeps nudge-based staffing; any non-NULL value opts the item into the
+    // plugin's ready-queue scheduler.
+    `ALTER TABLE goal_items ADD COLUMN deps TEXT`,
+    `ALTER TABLE goal_items ADD COLUMN files TEXT`,
+    `ALTER TABLE goal_items ADD COLUMN check_cmd TEXT`,
+    `ALTER TABLE goals ADD COLUMN max_workers INTEGER`,
+    `CREATE TABLE IF NOT EXISTS goal_findings (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      title TEXT NOT NULL,
+      file TEXT NOT NULL,
+      evidence TEXT NOT NULL,
+      status TEXT NOT NULL,
+      item_id TEXT,
+      resolution_note TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(thread_id, fingerprint)
+    )`,
+    `CREATE INDEX IF NOT EXISTS goal_findings_thread ON goal_findings(thread_id, status)`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -207,14 +233,14 @@ export function createGoalStore(bb: BbPluginApi) {
       last_seen_tokens, last_accounted_at, last_continue_was_automatic,
       blocked_streak, last_block_key, turn_count, max_turns, max_minutes,
       verify_enabled, verify_provider, verify_model, auto_continue,
-      last_progress_at, progress_update_minutes
+      last_progress_at, progress_update_minutes, max_workers
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
       @last_seen_tokens, @last_accounted_at, @last_continue_was_automatic,
       @blocked_streak, @last_block_key, 0, 40, 180,
       @verify_enabled, @verify_provider, @verify_model, @auto_continue,
-      @last_progress_at, @progress_update_minutes
+      @last_progress_at, @progress_update_minutes, @max_workers
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -236,7 +262,8 @@ export function createGoalStore(bb: BbPluginApi) {
       verify_model = excluded.verify_model,
       auto_continue = excluded.auto_continue,
       last_progress_at = excluded.last_progress_at,
-      progress_update_minutes = excluded.progress_update_minutes
+      progress_update_minutes = excluded.progress_update_minutes,
+      max_workers = excluded.max_workers
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
   const writePlanSeq = db.prepare(
@@ -279,6 +306,7 @@ export function createGoalStore(bb: BbPluginApi) {
         auto_continue: existing ? flag(existing.autoContinueOverride) : null,
         last_progress_at: existing?.lastProgressAt ?? null,
         progress_update_minutes: existing?.progressUpdateMinutesOverride ?? null,
+        max_workers: existing?.maxWorkersOverride ?? null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -309,6 +337,7 @@ export function createGoalStore(bb: BbPluginApi) {
         auto_continue: null,
         last_progress_at: now,
         progress_update_minutes: null,
+        max_workers: null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -336,6 +365,7 @@ export function createGoalStore(bb: BbPluginApi) {
         autoContinueOverride: boolean | null;
         lastProgressAt: number | null;
         progressUpdateMinutesOverride: number | null;
+        maxWorkersOverride: number | null;
       }>,
     ): StoredGoal | null {
       const existing = this.get(threadId);
@@ -397,6 +427,10 @@ export function createGoalStore(bb: BbPluginApi) {
           patch.progressUpdateMinutesOverride === undefined
             ? existing.progressUpdateMinutesOverride
             : patch.progressUpdateMinutesOverride,
+        max_workers:
+          patch.maxWorkersOverride === undefined
+            ? existing.maxWorkersOverride
+            : patch.maxWorkersOverride,
       };
       upsert.run(next);
       return rowToGoal(next);

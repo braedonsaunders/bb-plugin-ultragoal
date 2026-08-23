@@ -41,13 +41,25 @@ function budgetFields(goal: GoalSnapshot): {
 
 function planInstruction(goal: GoalSnapshot): string {
   if (goal.items.length === 0) {
-    return "The UltraGoal pane has no requirements yet. Call update_plan at the start of this turn with concrete remaining work derived from current evidence. Keep that plan current as you discover or finish work. Do not treat a plan update as a substitute for doing the work.";
+    return "The UltraGoal pane has no requirements yet. Call update_plan at the start of this turn with concrete remaining work derived from current evidence: independent, file-disjoint slices with deps/files/check so the scheduler can staff them in parallel. Keep that plan current as you discover or finish work. Do not treat a plan update as a substitute for doing the work.";
   }
+  const completedIds = new Set(
+    goal.items.filter((item) => item.status === "completed").map((item) => item.id),
+  );
   const lines = goal.items.map((item) => {
     const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? ">" : " ";
     const crew = (goal.agents ?? []).filter((agent) => agent.itemId === item.id);
     const names = crew.length > 0 ? ` — ${crew.map((agent) => agent.nickname).join(", ")}` : "";
-    return `- [${mark}] item_id=${item.id} ${item.step}${names}`;
+    const blockers = item.deps.filter((dep) => !completedIds.has(dep));
+    const gate =
+      item.status === "completed"
+        ? ""
+        : blockers.length > 0
+          ? ` (blocked by ${blockers.join(", ")})`
+          : item.managed && item.status === "pending"
+            ? " (ready)"
+            : "";
+    return `- [${mark}] item_id=${item.id} ${item.step}${gate}${names}`;
   });
   const agents = goal.agents ?? [];
   const agentLines =
@@ -60,31 +72,69 @@ function planInstruction(goal: GoalSnapshot): string {
           ),
         ]
       : [];
-  const heldByLive = new Set(
-    agents
-      .filter(
-        (agent) =>
-          agent.role !== "verifier" &&
-          (agent.status === "running" || agent.status === "starting") &&
-          agent.itemId,
-      )
-      .map((agent) => agent.itemId as string),
+  const liveWorkers = agents.filter(
+    (agent) =>
+      agent.role !== "verifier" && (agent.status === "running" || agent.status === "starting"),
   );
-  const unstaffed = goal.items.filter(
-    (item) => item.status !== "completed" && !heldByLive.has(item.id),
+  const heldByLive = new Set(
+    liveWorkers.filter((agent) => agent.itemId).map((agent) => agent.itemId as string),
+  );
+  const open = goal.items.filter((item) => item.status !== "completed");
+  const managedOpen = open.filter((item) => item.managed);
+  const ready = managedOpen.filter(
+    (item) =>
+      item.status === "pending" &&
+      !heldByLive.has(item.id) &&
+      item.deps.every((dep) => completedIds.has(dep)),
+  );
+  const blocked = managedOpen.filter(
+    (item) => item.status === "pending" && item.deps.some((dep) => !completedIds.has(dep)),
+  );
+  const maxWorkers = goal.settings.maxWorkers;
+
+  const schedulerLines: string[] = [];
+  if (managedOpen.length > 0 && maxWorkers > 0) {
+    schedulerLines.push(
+      `SCHEDULER: the UltraGoal scheduler staffs ready slices automatically (deps complete, file scopes disjoint) — one fresh worker per slice, up to ${maxWorkers} concurrent (${liveWorkers.length} live now). Do not spawn workers for plan items yourself; write the plan and the scheduler dispatches. Do not implement slices on the root thread.`,
+    );
+    const idleSlots = maxWorkers - liveWorkers.length - ready.length;
+    if (idleSlots > 0 && open.length > ready.length + heldByLive.size) {
+      schedulerLines.push(
+        `WIDTH: ${ready.length} ready slice(s) for ${maxWorkers} worker slots. If remaining work can split into independent, file-disjoint slices, split it NOW via update_plan (self-contained step + files + check, deps only where genuinely sequential). Do not pad with fake parallelism if the remaining work is truly sequential.`,
+      );
+    }
+    if (ready.length === 0 && liveWorkers.length === 0 && blocked.length > 0) {
+      schedulerLines.push(
+        "DEADLOCK: pending slices exist but none is ready and no worker is live — their deps are unsatisfiable or circular. Restructure the plan with update_plan.",
+      );
+    }
+  }
+
+  // Legacy plans (written before the DAG contract) still rely on the model to
+  // staff; the durable fix is re-emitting the plan with DAG metadata.
+  const unstaffedLegacy = open.filter(
+    (item) => !item.managed && !heldByLive.has(item.id),
   );
   const staffingLines =
-    unstaffed.length > 0
+    unstaffedLegacy.length > 0
       ? [
-          `STAFFING: ${unstaffed.length} open slice${unstaffed.length === 1 ? " has" : "s have"} no live worker. Parallelize: spawn_agent one fresh worker per slice NOW, all in this turn, before anything else. Do not implement any of these on the root thread — serial root work is the slowest possible path.`,
-          ...unstaffed.map((item) => `- spawn_agent for item_id=${item.id}: ${item.step}`),
+          `STAFFING: ${unstaffedLegacy.length} open slice${unstaffedLegacy.length === 1 ? " has" : "s have"} no DAG metadata and no live worker. Re-emit the full plan via update_plan with deps/files/check on every item so the scheduler can staff them; until then spawn_agent one fresh worker per slice NOW, all in this turn. Do not implement any of these on the root thread.`,
+          ...unstaffedLegacy.map((item) => `- item_id=${item.id}: ${item.step}`),
+        ]
+      : [];
+  const findingsLine =
+    goal.findings.open > 0
+      ? [
+          `FINDINGS: ${goal.findings.open} open finding(s) block completion. Their fix slices are staffed automatically; resolve_finding (with evidence) anything that is not a real defect.`,
         ]
       : [];
   return [
     "Current requirement plan (keep update_plan current as steps complete or the next best action changes):",
     ...lines,
     ...agentLines,
+    ...schedulerLines,
     ...staffingLines,
+    ...findingsLine,
   ].join("\n");
 }
 
@@ -92,6 +142,7 @@ export function progressPrompt(goal: GoalSnapshot): string {
   return render(PROGRESS, {
     objective: escapeXml(goal.objective),
     plan_instruction: planInstruction(goal),
+    max_workers: String(goal.settings.maxWorkers),
     ...budgetFields(goal),
   });
 }
@@ -100,6 +151,7 @@ export function continuationPrompt(goal: GoalSnapshot): string {
   return render(CONTINUATION, {
     objective: escapeXml(goal.objective),
     plan_instruction: planInstruction(goal),
+    max_workers: String(goal.settings.maxWorkers),
     ...budgetFields(goal),
   });
 }

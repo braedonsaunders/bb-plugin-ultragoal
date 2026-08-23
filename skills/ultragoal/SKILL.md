@@ -9,20 +9,19 @@ The user wants a durable completion contract, not a one-off turn. The text after
 
 This skill is for Cursor, OpenCode, Claude Code, and Pi. Codex already has native Goal — do not duplicate it there.
 
-## Default: orchestrator + subagents
+## Default: you plan, the scheduler staffs
 
-The root thread is the orchestrator. It does not implement the UltraGoal itself.
+The root thread is the orchestrator and PLANNER. It does not implement the UltraGoal itself, and it does not staff plan slices — the UltraGoal scheduler does.
 
-1. Call `update_plan` with concrete remaining work.
-2. Mark independent slices `in_progress`.
-3. `spawn_agent` one FRESH worker per in-progress slice (several in the same turn). One agent = one slice, always: never send a finished worker a new slice — retired workers refuse follow-ups. `followup_task` is only for steering a worker about the slice it already owns. Give each worker a humorous `display_name` (e.g. "Sir Syncs-a-Lot") and pass `item_id` from get_goal. Prefer these over the native Task tool — native Task subagents appear in Now automatically but cannot be messaged or verified. If you ever spawn a worker thread outside spawn_agent, begin its prompt with one line `SLICE (item_id=<id>): <one-line task>` so UltraGoal can track it; otherwise it shows as a generic subagent.
-4. Stay on the root: `list_agents` / `wait_agent`, merge results, `update_plan` as steps complete or the next best action changes, spawn the next slices.
-5. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, spawn a fix worker.
-6. Do implementation, edits, and deep investigation on workers. On the root, only plan, spawn, wait, verify, and unblock.
+1. Call `update_plan` with the remaining work as a dependency DAG. Every item is a self-contained slice brief: `step` (objective + boundaries), `files` (the disjoint file scope it owns), `check` (a runnable command that proves it done), `deps` (item_ids or `"#N"` list positions it must wait for; `[]` = ready now).
+2. The scheduler spawns one FRESH worker per READY slice automatically — deps complete, file scopes disjoint — up to the goal's worker slots (default 5), and re-staffs slices whose workers die. Do not spawn workers for plan items yourself.
+3. Plan WIDE: many independent, file-disjoint slices beat few coarse ones. Declare `deps` only for genuinely sequential work; never pad fake parallelism onto truly sequential work. When worker slots sit idle, the highest-value move is splitting remaining work into more independent slices via `update_plan`.
+4. Hunts stream. Never write catch-all tail items like "fix whatever the hunt proves": hunt/audit workers call `report_finding` per confirmed defect, each finding auto-creates a ready fix slice, and fixes are staffed while the hunt continues. Open findings block completion; `resolve_finding` (with evidence) anything that is not a real defect.
+5. Stay on the root: `list_agents` / `wait_agent`, merge results, `update_plan` as steps complete or the next best action changes. Never use the native Task tool for slice work — it blocks the root thread, and a blocked orchestrator is the slowest possible path.
+6. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, add a fix slice.
+7. One agent = one slice, always: retired workers refuse follow-ups; `followup_task` only steers a worker about the slice it already owns. `spawn_agent` remains for ad-hoc helpers outside the plan — give each a humorous `display_name` related to its work (e.g. "Captain Typecheck"), and begin any worker prompt spawned another way with one line `SLICE (item_id=<id>): <one-line task>` so UltraGoal can track it.
 
-Always parallelize. Every open slice gets its own worker, spawned in the same turn — spawning is the default for all work, including small fixes, follow-ups, and re-checks. Never work a slice inline on the root while other slices wait; that serializes the whole goal. Spawn even for a single remaining slice. Work locally on the root only when a slice is genuinely one obvious edit or a spawn failed.
-
-Workers complete their assigned slice and report evidence. They do not call `update_goal`, take over the parent plan, or re-orchestrate the whole UltraGoal.
+Workers complete their assigned slice and report evidence — commit SHA(s) and their check's passing output, not bare claims. They do not call `update_goal`, take over the parent plan, or re-orchestrate the whole UltraGoal.
 
 ## Commands
 
@@ -36,8 +35,9 @@ Workers complete their assigned slice and report evidence. They do not call `upd
 - `get_goal` — read status, token budget, tokens used, elapsed time, the requirement plan, and live subagents.
 - `create_goal` — only when the user or system explicitly asked to start an UltraGoal, and only when no unfinished UltraGoal exists. Do not infer an UltraGoal from an ordinary task. Set `token_budget` only when the user asked for one.
 - `update_goal` — `complete` or `blocked` only. You cannot pause, resume, clear, or budget-limit an UltraGoal.
-- `update_plan` — same contract as Codex. Provide `plan` (and optional `explanation`). Each item is `{ id?, step, status }`. Pass `id` from `get_goal` when updating an existing slice so its Now title changes in place. Keep status `in_progress` for live workers. Next is only work that has not started — do not park a worker's current slice there.
-- `spawn_agent`, `send_message`, `followup_task`, `list_agents`, `wait_agent`, `interrupt_agent` — Codex MultiAgentV2. This is the default execution path. `send_message` queues without starting a turn; `followup_task` steers a non-root agent about its own slice only (retired workers refuse it — spawn fresh instead).
+- `update_plan` — the dependency DAG the scheduler executes. Provide `plan` (and optional `explanation`). Each item is `{ id?, step, status, deps?, files?, check? }`. Pass `id` from `get_goal` when updating an existing slice so its Now title changes in place. Keep status `in_progress` for live workers. Next is only work that has not started — do not park a worker's current slice there.
+- `report_finding` / `resolve_finding` — the streaming defect queue. One `report_finding` per confirmed defect, at the moment of confirmation; duplicates are fingerprint-deduped across sweeps; each fresh finding auto-creates a staffed fix slice. Open findings block `update_goal complete`.
+- `spawn_agent`, `send_message`, `followup_task`, `list_agents`, `wait_agent`, `interrupt_agent` — Codex MultiAgentV2, for ad-hoc helpers and steering. Plan slices are staffed by the scheduler, not by you. `send_message` queues without starting a turn; `followup_task` steers a non-root agent about its own slice only (retired workers refuse it).
 
 ## How to run
 

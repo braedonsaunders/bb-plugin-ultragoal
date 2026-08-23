@@ -16,6 +16,14 @@ export const goalItemSchema = z.object({
   id: z.string(),
   step: z.string(),
   status: goalItemStatusSchema,
+  /** Item ids this slice waits on. Empty = ready as soon as it is pending. */
+  deps: z.array(z.string()).default([]),
+  /** File paths/globs this slice owns. Disjoint scopes let slices run in parallel. */
+  files: z.array(z.string()).default([]),
+  /** Runnable command that proves the slice done (its machine-checkable gate). */
+  check: z.string().nullable().default(null),
+  /** True when the planner declared DAG metadata: the scheduler staffs it. */
+  managed: z.boolean().default(false),
 });
 
 export const goalAgentStatusSchema = z.enum([
@@ -63,6 +71,21 @@ export const goalSettingsSchema = z.object({
   verifyModel: z.string(),
   autoContinue: z.boolean(),
   progressUpdateMinutes: z.number().int(),
+  /** Ready-queue scheduler slot count. 0 disables plugin-side staffing. */
+  maxWorkers: z.number().int(),
+});
+
+export const goalFindingStatusSchema = z.enum(["open", "fixed", "dismissed"]);
+
+export const goalFindingSchema = z.object({
+  id: z.string(),
+  fingerprint: z.string(),
+  title: z.string(),
+  file: z.string(),
+  evidence: z.string(),
+  status: goalFindingStatusSchema,
+  itemId: z.string().nullable(),
+  createdAt: z.number().int(),
 });
 
 export const goalSnapshotSchema = z.object({
@@ -85,9 +108,14 @@ export const goalSnapshotSchema = z.object({
   now: z.array(nowRowSchema),
   next: z.array(goalItemSchema),
   settings: goalSettingsSchema,
+  findings: z
+    .object({ open: z.number().int(), fixed: z.number().int(), dismissed: z.number().int() })
+    .default({ open: 0, fixed: 0, dismissed: 0 }),
 });
 
 export type GoalStatus = z.infer<typeof goalStatusSchema>;
+export type GoalFindingStatus = z.infer<typeof goalFindingStatusSchema>;
+export type GoalFinding = z.infer<typeof goalFindingSchema>;
 export type GoalItemStatus = z.infer<typeof goalItemStatusSchema>;
 export type GoalItem = z.infer<typeof goalItemSchema>;
 export type GoalAgentStatus = z.infer<typeof goalAgentStatusSchema>;
@@ -162,6 +190,7 @@ export const rpcContract = defineRpcContract({
         verifyModel: z.string().min(1).optional(),
         autoContinue: z.boolean().optional(),
         progressUpdateMinutes: z.number().int().min(0).max(240).optional(),
+        maxWorkers: z.number().int().min(0).max(16).optional(),
         tokenBudget: z.number().int().positive().nullable().optional(),
       })
       .strict(),

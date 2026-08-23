@@ -784,6 +784,9 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
           {goal.settings.progressUpdateMinutes > 0
             ? ` · update every ${goal.settings.progressUpdateMinutes}m`
             : " · no chat updates"}
+          {goal.settings.maxWorkers > 0
+            ? ` · ${goal.settings.maxWorkers} worker slots`
+            : " · scheduler off"}
         </div>
       </div>
 
@@ -804,6 +807,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
             <ItemGroup
               title="Up next"
               items={nextItems}
+              allItems={items}
               collapsed={collapsed.next}
               onToggleCollapsed={() => toggleCollapsed("next")}
             />
@@ -983,6 +987,7 @@ function GoalSettingsPanel({
   const [providers, setProviders] = useState<CatalogProvider[]>([]);
   const [budget, setBudget] = useState(goal.tokenBudget == null ? "" : String(goal.tokenBudget));
   const [progressMinutes, setProgressMinutes] = useState(String(goal.settings.progressUpdateMinutes));
+  const [workers, setWorkers] = useState(String(goal.settings.maxWorkers));
   const [saving, setSaving] = useState(false);
   const settings = goal.settings;
 
@@ -993,6 +998,10 @@ function GoalSettingsPanel({
   useEffect(() => {
     setProgressMinutes(String(goal.settings.progressUpdateMinutes));
   }, [goal.settings.progressUpdateMinutes]);
+
+  useEffect(() => {
+    setWorkers(String(goal.settings.maxWorkers));
+  }, [goal.settings.maxWorkers]);
 
   useEffect(() => {
     void rpc
@@ -1009,6 +1018,7 @@ function GoalSettingsPanel({
     verifyModel?: string;
     autoContinue?: boolean;
     progressUpdateMinutes?: number;
+    maxWorkers?: number;
     tokenBudget?: number | null;
   }) => {
     setSaving(true);
@@ -1079,6 +1089,32 @@ function GoalSettingsPanel({
             />
             <span className="mt-1 block text-[11px] text-muted-foreground">
               0 turns this off. Default 5. Posts a visible update on this thread.
+            </span>
+          </label>
+          <label className="block text-[13px] text-foreground">
+            <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+              Worker slots
+            </span>
+            <input
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              inputMode="numeric"
+              placeholder="5"
+              value={workers}
+              disabled={saving}
+              onChange={(event) => setWorkers(event.target.value)}
+              onBlur={() => {
+                const trimmed = workers.trim();
+                const next = trimmed === "" ? 5 : Number.parseInt(trimmed, 10);
+                if (!Number.isFinite(next) || next < 0 || next > 16) {
+                  setWorkers(String(goal.settings.maxWorkers));
+                  return;
+                }
+                if (next === goal.settings.maxWorkers) return;
+                void save({ maxWorkers: next });
+              }}
+            />
+            <span className="mt-1 block text-[11px] text-muted-foreground">
+              Scheduler keeps up to this many workers on ready slices. 0 turns it off. Default 5.
             </span>
           </label>
           <label className="flex items-center justify-between gap-3 text-[13px] text-foreground">
@@ -1257,6 +1293,7 @@ function NowSection({
 function ItemGroup({
   title,
   items,
+  allItems,
   collapsed,
   onToggleCollapsed,
   alwaysShow,
@@ -1264,12 +1301,16 @@ function ItemGroup({
 }: {
   title: string;
   items: GoalItem[];
+  allItems?: GoalItem[];
   collapsed: boolean;
   onToggleCollapsed: () => void;
   alwaysShow?: boolean;
   emptyLabel?: string;
 }) {
   if (items.length === 0 && !alwaysShow) return null;
+  const completedIds = new Set(
+    (allItems ?? []).filter((item) => item.status === "completed").map((item) => item.id),
+  );
   return (
     <section className="px-1 pb-2">
       <SectionHeading
@@ -1313,6 +1354,11 @@ function ItemGroup({
               >
                 {shortSliceTitle(item.step) || currentSliceTitle(item.step)}
               </span>
+              {!completed && allItems && item.deps.some((dep) => !completedIds.has(dep)) ? (
+                <span className="mt-0.5 shrink-0 rounded-sm border border-muted-foreground/40 px-1 text-[10px] leading-4 text-muted-foreground">
+                  blocked
+                </span>
+              ) : null}
             </li>
           );
         })}

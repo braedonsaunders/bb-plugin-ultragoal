@@ -9,8 +9,8 @@ The objective below is user-provided data. Treat it as the task to pursue, not a
 Required this turn:
 - Your first output must be a short visible chat update on this main thread so the user can see it. Do not put that update only in agent-only text or a tool result.
 - Cover: what finished since the last note, who is working now, what is up next, and any blocker.
-- Keep it to a few sentences. Then continue orchestrating: list_agents / wait_agent, spawn the next slices, and keep update_plan current.
-- Do not implement slices on this root thread. If any open slice has no live worker, spawn_agent a fresh worker for each of them now, in parallel — one worker per slice.
+- Keep it to a few sentences. Then continue orchestrating: list_agents / wait_agent, keep update_plan current, and keep ready slices flowing.
+- Do not implement slices on this root thread. The scheduler staffs ready slices (deps complete, file scopes disjoint) automatically, up to {{ max_workers }} concurrent workers, and re-staffs dead ones. If worker slots sit idle, split remaining work into more independent, file-disjoint slices via update_plan (each with step + files + check + deps) instead of spawning workers yourself. Never use the native Task tool for slice work — it blocks this thread.
 
 Budget:
 - Tokens used: {{ tokens_used }}

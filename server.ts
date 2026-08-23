@@ -1,6 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { rpcContract, type GoalAgent, type GoalSnapshot, type GoalStatus } from "./contract.js";
+import { rpcContract, type GoalAgent, type GoalItem, type GoalSnapshot, type GoalStatus } from "./contract.js";
 import {
   accountGoalProgress,
   readThreadTokens,
@@ -26,6 +26,8 @@ import {
 import { lastUserText, parseSlashGoal } from "./lib/slash.js";
 import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
+import { createFindingStore } from "./lib/findings.js";
+import { workRelatedName } from "./lib/names.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
 import {
   forgetNativeScan,
@@ -83,6 +85,7 @@ import {
   type StoredGoal,
 } from "./lib/store.js";
 import {
+  DEFAULT_MAX_WORKERS,
   DEFAULT_PROGRESS_UPDATE_MINUTES,
   DEFAULT_VERIFY_MODEL,
   DEFAULT_VERIFY_PROVIDER,
@@ -112,6 +115,7 @@ function snapshotOf(
   agentRunning: boolean,
   agents: GoalAgent[],
   rootRunning: boolean,
+  findings: { open: number; fixed: number; dismissed: number },
 ): GoalSnapshot {
   const itemList = items.list(goal.threadId);
   const pane = projectPane(goal.threadId, itemList, agents, rootRunning);
@@ -141,9 +145,11 @@ function snapshotOf(
         verifyModel: goal.verifyModelOverride,
         autoContinue: goal.autoContinueOverride,
         progressUpdateMinutes: goal.progressUpdateMinutesOverride,
+        maxWorkers: goal.maxWorkersOverride,
       },
       snapshotDefaults,
     ),
+    findings,
   };
 }
 
@@ -157,6 +163,7 @@ let snapshotDefaults: GoalSettingDefaults = {
   verifyModel: DEFAULT_VERIFY_MODEL,
   autoContinue: true,
   progressUpdateMinutes: DEFAULT_PROGRESS_UPDATE_MINUTES,
+  maxWorkers: DEFAULT_MAX_WORKERS,
 };
 
 export default function plugin(bb: BbPluginApi) {
@@ -194,6 +201,12 @@ export default function plugin(bb: BbPluginApi) {
       description: "Ask the orchestrator to post a visible main-thread update if none landed in this window. Default 5.",
       default: String(DEFAULT_PROGRESS_UPDATE_MINUTES),
     },
+    maxWorkers: {
+      type: "string",
+      label: "Max concurrent workers per goal (0 = scheduler off)",
+      description: "Ready-queue slot count: the scheduler keeps up to this many workers staffed on ready slices. Default 5.",
+      default: String(DEFAULT_MAX_WORKERS),
+    },
   });
 
   async function refreshDefaults() {
@@ -205,6 +218,7 @@ export default function plugin(bb: BbPluginApi) {
       autoContinue: value.autoContinue,
       progressUpdateMinutes:
         parseNonNegativeInt(value.progressUpdateMinutes) ?? DEFAULT_PROGRESS_UPDATE_MINUTES,
+      maxWorkers: parseNonNegativeInt(value.maxWorkers) ?? DEFAULT_MAX_WORKERS,
     };
   }
   void refreshDefaults();
@@ -214,6 +228,7 @@ export default function plugin(bb: BbPluginApi) {
 
   const store = createGoalStore(bb);
   const items = createItemStore(bb);
+  const findings = createFindingStore(bb);
   const agentCache = new Map<string, GoalAgent[]>();
   /** Open native task calls per root, from the last fresh scan. */
   const liveTaskCounts = new Map<string, number>();
@@ -276,6 +291,11 @@ export default function plugin(bb: BbPluginApi) {
     },
     itemStatus(rootThreadId, itemId) {
       return items.list(rootThreadId).find((item) => item.id === itemId)?.status ?? null;
+    },
+    itemBrief(rootThreadId, itemId) {
+      const item = items.list(rootThreadId).find((entry) => entry.id === itemId);
+      if (!item || !item.managed) return null;
+      return { files: item.files, check: item.check };
     },
   });
   workersOnItem = (rootThreadId, itemId) => collab.workersOnItem(rootThreadId, itemId);
@@ -361,6 +381,7 @@ export default function plugin(bb: BbPluginApi) {
       goalIsBusy(goal.threadId, agents),
       agents,
       rootWorkingInline,
+      findings.counts(goal.threadId),
     );
   }
 
@@ -581,6 +602,150 @@ export default function plugin(bb: BbPluginApi) {
   //     worker — but only while the root turn is blocked on open native task
   //     calls and cannot re-staff it itself. When the root is free, staffing
   //     stays with the orchestrator (the continuation prompt demands it).
+  // ---------------------------------------------------------------------------
+  // Ready-queue scheduler (LLMCompiler-style split, docs/architecture-research.md):
+  // the model PLANS — update_plan emits slices with deps/files/check — and this
+  // deterministic code SCHEDULES: every pending slice whose deps are complete
+  // and whose file scope is disjoint from in-flight work gets a fresh worker,
+  // up to maxWorkers, the moment a slot frees. Items without DAG metadata
+  // (legacy plans, native mirrors) keep the old nudge-based staffing.
+  const STAFF_RETRY_MS = 5 * 60_000;
+  const lastStaffTry = new Map<string, number>();
+  const scheduling = new Set<string>();
+
+  function globPrefix(path: string): string {
+    return path.trim().replace(/\*+.*$/, "").replace(/\/+$/, "");
+  }
+
+  function filesOverlap(a: readonly string[], b: readonly string[]): boolean {
+    for (const rawA of a) {
+      const na = globPrefix(rawA);
+      for (const rawB of b) {
+        const nb = globPrefix(rawB);
+        if (!na || !nb) return true;
+        if (na === nb || na.startsWith(`${nb}/`) || nb.startsWith(`${na}/`)) return true;
+      }
+    }
+    return false;
+  }
+
+  function itemBriefMessage(item: GoalItem, restaffed: boolean): string {
+    const lines = [`SLICE (item_id=${item.id}): ${item.step}`];
+    if (restaffed) {
+      lines.push(
+        "The previous worker on this slice died mid-work. Pick the slice up from the current worktree state and finish it.",
+      );
+    }
+    if (item.files.length > 0) {
+      lines.push(
+        `Scope: touch only files within: ${item.files.join(", ")}. If the slice requires edits outside this scope, stop and report ULTRAGOAL_BLOCKED with the reason instead of expanding scope.`,
+      );
+    }
+    lines.push(
+      item.check
+        ? `Done-check: \`${item.check}\` must pass. Run it yourself and include its result in your final report.`
+        : "Define a machine-checkable done criterion first (a failing test where applicable), make it pass, and include the command and its output in your final report.",
+    );
+    lines.push(
+      "Dispatched by the UltraGoal scheduler: this slice's dependencies are complete. Work only this slice.",
+    );
+    return lines.join("\n\n");
+  }
+
+  async function scheduleReady(rootThreadId: string): Promise<void> {
+    const goal = store.get(rootThreadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    if (scheduling.has(rootThreadId)) return;
+    scheduling.add(rootThreadId);
+    try {
+      const maxWorkers = view(goal).settings.maxWorkers;
+      if (maxWorkers <= 0) return;
+      const agents = agentCache.get(rootThreadId) ?? [];
+      const liveWorkers = agents.filter(
+        (agent) =>
+          agent.role !== "verifier" &&
+          (agent.status === "running" || agent.status === "starting"),
+      );
+      let slots = maxWorkers - liveWorkers.length;
+      if (slots <= 0) return;
+      const list = items.list(rootThreadId);
+      const completedIds = new Set(
+        list.filter((item) => item.status === "completed").map((item) => item.id),
+      );
+      const heldLive = new Set(
+        liveWorkers.filter((agent) => agent.itemId).map((agent) => agent.itemId as string),
+      );
+      const inFlightFiles = list
+        .filter((item) => item.status !== "completed" && heldLive.has(item.id))
+        .flatMap((item) => item.files);
+      const now = Date.now();
+      let staffed = false;
+      for (const item of list) {
+        if (slots <= 0) break;
+        if (!item.managed || item.status === "completed" || heldLive.has(item.id)) continue;
+        const lastTry = lastStaffTry.get(item.id);
+        if (lastTry != null && now - lastTry < STAFF_RETRY_MS) continue;
+        if (item.deps.some((dep) => !completedIds.has(dep))) continue;
+        if (
+          item.files.length > 0 &&
+          inFlightFiles.length > 0 &&
+          filesOverlap(item.files, inFlightFiles)
+        ) {
+          continue;
+        }
+        const holders = agents.filter(
+          (agent) => agent.role !== "verifier" && agent.itemId === item.id,
+        );
+        let restaffed = false;
+        if (item.status === "pending") {
+          // Any prior worker row means this slice was staffed before; its
+          // completion/reconcile path owns it, not fresh staffing.
+          if (holders.length > 0 || collab.workersOnItem(rootThreadId, item.id).length > 0) {
+            continue;
+          }
+        } else {
+          // in_progress with no live holder. An idle/completed holder likely
+          // reported (harvest/reconcile closes it) or is being stall-nudged;
+          // only husks (error/stopped/unknown) or no holder at all mean the
+          // worker is truly gone.
+          if (holders.some((agent) => agent.status === "idle" || agent.status === "completed")) {
+            continue;
+          }
+          const updatedAt = items.updatedAt(rootThreadId, item.id);
+          if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
+          for (const holder of holders) collab.forget(holder.threadId);
+          restaffed = true;
+        }
+        lastStaffTry.set(item.id, now);
+        const result = await collab.spawnWorker({
+          parentThreadId: rootThreadId,
+          itemId: item.id,
+          displayName: workRelatedName(
+            item.step,
+            agents.map((agent) => agent.nickname),
+          ),
+          message: itemBriefMessage(item, restaffed),
+        });
+        if ("error" in result) {
+          bb.log.warn(`Scheduler could not staff slice ${item.id} on ${rootThreadId}: ${result.error}`);
+        } else {
+          slots -= 1;
+          staffed = true;
+          inFlightFiles.push(...item.files);
+          bb.log.info(
+            `Scheduler staffed ${restaffed ? "abandoned" : "ready"} slice ${item.id} with ${result.nickname} (${result.threadId}) on ${rootThreadId}`,
+          );
+        }
+      }
+      if (staffed) {
+        const latest = store.get(rootThreadId);
+        if (latest) publish(rootThreadId, view(latest));
+      }
+    } finally {
+      scheduling.delete(rootThreadId);
+    }
+  }
+
   const STALL_NUDGE_AFTER_MS = 3 * 60_000;
   const STALL_NUDGE_COOLDOWN_MS = 15 * 60_000;
   const RESCUE_AFTER_MS = 10 * 60_000;
@@ -677,34 +842,46 @@ export default function plugin(bb: BbPluginApi) {
         }
       }
 
-      if ((liveTaskCounts.get(rootThreadId) ?? 0) === 0) return;
-      for (const item of openItems) {
-        const holder = agents.find(
-          (agent) => agent.role !== "verifier" && agent.itemId === item.id,
+      // Legacy rescue: unmanaged slices are still the orchestrator's to staff,
+      // so the plugin only steps in while the root turn is blocked on open
+      // native task calls and cannot re-staff them itself. Managed slices are
+      // the scheduler's job below, root blocked or not.
+      if ((liveTaskCounts.get(rootThreadId) ?? 0) > 0) {
+        const managed = new Set(
+          items.list(rootThreadId).filter((item) => item.managed).map((item) => item.id),
         );
-        if (holder && holder.status !== "error") continue;
-        if (holder) collab.forget(holder.threadId);
-        const lastTry = rescuedItems.get(item.id);
-        if (lastTry != null && now - lastTry < RESCUE_RETRY_MS) continue;
-        const updatedAt = items.updatedAt(rootThreadId, item.id);
-        if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
-        rescuedItems.set(item.id, now);
-        const result = await collab.spawnWorker({
-          parentThreadId: rootThreadId,
-          itemId: item.id,
-          message: [
-            `SLICE (item_id=${item.id}): ${item.step}`,
-            "The previous worker on this slice died mid-work and the orchestrator is busy. Pick the slice up from the current worktree state and finish it.",
-          ].join("\n\n"),
-        });
-        if ("error" in result) {
-          bb.log.warn(`Could not rescue slice ${item.id} on ${rootThreadId}: ${result.error}`);
-        } else {
-          bb.log.info(
-            `Rescued abandoned slice ${item.id} on ${rootThreadId} with ${result.nickname} (${result.threadId})`,
+        for (const item of openItems) {
+          if (managed.has(item.id)) continue;
+          const holder = agents.find(
+            (agent) => agent.role !== "verifier" && agent.itemId === item.id,
           );
+          if (holder && holder.status !== "error") continue;
+          if (holder) collab.forget(holder.threadId);
+          const lastTry = rescuedItems.get(item.id);
+          if (lastTry != null && now - lastTry < RESCUE_RETRY_MS) continue;
+          const updatedAt = items.updatedAt(rootThreadId, item.id);
+          if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
+          rescuedItems.set(item.id, now);
+          const result = await collab.spawnWorker({
+            parentThreadId: rootThreadId,
+            itemId: item.id,
+            displayName: workRelatedName(item.step, agents.map((agent) => agent.nickname)),
+            message: [
+              `SLICE (item_id=${item.id}): ${item.step}`,
+              "The previous worker on this slice died mid-work and the orchestrator is busy. Pick the slice up from the current worktree state and finish it.",
+            ].join("\n\n"),
+          });
+          if ("error" in result) {
+            bb.log.warn(`Could not rescue slice ${item.id} on ${rootThreadId}: ${result.error}`);
+          } else {
+            bb.log.info(
+              `Rescued abandoned slice ${item.id} on ${rootThreadId} with ${result.nickname} (${result.threadId})`,
+            );
+          }
         }
       }
+
+      await scheduleReady(rootThreadId);
     } finally {
       healing.delete(rootThreadId);
     }
@@ -845,6 +1022,14 @@ export default function plugin(bb: BbPluginApi) {
       .find((row) => row.id === itemId && row.status === "in_progress");
     if (!item) return false;
     items.setStatus(rootThreadId, itemId, "completed");
+    const closed = findings.markFixedByItem(
+      rootThreadId,
+      itemId,
+      (report ?? "").trim().slice(-400),
+    );
+    if (closed > 0) {
+      bb.log.info(`Closed ${closed} finding(s) fixed by slice ${itemId} on ${rootThreadId}`);
+    }
     bb.log.info(`Goal slice ${itemId} completed on ${rootThreadId} from worker report`);
     return true;
   }
@@ -1170,6 +1355,7 @@ export default function plugin(bb: BbPluginApi) {
     const existing = store.get(threadId);
     if (!existing || existing.status === "complete") {
       items.clear(threadId);
+      findings.clear(threadId);
     }
     const goal =
       !existing || existing.status === "complete"
@@ -1339,6 +1525,7 @@ export default function plugin(bb: BbPluginApi) {
     if (!slash) return false;
     if (slash.kind === "clear") {
       items.clear(threadId);
+      findings.clear(threadId);
       if (store.clear(threadId)) publish(threadId, null);
       return true;
     }
@@ -1375,6 +1562,7 @@ export default function plugin(bb: BbPluginApi) {
     },
     clear({ threadId }) {
       items.clear(threadId);
+      findings.clear(threadId);
       const cleared = store.clear(threadId);
       if (cleared) publish(threadId, null);
       return { cleared };
@@ -1385,6 +1573,9 @@ export default function plugin(bb: BbPluginApi) {
     },
     async setItemStatus({ threadId, itemId, status }) {
       items.setStatus(threadId, itemId, status);
+      if (status === "completed") {
+        findings.markFixedByItem(threadId, itemId, "Marked completed from the pane.");
+      }
       const goal = store.get(threadId);
       const next = goal ? await viewFresh(goal) : null;
       if (next) publish(threadId, next);
@@ -1404,6 +1595,7 @@ export default function plugin(bb: BbPluginApi) {
       verifyModel,
       autoContinue,
       progressUpdateMinutes,
+      maxWorkers,
       tokenBudget,
     }) {
       const existing = store.get(threadId);
@@ -1414,6 +1606,7 @@ export default function plugin(bb: BbPluginApi) {
         verifyModelOverride: verifyModel,
         autoContinueOverride: autoContinue,
         progressUpdateMinutesOverride: progressUpdateMinutes,
+        maxWorkersOverride: maxWorkers,
         tokenBudget,
       });
       const snap = next ? await viewFresh(next) : null;
@@ -1461,10 +1654,15 @@ export default function plugin(bb: BbPluginApi) {
     },
     parameters: z.object({}).strict(),
     async execute(_params, { threadId }) {
-      await refreshRunning(threadId);
-      const accounted = await account(threadId);
-      const goal = accounted ?? store.get(threadId);
-      return goalToolResponse(goal ? await viewFresh(goal) : null);
+      const rootThreadId = collab.rootId(threadId);
+      await refreshRunning(rootThreadId);
+      const accounted = await account(rootThreadId);
+      const goal = accounted ?? store.get(rootThreadId);
+      return goalToolResponse(
+        goal ? await viewFresh(goal) : null,
+        false,
+        findings.list(rootThreadId, "open"),
+      );
     },
   });
 
@@ -1534,6 +1732,23 @@ export default function plugin(bb: BbPluginApi) {
           isError: true,
         };
       }
+      if (status === "complete") {
+        const open = findings.list(threadId, "open");
+        if (open.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cannot mark the goal complete: ${open.length} open finding(s) remain. Fix them (their fix slices close them automatically) or call resolve_finding with evidence for any that are not real defects. Open: ${open
+                  .slice(0, 10)
+                  .map((finding) => `${finding.id} ${finding.title} [${finding.file}]`)
+                  .join("; ")}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
       const next = applyStatus(threadId, status, null);
       return goalToolResponse(next ? view(next) : null, status === "complete");
     },
@@ -1541,8 +1756,9 @@ export default function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "update_plan",
-    description: `Updates the task plan.
-Provide an optional explanation and a list of plan items, each with a step and status.
+    description: `Updates the task plan — the dependency DAG the UltraGoal scheduler executes.
+Provide the full list of plan items. Each item is a self-contained slice brief: step (objective + boundaries), files (the disjoint file paths/globs this slice owns), check (a runnable command that proves it done), and deps (item_ids or "#N" 1-based positions in this list it must wait for; empty = ready now).
+The scheduler staffs one fresh worker per READY slice automatically, up to the goal's max concurrent workers — do not spawn workers for plan items yourself. Plan WIDE: prefer many independent file-disjoint slices over few coarse ones; declare deps only for genuinely sequential work; never write catch-all tail items like "fix whatever the hunt proves" (hunt workers report_finding per defect and fixes are staffed as they stream in).
 Keep the plan current as steps complete or the next best action changes. When a live worker moves to a new slice, pass that item's id and the new step text and keep status in_progress. Do not add a pending Next row for work a worker is already doing. Append only genuinely unstarted work. Do not treat a plan update as a substitute for doing the work.
 `,
     experimental_statusLabels: {
@@ -1562,9 +1778,28 @@ Keep the plan current as steps complete or the next best action changes. When a 
               ),
             step: z.string().describe("Task step text. Update this when the worker's current slice changes."),
             status: z.enum(["pending", "in_progress", "completed"]).describe("Step status."),
+            deps: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'Item ids (or "#N" = 1-based position in this list) this slice must wait for. Pass [] for slices that are ready now. Omit to keep the item\'s existing deps.',
+              ),
+            files: z
+              .array(z.string())
+              .optional()
+              .describe(
+                "File paths/globs this slice owns. Keep scopes disjoint across parallel slices so workers cannot collide. Omit to keep existing.",
+              ),
+            check: z
+              .string()
+              .nullable()
+              .optional()
+              .describe(
+                "Runnable command that proves this slice done (its verification gate). Omit to keep existing; null to clear.",
+              ),
           }),
         )
-        .describe("The list of steps"),
+        .describe("The full list of slices forming the dependency DAG."),
     }),
     async execute({ plan }, { threadId }) {
       bb.log.info(`update_plan on ${threadId}: ${plan.length} steps`);
@@ -1573,9 +1808,129 @@ Keep the plan current as steps complete or the next best action changes. When a 
       const next = goal ? await viewFresh(goal) : null;
       if (next) publish(threadId, next);
       void ensureCrew(threadId);
+      void scheduleReady(threadId);
       return "Plan updated";
     },
   });
+  bb.agents.registerTool({
+    name: "report_finding",
+    description:
+      "Report ONE discrete defect the moment you confirm it during a hunt/audit/review — do not batch findings into a final report. Findings are fingerprint-deduplicated (same file + same defect = same finding across sweeps). A fresh finding auto-creates a ready fix slice that the scheduler staffs immediately, so fixes start while the hunt continues. Open findings block goal completion.",
+    experimental_statusLabels: { pending: "Reporting finding", completed: "Reported finding" },
+    parameters: z.object({
+      title: z.string().min(1).describe("One-sentence statement of the defect."),
+      file: z
+        .string()
+        .min(1)
+        .describe('Primary location, "path/to/file.ts" or "path/to/file.ts:123".'),
+      evidence: z
+        .string()
+        .min(1)
+        .describe("Proof it is real: the offending code/behavior, not a hunch."),
+      fix_files: z
+        .array(z.string())
+        .optional()
+        .describe("File scope the fix slice should own. Defaults to the finding's file."),
+      check: z
+        .string()
+        .optional()
+        .describe("Runnable command that proves the fix (e.g. the failing test to make pass)."),
+    }),
+    async execute({ title, file, evidence, fix_files, check }, { threadId }) {
+      const rootThreadId = collab.rootId(threadId);
+      const goal = store.get(rootThreadId);
+      if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) {
+        return {
+          content: [{ type: "text", text: "no active UltraGoal on this thread tree" }],
+          isError: true,
+        };
+      }
+      const result = findings.report(rootThreadId, { title, file, evidence });
+      if (!result.created) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "duplicate",
+                finding_id: result.finding.id,
+                finding_status: result.finding.status,
+                note:
+                  result.finding.status === "fixed"
+                    ? "This finding was already fixed. Verify it actually regressed before re-reporting; if it did, report with a more specific title."
+                    : "Already known; its fix is tracked.",
+              }),
+            },
+          ],
+        };
+      }
+      const fixItem = items.add(
+        rootThreadId,
+        `Fix: ${title} [${file.replace(/[:#]\d+([-:]\d+)?$/, "")}]`,
+        "pending",
+        {
+          deps: [],
+          files: fix_files && fix_files.length > 0 ? fix_files : [file.replace(/[:#]\d+([-:]\d+)?$/, "")],
+          check: check ?? null,
+        },
+      );
+      if (fixItem) findings.linkItem(rootThreadId, result.finding.id, fixItem.id);
+      bb.log.info(
+        `Finding ${result.finding.id} reported on ${rootThreadId}${fixItem ? ` -> fix slice ${fixItem.id}` : ""}`,
+      );
+      void publishFresh(rootThreadId);
+      void scheduleReady(rootThreadId);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "new",
+              finding_id: result.finding.id,
+              fix_item_id: fixItem?.id ?? null,
+            }),
+          },
+        ],
+      };
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "resolve_finding",
+    description:
+      "Resolve an open finding that will not be closed by a fix slice: mark it not_a_defect with evidence, or fixed when the fix landed outside its own slice. Findings fixed by their auto-created fix slice close automatically — do not resolve those by hand.",
+    experimental_statusLabels: { pending: "Resolving finding", completed: "Resolved finding" },
+    parameters: z.object({
+      finding: z.string().min(1).describe("Finding id (fnd_...) or fingerprint from report_finding/get_goal."),
+      resolution: z.enum(["fixed", "not_a_defect"]).describe("What happened to it."),
+      evidence: z
+        .string()
+        .min(1)
+        .describe("Proof: commit SHA / passing check output, or why it is not a real defect."),
+    }),
+    async execute({ finding, resolution, evidence }, { threadId }) {
+      const rootThreadId = collab.rootId(threadId);
+      const resolved = findings.resolve(
+        rootThreadId,
+        finding,
+        resolution === "fixed" ? "fixed" : "dismissed",
+        evidence,
+      );
+      if (!resolved) {
+        return {
+          content: [{ type: "text", text: `finding not found: ${finding}` }],
+          isError: true,
+        };
+      }
+      void publishFresh(rootThreadId);
+      return {
+        content: [
+          { type: "text", text: JSON.stringify({ finding_id: resolved.id, status: resolved.status }) },
+        ],
+      };
+    },
+  });
+
   collab.registerTools();
 
   bb.agents.configure((context) => {
@@ -1607,13 +1962,14 @@ Keep the plan current as steps complete or the next best action changes. When a 
               ].join("\n")
             : [
                 `You are an UltraGoal subagent${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
-                "Complete only the slice you were assigned. Report evidence when done.",
+                "Complete only the slice you were assigned. Report evidence when done: commit SHA(s) and your check's passing output, not bare claims.",
+                "If your slice is a hunt/audit/review, call report_finding per discrete defect the moment you confirm it — fixes are staffed automatically; do not batch findings into your final report.",
                 "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
                 "You may spawn nested helpers for your slice if it splits cleanly.",
               ].join("\n")
           : undefined;
       return {
-        tools: [...COLLAB_TOOL_NAMES],
+        tools: [...COLLAB_TOOL_NAMES, "report_finding", "resolve_finding"],
         skills: [],
         instructions: worker,
       };
@@ -1629,8 +1985,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
               : "The UltraGoal pane is empty. Call update_plan immediately with concrete remaining work. Do not use TodoWrite or Update TODOs for that list.",
             liveAgents.length > 0
               ? `${liveAgents.length} subagent(s) are live. Wait or follow up; do not redo their slices on the root.`
-              : "No subagents are live. Spawn one worker per in-progress slice before doing the work yourself.",
-            "Prefer spawn_agent or followup_task for each in-progress slice and give each a humorous display_name — those workers get named Now rows, follow-ups, and verification. Native Task subagents are tracked in Now automatically but cannot be messaged or verified.",
+              : "No subagents are live. Keep the plan's ready slices flowing; the scheduler staffs them.",
+            `You plan; the scheduler staffs. Express all work as update_plan slices with deps/files/check — the UltraGoal scheduler spawns one fresh worker per ready slice automatically, up to ${view(goal).settings.maxWorkers} concurrent. Do not spawn workers for plan items yourself and never use the native Task tool for slice work (it blocks this thread). spawn_agent is only for ad-hoc helpers outside the plan; give any such helper a humorous display_name related to its work.`,
+            "Hunts stream: workers report_finding per defect and each finding auto-creates a staffed fix slice. Never write catch-all tail items like 'fix whatever the hunt proves'. Open findings block update_goal complete; resolve_finding (with evidence) anything that is not a real defect.",
             view(goal).settings.verifyEnabled
               ? `Verification is on. After a worker returns, a ${view(goal).settings.verifyProvider}/${view(goal).settings.verifyModel} verifier is launched automatically. Do not mark that slice complete until VERIFY_PASS. On VERIFY_FAIL, spawn a fix worker.`
               : "Verification is off for this UltraGoal.",
@@ -1649,6 +2006,8 @@ Keep the plan current as steps complete or the next best action changes. When a 
         "create_goal",
         "update_goal",
         "update_plan",
+        "report_finding",
+        "resolve_finding",
         ...COLLAB_TOOL_NAMES,
       ],
       skills: ["ultragoal"],
@@ -1789,6 +2148,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     running.delete(thread.id);
     forgetNativeScan(thread.id);
     items.clear(thread.id);
+    findings.clear(thread.id);
     if (store.clear(thread.id)) publish(thread.id, null);
   });
 
@@ -1818,7 +2178,13 @@ Keep the plan current as steps complete or the next best action changes. When a 
         return {
           exitCode: 0,
           stdout: JSON.stringify(
-            { now: snap.now, next: snap.next, agents: snap.agents, tokens: snap.tokensUsed },
+            {
+              now: snap.now,
+              next: snap.next,
+              agents: snap.agents,
+              tokens: snap.tokensUsed,
+              findings: snap.findings,
+            },
             null,
             2,
           ),
@@ -1871,6 +2237,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       }
 
       items.clear(threadId);
+      findings.clear(threadId);
       store.clear(threadId);
       publish(threadId, null);
       return { exitCode: 0, stdout: "UltraGoal cleared." };
@@ -2041,7 +2408,9 @@ function modelsFromOptions(options: ExecutionOptions, providerId: string): Catal
       .map((model) => ({
         id: model.model || model.id,
         displayName: model.displayName,
-        description: model.description || undefined,
+        // Spread, not `description: undefined` — the rpc validator rejects
+        // explicit undefined values.
+        ...(model.description ? { description: model.description } : {}),
       })),
   );
 }

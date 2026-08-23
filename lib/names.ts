@@ -40,6 +40,63 @@ export function nextHumorousName(used: Iterable<string>): string {
   return `Agent ${taken.size + 1} the Relentless`;
 }
 
+// Words that carry no flavor of the slice's actual work.
+const KEYWORD_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "of", "in", "on", "for", "to", "with", "into",
+  "from", "via", "per", "all", "every", "only", "not", "none", "new", "its",
+  "it", "this", "that", "then", "than", "until", "after", "before", "when",
+  "while", "each", "one", "two", "three", "make", "add", "run", "keep", "get",
+  "set", "fix", "item", "slice", "wave", "worker", "fresh", "prior", "done",
+  "main", "repo", "code", "file", "files", "them", "what", "whatever", "prove",
+  "proves", "proven", "still", "then", "your", "over", "under",
+]);
+
+const WORK_TEMPLATES = [
+  (k: string) => `Captain ${k}`,
+  (k: string) => `The ${k} Whisperer`,
+  (k: string) => `${k} Wrangler`,
+  (k: string) => `Sir ${k}-a-Lot`,
+  (k: string) => `Duke of ${k}`,
+  (k: string) => `The ${k} Reckoning`,
+  (k: string) => `Doctor ${k}`,
+  (k: string) => `Baron von ${k}`,
+  (k: string) => `Lady ${k}`,
+  (k: string) => `${k} Buster`,
+  (k: string) => `The ${k} Gambit`,
+  (k: string) => `Agent ${k}`,
+];
+
+function keywordsOf(work: string): string[] {
+  const tokens = work
+    .replace(/\bitm_[a-z0-9_]+\b/gi, " ")
+    .replace(/\bthr_[a-z0-9]+\b/gi, " ")
+    .split(/[^a-zA-Z]+/)
+    .filter((token) => token.length >= 4 && !KEYWORD_STOPWORDS.has(token.toLowerCase()));
+  // Longest first, earliest wins ties: the most specific word in the slice.
+  return [...new Set(tokens.map((token) => token[0]!.toUpperCase() + token.slice(1)))].sort(
+    (a, b) => b.length - a.length,
+  );
+}
+
+/**
+ * A humorous display name derived from the slice's own text ("Green mandated
+ * suites" -> "Captain Suites"), so plugin-spawned workers read like crew on
+ * that job instead of random pool picks. Falls back to the generic pool when
+ * the text yields nothing usable.
+ */
+export function workRelatedName(work: string, used: Iterable<string>): string {
+  const taken = new Set([...used].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  for (const keyword of keywordsOf(work).slice(0, 4)) {
+    const shuffled = [...WORK_TEMPLATES].sort(() => Math.random() - 0.5);
+    for (const template of shuffled) {
+      const name = template(keyword);
+      if (name.length > 40) continue;
+      if (!taken.has(name.toLowerCase())) return name;
+    }
+  }
+  return nextHumorousName(used);
+}
+
 const AUDITORS = [
   "The Skeptical Auditor",
   "Proof Reader Prime",
