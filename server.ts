@@ -2289,6 +2289,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
         // A failed verdict goes back to the worker WITH the findings — a
         // blind resume just repeats the same mistake. Three failed cycles
         // hand the slice to the orchestrator instead of looping forever.
+        // The verifier's runtime is done either way — release it. (Verifiers
+        // were leaking one codex process per audit.)
+        void releaseWorkerRuntime(thread.id);
         if (
           !passed &&
           child.source_thread_id &&
