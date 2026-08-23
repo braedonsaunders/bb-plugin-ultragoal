@@ -402,8 +402,10 @@ export default function plugin(bb: BbPluginApi) {
     try {
       const [listed, liveTasks] = await Promise.all([
         // Now renders from liveness, so the crew's thread statuses must be
-        // fresh, not cache defaults.
-        collab.listForRoot(goal.threadId, { refreshLimit: 24 }),
+        // fresh, not cache defaults. Discovery registers children the
+        // orchestrator spawned natively (outside spawn_agent) so they get
+        // Now rows and auto-approval like any other worker.
+        collab.listForRoot(goal.threadId, { discover: true, refreshLimit: 24 }),
         listLiveNativeTasks(bb, goal.threadId),
       ]);
       await syncNativePlan(goal.threadId);
@@ -682,6 +684,9 @@ export default function plugin(bb: BbPluginApi) {
     for (const agent of agentCache.get(rootId) ?? []) {
       if (agent.threadId !== rootId) ids.add(agent.threadId);
     }
+    // The agent cache lags behind discovery; the store has every registered
+    // child, including natively spawned ones.
+    for (const id of collab.threadIdsForRoot(rootId)) ids.add(id);
     await Promise.all([...ids].map((id) => approveInteractions(id)));
   }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5
+
+- Children the orchestrator spawns natively (outside spawn_agent) are discovered on every pane refresh, so they get Now rows and — critically — auto-approval. Their approval prompts (command runs, file changes) no longer sit waiting for the user.
+- The approval sweep reads registered children from the store directly instead of a cache that could lag behind discovery.
+
 ## 0.3.4
 
 - One agent = one slice, permanently. Workers are never reused across slices: followup_task no longer reassigns work, refuses retired workers whose slice is completed, and the orchestrator is instructed to spawn a fresh agent per slice. Thread reuse was why Now rows opened onto chats full of unrelated finished slices.
