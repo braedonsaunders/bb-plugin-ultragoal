@@ -43,7 +43,7 @@ interface GoalRow {
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
 // are computed per snapshot in server.ts, never stored.
 export interface StoredGoal
-  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings"> {
+  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings" | "decisions"> {
   lastSeenTokens: number | null;
   lastAccountedAt: number | null;
   lastContinueWasAutomatic: boolean;
@@ -227,6 +227,18 @@ export function createGoalStore(bb: BbPluginApi) {
     // which turned a 15-minute cooldown into a nudge per release.
     `ALTER TABLE collab_agents ADD COLUMN last_nudge_at INTEGER`,
     `ALTER TABLE collab_agents ADD COLUMN nudge_count INTEGER`,
+    `CREATE TABLE IF NOT EXISTS goal_decisions (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      question TEXT NOT NULL,
+      context TEXT,
+      options TEXT,
+      status TEXT NOT NULL,
+      answer TEXT,
+      created_at INTEGER NOT NULL,
+      answered_at INTEGER
+    )`,
+    `CREATE INDEX IF NOT EXISTS goal_decisions_thread ON goal_decisions(thread_id, status)`,
   ]);
   importLegacyGoalDatabase(db);
 

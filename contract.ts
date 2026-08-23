@@ -73,6 +73,16 @@ export const goalSettingsSchema = z.object({
   maxWorkers: z.number().int(),
 });
 
+export const goalDecisionSchema = z.object({
+  id: z.string(),
+  question: z.string(),
+  context: z.string().nullable(),
+  options: z.array(z.string()),
+  status: z.enum(["open", "answered", "withdrawn"]),
+  answer: z.string().nullable(),
+  createdAt: z.number().int(),
+});
+
 export const goalFindingStatusSchema = z.enum(["open", "fixed", "dismissed"]);
 
 export const goalFindingSchema = z.object({
@@ -109,9 +119,12 @@ export const goalSnapshotSchema = z.object({
   findings: z
     .object({ open: z.number().int(), fixed: z.number().int(), dismissed: z.number().int() })
     .default({ open: 0, fixed: 0, dismissed: 0 }),
+  /** Open owner decisions — work that waits on the user, surfaced first. */
+  decisions: z.array(goalDecisionSchema).default([]),
 });
 
 export type GoalStatus = z.infer<typeof goalStatusSchema>;
+export type GoalDecision = z.infer<typeof goalDecisionSchema>;
 export type GoalFindingStatus = z.infer<typeof goalFindingStatusSchema>;
 export type GoalFinding = z.infer<typeof goalFindingSchema>;
 export type GoalItemStatus = z.infer<typeof goalItemStatusSchema>;

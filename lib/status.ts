@@ -41,6 +41,9 @@ export function formatGoalCard(goal: GoalSnapshot): string {
       lines.push(`- [${mark}] ${item.id} ${item.step}${gate}${names}`);
     }
   }
+  for (const decision of goal.decisions) {
+    lines.push(`NEEDS YOU: [${decision.id}] ${decision.question} — answer: bb ultragoal decide ${decision.id} <answer>`);
+  }
   if (goal.findings.open + goal.findings.fixed + goal.findings.dismissed > 0) {
     lines.push(
       `Findings: ${goal.findings.open} open, ${goal.findings.fixed} fixed, ${goal.findings.dismissed} dismissed`,
@@ -100,6 +103,11 @@ export function goalToolResponse(
             agents: goal.agents,
             settings: goal.settings,
             findings: goal.findings,
+            openDecisions: goal.decisions.map((decision) => ({
+              decision_id: decision.id,
+              question: decision.question,
+              options: decision.options,
+            })),
             openFindings: openFindings.slice(0, 20).map((finding) => ({
               finding_id: finding.id,
               title: finding.title,

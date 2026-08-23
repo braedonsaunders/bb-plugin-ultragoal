@@ -115,6 +115,14 @@ function planInstruction(goal: GoalSnapshot): string {
     }
   }
 
+  const decisionsLine =
+    goal.decisions.length > 0
+      ? [
+          `DECISIONS: ${goal.decisions.length} owner decision(s) await the user (${goal.decisions
+            .map((decision) => decision.id)
+            .join(", ")}). Do not re-ask, do not proceed on assumptions, and do not treat this as blocked — continue all work that does not depend on the answer.`,
+        ]
+      : [];
   const findingsLine =
     goal.findings.open > 0
       ? [
@@ -126,6 +134,7 @@ function planInstruction(goal: GoalSnapshot): string {
     ...lines,
     ...agentLines,
     ...schedulerLines,
+    ...decisionsLine,
     ...findingsLine,
   ].join("\n");
 }

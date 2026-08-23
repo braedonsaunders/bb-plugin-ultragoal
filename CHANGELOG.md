@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.0
+
+Owner decisions are first-class ("Needs you"). A parked decision was one sentence inside one progress note, then buried under poll turns — invisible to the person it waited on:
+
+- New request_decision / resolve_decision tools: anything only the owner can decide (irreversible actions, spend, scope, preference calls) becomes a durable decision record — deduplicated by question, never re-asked, never assumed.
+- The pane opens with a "Needs you" section: question, context, options, and the exact answer command. `bb ultragoal status` prints NEEDS YOU lines; get_goal returns openDecisions.
+- `bb ultragoal decide <decision_id> <answer>` records the answer, wakes the orchestrator with it (event-gated continuation counts it as an event), and steers it to act.
+- Open decisions block update_goal complete, like open findings. The orchestrator keeps working everything that does not depend on the answer.
+- Templates: orchestrators route owner calls through request_decision with one visible chat note; workers escalate owner-only questions instead of guessing.
+
 ## 0.9.0
 
 Two live-monitoring findings become architecture — completed work integrates itself, and the orchestrator stops busy-polling:

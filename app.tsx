@@ -703,6 +703,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
+        <DecisionsSection decisions={goal.decisions} threadId={threadId} />
         {items.length === 0 && agents.length === 0 ? (
           <div className="px-2 py-8 text-sm leading-relaxed text-muted-foreground">
             No requirements yet. Resume the UltraGoal and the agent will fill this list with
@@ -1198,6 +1199,50 @@ function NowSection({
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+function DecisionsSection({
+  decisions,
+  threadId,
+}: {
+  decisions: GoalSnapshot["decisions"];
+  threadId: string;
+}) {
+  if (decisions.length === 0) return null;
+  return (
+    <section className="px-1 pb-2">
+      <div className="flex items-center gap-1.5 px-1 pb-1 pt-1.5">
+        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-foreground" />
+        <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-foreground">
+          Needs you
+        </span>
+        <span className="text-[10px] text-muted-foreground">{decisions.length}</span>
+      </div>
+      <ul className="space-y-1.5">
+        {decisions.map((decision) => (
+          <li
+            key={decision.id}
+            className="rounded-md border border-foreground/25 px-2 py-1.5"
+          >
+            <div className="text-[13px] leading-snug text-foreground">{decision.question}</div>
+            {decision.context ? (
+              <div className="mt-1 text-[11px] leading-snug text-muted-foreground">
+                {decision.context}
+              </div>
+            ) : null}
+            {decision.options.length > 0 ? (
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                Options: {decision.options.join(" · ")}
+              </div>
+            ) : null}
+            <div className="mt-1 font-mono text-[10px] text-muted-foreground">
+              bb ultragoal decide {decision.id} &lt;answer&gt; --thread {threadId}
+            </div>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

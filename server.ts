@@ -25,6 +25,7 @@ import {
 import { lastUserText, parseSlashGoal } from "./lib/slash.js";
 import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
+import { createDecisionStore } from "./lib/decisions.js";
 import { createFindingStore } from "./lib/findings.js";
 import { workRelatedName } from "./lib/names.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
@@ -113,6 +114,7 @@ function snapshotOf(
   agents: GoalAgent[],
   rootRunning: boolean,
   findings: { open: number; fixed: number; dismissed: number },
+  decisions: GoalSnapshot["decisions"],
 ): GoalSnapshot {
   const itemList = items.list(goal.threadId);
   const pane = projectPane(goal.threadId, itemList, agents, rootRunning);
@@ -147,6 +149,7 @@ function snapshotOf(
       snapshotDefaults,
     ),
     findings,
+    decisions,
   };
 }
 
@@ -226,6 +229,7 @@ export default function plugin(bb: BbPluginApi) {
   const store = createGoalStore(bb);
   const items = createItemStore(bb);
   const findings = createFindingStore(bb);
+  const decisions = createDecisionStore(bb);
   const agentCache = new Map<string, GoalAgent[]>();
   /** Open native task calls per root, from the last fresh scan. */
   const liveTaskCounts = new Map<string, number>();
@@ -395,6 +399,7 @@ export default function plugin(bb: BbPluginApi) {
       agents,
       rootWorkingInline,
       findings.counts(goal.threadId),
+      decisions.list(goal.threadId, "open"),
     );
   }
 
@@ -1343,6 +1348,7 @@ export default function plugin(bb: BbPluginApi) {
     if (!existing || existing.status === "complete") {
       items.clear(threadId);
       findings.clear(threadId);
+      decisions.clear(threadId);
     }
     const goal =
       !existing || existing.status === "complete"
@@ -1523,6 +1529,7 @@ export default function plugin(bb: BbPluginApi) {
     if (slash.kind === "clear") {
       items.clear(threadId);
       findings.clear(threadId);
+      decisions.clear(threadId);
       if (store.clear(threadId)) publish(threadId, null);
       return true;
     }
@@ -1560,6 +1567,7 @@ export default function plugin(bb: BbPluginApi) {
     clear({ threadId }) {
       items.clear(threadId);
       findings.clear(threadId);
+      decisions.clear(threadId);
       const cleared = store.clear(threadId);
       if (cleared) publish(threadId, null);
       return { cleared };
@@ -1730,6 +1738,20 @@ export default function plugin(bb: BbPluginApi) {
         };
       }
       if (status === "complete") {
+        const openDecisions = decisions.list(threadId, "open");
+        if (openDecisions.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cannot mark the goal complete: ${openDecisions.length} owner decision(s) await the user: ${openDecisions
+                  .map((decision) => `${decision.id} ${decision.question}`)
+                  .join("; ")}. The user answers via bb ultragoal decide <id> <answer>; use resolve_decision only for their verbatim answer or a genuinely moot question.`,
+              },
+            ],
+            isError: true,
+          };
+        }
         const open = findings.list(threadId, "open");
         if (open.length > 0) {
           return {
@@ -1895,6 +1917,77 @@ Keep the plan current as steps complete or the next best action changes. When a 
   });
 
   bb.agents.registerTool({
+    name: "request_decision",
+    description:
+      "Escalate a decision only the OWNER (the human user) can make — irreversible actions (history rewrites, deletions, spending), scope changes, or preference calls. It renders in the UltraGoal pane's 'Needs you' section and blocks goal completion until answered (bb ultragoal decide <id> <answer>). Also post one short user-visible chat message stating the question. Never bury an owner decision inside a progress note, never re-ask an open one, and never proceed on an assumed answer.",
+    experimental_statusLabels: { pending: "Requesting decision", completed: "Requested decision" },
+    parameters: z.object({
+      question: z.string().min(1).describe("The single decision the owner must make, phrased as a question."),
+      context: z
+        .string()
+        .optional()
+        .describe("What the owner needs to know: consequences of each path, evidence, urgency."),
+      options: z.array(z.string()).optional().describe("Concrete answer options, if enumerable."),
+    }),
+    async execute({ question, context, options }, { threadId }) {
+      const rootThreadId = collab.rootId(threadId);
+      const goal = store.get(rootThreadId);
+      if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) {
+        return {
+          content: [{ type: "text", text: "no active UltraGoal on this thread tree" }],
+          isError: true,
+        };
+      }
+      const decision = decisions.request(rootThreadId, { question, context, options });
+      bb.log.info(`Owner decision ${decision.id} requested on ${rootThreadId}: ${question.slice(0, 80)}`);
+      void publishFresh(rootThreadId);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              decision_id: decision.id,
+              status: decision.status,
+              answer_command: `bb ultragoal decide ${decision.id} <answer> --thread ${rootThreadId}`,
+              reminder:
+                "Post one short user-visible chat message stating this question now, then continue other work — do not wait idle on the answer.",
+            }),
+          },
+        ],
+      };
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "resolve_decision",
+    description:
+      "Close an open owner decision: pass the owner's answer verbatim when they gave one in chat, or withdraw a decision that became moot (with the reason). Never invent an answer the owner did not give.",
+    experimental_statusLabels: { pending: "Resolving decision", completed: "Resolved decision" },
+    parameters: z.object({
+      decision: z.string().min(1).describe("Decision id (dec_...) from request_decision or get_goal."),
+      resolution: z.enum(["answered", "withdrawn"]).describe("answered = the owner decided; withdrawn = moot."),
+      answer: z.string().min(1).describe("The owner's answer verbatim, or why it is moot."),
+    }),
+    async execute({ decision, resolution, answer }, { threadId }) {
+      const rootThreadId = collab.rootId(threadId);
+      const resolved = decisions.resolve(rootThreadId, decision, resolution, answer);
+      if (!resolved) {
+        return {
+          content: [{ type: "text", text: `decision not found: ${decision}` }],
+          isError: true,
+        };
+      }
+      markGoalEvent(rootThreadId);
+      void publishFresh(rootThreadId);
+      return {
+        content: [
+          { type: "text", text: JSON.stringify({ decision_id: resolved.id, status: resolved.status }) },
+        ],
+      };
+    },
+  });
+
+  bb.agents.registerTool({
     name: "resolve_finding",
     description:
       "Resolve an open finding that will not be closed by a fix slice: mark it not_a_defect with evidence, or fixed when the fix landed outside its own slice. Findings fixed by their auto-created fix slice close automatically — do not resolve those by hand.",
@@ -1968,7 +2061,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
               ].join("\n")
           : undefined;
       return {
-        tools: [...COLLAB_TOOL_NAMES, "report_finding", "resolve_finding"],
+        tools: [...COLLAB_TOOL_NAMES, "report_finding", "resolve_finding", "request_decision"],
         skills: [],
         instructions: worker,
       };
@@ -2007,6 +2100,8 @@ Keep the plan current as steps complete or the next best action changes. When a 
         "update_plan",
         "report_finding",
         "resolve_finding",
+        "request_decision",
+        "resolve_decision",
         ...COLLAB_TOOL_NAMES,
       ],
       skills: ["ultragoal"],
@@ -2203,6 +2298,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     forgetNativeScan(thread.id);
     items.clear(thread.id);
     findings.clear(thread.id);
+    decisions.clear(thread.id);
     if (store.clear(thread.id)) publish(thread.id, null);
   });
 
@@ -2271,6 +2367,27 @@ Keep the plan current as steps complete or the next best action changes. When a 
         };
       }
 
+      if (action === "decide") {
+        const [decisionId, ...answerParts] = (objective ?? "").split(/\s+/);
+        const answer = answerParts.join(" ").trim();
+        if (!decisionId || !answer) {
+          return { exitCode: 1, stderr: "Usage: bb ultragoal decide <decision_id> <answer> [--thread <id>]" };
+        }
+        const resolved = decisions.resolve(threadId, decisionId, "answered", answer);
+        if (!resolved) return { exitCode: 1, stderr: `Decision not found: ${decisionId}` };
+        markGoalEvent(threadId);
+        const goal = store.get(threadId);
+        if (goal) {
+          publish(threadId, view(goal));
+          await sendSteering(
+            threadId,
+            `OWNER DECISION ANSWERED (${resolved.id}): "${resolved.question}" -> ${answer}. Act on this now and resolve any dependent work.`,
+            (await threadIsRunning(bb, threadId)) ? "auto" : "start",
+          );
+        }
+        return { exitCode: 0, stdout: `Decision ${resolved.id} answered: ${answer}` };
+      }
+
       if (action === "workers") {
         const parsed = Number.parseInt(objective ?? "", 10);
         if (!Number.isFinite(parsed) || parsed < 0 || parsed > 16) {
@@ -2303,6 +2420,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
 
       items.clear(threadId);
       findings.clear(threadId);
+      decisions.clear(threadId);
       store.clear(threadId);
       publish(threadId, null);
       return { exitCode: 0, stdout: "UltraGoal cleared." };
@@ -2317,6 +2435,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       { name: "set", summary: "Set or replace the UltraGoal", usage: "bb ultragoal set <objective> [--thread <id>]" },
       { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
       { name: "workers", summary: "Set the goal's concurrent worker slots", usage: "bb ultragoal workers <0-16> [--thread <id>]" },
+      { name: "decide", summary: "Answer an open owner decision", usage: "bb ultragoal decide <decision_id> <answer> [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -2365,7 +2484,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide";
   threadId: string | undefined;
   objective?: string;
   error?: string;
@@ -2386,7 +2505,7 @@ function parseCli(
   if (!action || action === "status") {
     return { action: "status", threadId };
   }
-  if (action === "set" || action === "edit" || action === "workers") {
+  if (action === "set" || action === "edit" || action === "workers" || action === "decide") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
   if (action === "pane" || action === "pause" || action === "resume" || action === "clear") {
