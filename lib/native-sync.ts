@@ -156,10 +156,15 @@ export async function listLiveNativeTasks(
         continue;
       }
       const call = toolCallOf(row);
-      if (!call || !isNativeTaskTool(call.tool)) continue;
+      if (!call) continue;
       if (row.type === "item/started") {
-        scan.open.set(call.id, { seq, at: createdAtOf(row), tool: call.tool });
+        if (isNativeTaskTool(call.tool)) {
+          scan.open.set(call.id, { seq, at: createdAtOf(row), tool: call.tool });
+        }
       } else {
+        // Completion may carry a rewritten tool name (OpenCode retitles the
+        // task call with the subagent's title), so match by id only —
+        // filtering by tool here left every completed task dangling open.
         scan.open.delete(call.id);
       }
     }

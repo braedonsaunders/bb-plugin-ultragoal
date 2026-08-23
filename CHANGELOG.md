@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.11
+
+Now is verified against the provider's own subagent lifecycle, and stalls get healed instead of displayed:
+
+- Task calls pair to OpenCode's part state by call id (bb's toolCall id equals OpenCode's callID), making the provider store the liveness authority. This kills two phantom-row bugs: OpenCode rewrites the tool name on completion (so bb-side scans left every finished task dangling open), and killed subagents never emit a completion at all. Running task rows are titled from the call's own description.
+- Completed task reports are harvested: a finished subagent's final report (returned to the parent task call) closes its slice when it says done, instead of waiting minutes for the orchestrator's todo list to catch up while it is blocked inside the next task call.
+- Stalled workers are nudged: a worker that goes idle holding an open slice without reporting gets a direct follow-up to resume, finish, and report.
+- Abandoned slices are rescued: when a slice's worker died and the root turn is blocked on open task calls (so the orchestrator cannot re-staff), UltraGoal spawns a rescue worker through the same machinery as spawn_agent, with error cleanup and retry cooldown. When the root is free, staffing stays with the orchestrator.
+- Fuzzy title-to-item linking: provider-paraphrased task titles ("Wave 2c hunt: org-scoping sweep") link to their plan items by token overlap, so a running slice cannot also sit in Up next.
+- "Orchestrator" attribution only applies while the root turn runs free; a root blocked on task calls is not hand-working other slices. A slice with a known holder is never attributed to the orchestrator.
+- OpenCode token accounting sums the whole session tree — task subagents run as child sessions whose usage was previously invisible.
+- New debug command: `bb ultragoal pane` dumps the exact sidebar projection as JSON.
+
 ## 0.4.10
 
 - Live native subagents are named from the provider's own lifecycle store. OpenCode records every task subagent as a child session (with its real title) in opencode.db the moment it starts, so running task rows now show that title instead of an anonymous "Subagent task" — even when bb never materializes a thread for the subagent. A named row whose title matches an open plan item links to it, so the same slice can't render twice.

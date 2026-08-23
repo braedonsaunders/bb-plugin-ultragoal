@@ -15,7 +15,7 @@ bb plugin install ultragoal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.4.10'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.4.11'
 ```
 
 Or from a local checkout:

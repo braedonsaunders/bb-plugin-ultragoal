@@ -7,7 +7,14 @@ import {
   sessionIdForThread,
   threadIsRunning,
 } from "./lib/accounting.js";
-import { listOpenCodeChildren, type NativeChildSession } from "./lib/provider-children.js";
+import {
+  getOpenCodeTaskCalls,
+  listOpenCodeChildren,
+  listOpenCodeTaskResults,
+  sessionIsLive,
+  type NativeChildSession,
+  type NativeTaskCall,
+} from "./lib/provider-children.js";
 import { usesNativeGoal } from "./lib/continue.js";
 import {
   budgetLimitPrompt,
@@ -208,6 +215,8 @@ export default function plugin(bb: BbPluginApi) {
   const store = createGoalStore(bb);
   const items = createItemStore(bb);
   const agentCache = new Map<string, GoalAgent[]>();
+  /** Open native task calls per root, from the last fresh scan. */
+  const liveTaskCounts = new Map<string, number>();
   const inflight = new Set<string>();
   const running = new Map<string, boolean>();
   let publishFresh: (threadId: string) => Promise<void> = async () => {};
@@ -341,12 +350,17 @@ export default function plugin(bb: BbPluginApi) {
 
   function view(goal: StoredGoal): GoalSnapshot {
     const agents = withWorkTitles(goal.threadId, agentCache.get(goal.threadId) ?? []);
+    // "Orchestrator is working this slice itself" only holds when the root
+    // turn runs free. While native task calls are open the root is blocked
+    // awaiting subagents, not hand-working other in-progress slices.
+    const rootWorkingInline =
+      running.get(goal.threadId) === true && (liveTaskCounts.get(goal.threadId) ?? 0) === 0;
     return snapshotOf(
       goal,
       items,
       goalIsBusy(goal.threadId, agents),
       agents,
-      running.get(goal.threadId) === true,
+      rootWorkingInline,
     );
   }
 
@@ -448,31 +462,60 @@ export default function plugin(bb: BbPluginApi) {
   // matches its title exactly, so the same slice cannot render twice.
   const CHILD_SESSION_PAIRING_MS = 3 * 60_000;
 
-  function normalizedTitle(text: string): string {
-    return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  function titleTokens(text: string): Set<string> {
+    return new Set(
+      text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .split(" ")
+        .filter((token) => token.length > 1),
+    );
   }
 
+  // Providers paraphrase slice titles ("Wave 2c hunt: org-scoping sweep" for
+  // the plan's "Wave 2c+: org-scoping sweep of API/lib queries…"), so exact
+  // matching misses. Link when nearly all of the title's tokens appear in one
+  // item's step and no other open item comes close.
   function itemIdMatchingTitle(threadId: string, title: string): string | null {
-    const normalized = normalizedTitle(title);
-    if (normalized.length < 12) return null;
+    const want = titleTokens(title);
+    if (want.size < 3) return null;
+    let bestId: string | null = null;
+    let bestScore = 0;
+    let runnerUp = 0;
     for (const item of items.list(threadId)) {
       if (item.status === "completed") continue;
-      const step = normalizedTitle(item.step);
-      if (step.startsWith(normalized) || normalized.startsWith(step)) return item.id;
+      const have = titleTokens(item.step);
+      let hit = 0;
+      for (const token of want) if (have.has(token)) hit += 1;
+      const score = hit / want.size;
+      if (score > bestScore) {
+        runnerUp = bestScore;
+        bestScore = score;
+        bestId = item.id;
+      } else if (score > runnerUp) {
+        runnerUp = score;
+      }
     }
-    return null;
+    return bestScore >= 0.8 && runnerUp < 0.8 ? bestId : null;
   }
 
+  // The provider store is the liveness authority for task calls. bb's own
+  // completion events can carry a rewritten tool name (OpenCode retitles the
+  // call with the subagent's title) and killed subagents may never emit one,
+  // so calls are paired to the provider's part state by call id: a call whose
+  // part is no longer running/pending is a phantom, however open it looks in
+  // the event stream. Sessions (paired by start time) still contribute the
+  // agent type and a title fallback.
   function nativeTaskAgents(
     threadId: string,
     tasks: LiveNativeTask[],
     liveChildWorkers: number,
     childSessions: NativeChildSession[],
-  ): GoalAgent[] {
-    const surplus = Math.max(0, tasks.length - liveChildWorkers);
+    taskCalls: Map<string, NativeTaskCall>,
+  ): { agents: GoalAgent[]; aliveCalls: number } {
     const usedSessions = new Set<string>();
-    return tasks.slice(tasks.length - surplus).map((task, index) => {
-      let title: string | null = null;
+    const paired = tasks.map((task) => {
+      const call = taskCalls.get(task.key) ?? null;
       let bestDelta = CHILD_SESSION_PAIRING_MS;
       let best: NativeChildSession | null = null;
       for (const session of childSessions) {
@@ -483,14 +526,21 @@ export default function plugin(bb: BbPluginApi) {
           best = session;
         }
       }
-      if (best) {
-        usedSessions.add(best.id);
-        title = best.title;
-      }
+      if (best) usedSessions.add(best.id);
+      return { task, call, session: best };
+    });
+    const alive = paired.filter(({ call, session }) =>
+      call
+        ? call.status === "running" || call.status === "pending"
+        : !session || sessionIsLive(session),
+    );
+    const surplus = Math.max(0, alive.length - liveChildWorkers);
+    const agents = alive.slice(alive.length - surplus).map(({ task, call, session }, index) => {
+      const title = call?.description ?? session?.title ?? null;
       return {
         threadId,
         taskName: `task/${task.key}`,
-        nickname: `Subagent ${index + 1}`,
+        nickname: session?.agentType ?? `Subagent ${index + 1}`,
         title,
         itemId: title ? itemIdMatchingTitle(threadId, title) : null,
         role: "worker" as const,
@@ -498,6 +548,7 @@ export default function plugin(bb: BbPluginApi) {
         summary: null,
       };
     });
+    return { agents, aliveCalls: alive.length };
   }
 
   // Orchestrators sometimes declare assignments inside the plan itself
@@ -522,6 +573,143 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  // "Now" rows must be moving. An idle row is a stall, and the plugin heals
+  // stalls instead of just displaying them:
+  //   - A worker that went idle holding an open slice without reporting gets
+  //     a direct follow-up: resume, finish, report.
+  //   - A slice whose worker died with no thread left to nudge gets a rescue
+  //     worker — but only while the root turn is blocked on open native task
+  //     calls and cannot re-staff it itself. When the root is free, staffing
+  //     stays with the orchestrator (the continuation prompt demands it).
+  const STALL_NUDGE_AFTER_MS = 3 * 60_000;
+  const STALL_NUDGE_COOLDOWN_MS = 15 * 60_000;
+  const RESCUE_AFTER_MS = 10 * 60_000;
+  const RESCUE_RETRY_MS = 10 * 60_000;
+  const firstSeenIdle = new Map<string, number>();
+  const lastStallNudge = new Map<string, number>();
+  const rescuedItems = new Map<string, number>();
+  const healing = new Set<string>();
+
+  async function healStalls(rootThreadId: string): Promise<void> {
+    const goal = store.get(rootThreadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    if (healing.has(rootThreadId)) return;
+    healing.add(rootThreadId);
+    try {
+      const agents = agentCache.get(rootThreadId) ?? [];
+      const now = Date.now();
+
+      // Harvest first: a task call that completed handed the subagent's final
+      // report back to the parent. If that report says the slice is done,
+      // close it here — the orchestrator's todo list often lags many minutes
+      // behind while it is blocked inside the next task call.
+      const rootSessionId = await sessionIdForThread(bb, rootThreadId);
+      let harvested = false;
+      if (rootSessionId && rootSessionId.startsWith("ses_")) {
+        const sessions = listOpenCodeChildren(rootSessionId);
+        const results = new Map(
+          listOpenCodeTaskResults(rootSessionId).map((result) => [result.sessionId, result]),
+        );
+        const liveHeld = new Set(
+          agents
+            .filter(
+              (agent) =>
+                agent.role !== "verifier" &&
+                (agent.status === "running" || agent.status === "starting"),
+            )
+            .map((agent) => agent.itemId),
+        );
+        for (const session of sessions) {
+          if (sessionIsLive(session)) continue;
+          const result = results.get(session.id);
+          if (!result) continue;
+          const itemId = itemIdMatchingTitle(rootThreadId, session.title);
+          if (!itemId || liveHeld.has(itemId)) continue;
+          if (completeItemFor(rootThreadId, itemId, result.output)) {
+            bb.log.info(
+              `Harvested done report for slice ${itemId} from native session ${session.id} on ${rootThreadId}`,
+            );
+            harvested = true;
+          }
+        }
+      }
+      if (harvested) publish(rootThreadId, view(store.get(rootThreadId) ?? goal));
+
+      const openItems = items
+        .list(rootThreadId)
+        .filter((item) => item.status === "in_progress");
+
+      for (const agent of agents) {
+        if (agent.role !== "worker" || agent.threadId === rootThreadId) continue;
+        if (agent.status !== "idle") {
+          firstSeenIdle.delete(agent.threadId);
+          continue;
+        }
+        if (!agent.itemId || !openItems.some((item) => item.id === agent.itemId)) continue;
+        const since = firstSeenIdle.get(agent.threadId);
+        if (since == null) {
+          firstSeenIdle.set(agent.threadId, now);
+          continue;
+        }
+        if (now - since < STALL_NUDGE_AFTER_MS) continue;
+        if (now - (lastStallNudge.get(agent.threadId) ?? 0) < STALL_NUDGE_COOLDOWN_MS) continue;
+        lastStallNudge.set(agent.threadId, now);
+        try {
+          await bb.sdk.threads.send({
+            threadId: agent.threadId,
+            mode: "auto",
+            permissionMode: "full",
+            input: [
+              {
+                type: "text",
+                text: "Your turn ended but your slice is still open and you have not reported. Resume and finish the slice now. When it is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <one-sentence evidence>. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
+                mentions: [],
+              },
+            ],
+          });
+          bb.log.info(`Nudged stalled worker ${agent.nickname} (${agent.threadId}) on ${rootThreadId}`);
+        } catch (error) {
+          bb.log.warn(
+            `Could not nudge stalled worker ${agent.threadId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+
+      if ((liveTaskCounts.get(rootThreadId) ?? 0) === 0) return;
+      for (const item of openItems) {
+        const holder = agents.find(
+          (agent) => agent.role !== "verifier" && agent.itemId === item.id,
+        );
+        if (holder && holder.status !== "error") continue;
+        if (holder) collab.forget(holder.threadId);
+        const lastTry = rescuedItems.get(item.id);
+        if (lastTry != null && now - lastTry < RESCUE_RETRY_MS) continue;
+        const updatedAt = items.updatedAt(rootThreadId, item.id);
+        if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
+        rescuedItems.set(item.id, now);
+        const result = await collab.spawnWorker({
+          parentThreadId: rootThreadId,
+          itemId: item.id,
+          message: [
+            `SLICE (item_id=${item.id}): ${item.step}`,
+            "The previous worker on this slice died mid-work and the orchestrator is busy. Pick the slice up from the current worktree state and finish it.",
+          ].join("\n\n"),
+        });
+        if ("error" in result) {
+          bb.log.warn(`Could not rescue slice ${item.id} on ${rootThreadId}: ${result.error}`);
+        } else {
+          bb.log.info(
+            `Rescued abandoned slice ${item.id} on ${rootThreadId} with ${result.nickname} (${result.threadId})`,
+          );
+        }
+      }
+    } finally {
+      healing.delete(rootThreadId);
+    }
+  }
+
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
     try {
       const [listed, liveTasks, sessionId] = await Promise.all([
@@ -535,6 +723,10 @@ export default function plugin(bb: BbPluginApi) {
       ]);
       const childSessions =
         liveTasks.length > 0 && sessionId ? listOpenCodeChildren(sessionId) : [];
+      const taskCalls =
+        liveTasks.length > 0 && sessionId
+          ? getOpenCodeTaskCalls(sessionId)
+          : new Map<string, NativeTaskCall>();
       await syncNativePlan(goal.threadId);
       const assigned = assignLiveAgents(goal.threadId, listed);
       applyDeclaredWorkers(goal.threadId, assigned);
@@ -554,10 +746,16 @@ export default function plugin(bb: BbPluginApi) {
           agent.threadId !== goal.threadId &&
           (agent.status === "running" || agent.status === "starting"),
       ).length;
-      agentCache.set(goal.threadId, [
-        ...assigned,
-        ...nativeTaskAgents(goal.threadId, liveTasks, liveChildWorkers, childSessions),
-      ]);
+      const native = nativeTaskAgents(
+        goal.threadId,
+        liveTasks,
+        liveChildWorkers,
+        childSessions,
+        taskCalls,
+      );
+      liveTaskCounts.set(goal.threadId, native.aliveCalls);
+      agentCache.set(goal.threadId, [...assigned, ...native.agents]);
+      void healStalls(goal.threadId);
     } catch (error) {
       bb.log.warn(
         `Could not list Goal agents on ${goal.threadId}: ${
@@ -611,7 +809,7 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   const DONE_SIGNAL =
-    /\b(is done|done\.|shipped|completed|complete\.|landed|implemented|fixed and verified|verify_pass)\b/i;
+    /\b(is done|done\.|shipped|completed|complete\.|landed|implemented|fixed and verified|verify_pass|committed|commits)\b/i;
   const BLOCK_SIGNAL = /\b(blocked|failed|cannot|can't|unable|verify_fail|not done)\b/i;
 
   function reportSaysDone(text: string | null | undefined): boolean {
@@ -1612,6 +1810,21 @@ Keep the plan current as steps complete or the next best action changes. When a 
         };
       }
 
+      if (action === "pane") {
+        // Debug window: the exact projection the sidebar renders, fresh.
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const snap = await viewFresh(goal);
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(
+            { now: snap.now, next: snap.next, agents: snap.agents, tokens: snap.tokensUsed },
+            null,
+            2,
+          ),
+        };
+      }
+
       if (action === "set") {
         if (!objective) return { exitCode: 1, stderr: "Usage: bb ultragoal set <objective>" };
         const result = await userSetGoal(threadId, objective);
@@ -1668,6 +1881,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     summary: "Set, inspect, pause, resume, or clear a durable UltraGoal",
     commands: [
       { name: "status", summary: "Show the UltraGoal on a thread", usage: "bb ultragoal [status] [--thread <id>]" },
+      { name: "pane", summary: "Dump the sidebar projection as JSON", usage: "bb ultragoal pane [--thread <id>]" },
       { name: "set", summary: "Set or replace the UltraGoal", usage: "bb ultragoal set <objective> [--thread <id>]" },
       { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
@@ -1718,7 +1932,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "set" | "edit" | "pause" | "resume" | "clear";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear";
   threadId: string | undefined;
   objective?: string;
   error?: string;
@@ -1742,7 +1956,7 @@ function parseCli(
   if (action === "set" || action === "edit") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
-  if (action === "pause" || action === "resume" || action === "clear") {
+  if (action === "pane" || action === "pause" || action === "resume" || action === "clear") {
     return { action, threadId };
   }
   return { action: "status", threadId, error: `Unknown goal command: ${action}` };

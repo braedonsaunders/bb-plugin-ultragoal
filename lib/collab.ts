@@ -451,6 +451,119 @@ export function createCollabStore(
     return agents.sort((a, b) => rank[a.status] - rank[b.status] || a.nickname.localeCompare(b.nickname));
   }
 
+  // The one spawn path, shared by the spawn_agent tool and the plugin's own
+  // recovery staffing.
+  async function spawnAgent(args: {
+    threadId: string;
+    projectId: string | undefined;
+    task_name: string;
+    display_name?: string;
+    item_id?: string;
+    role?: "worker" | "verifier";
+    message: string;
+    fork_turns?: string;
+    model?: string;
+  }): Promise<
+    | { threadId: string; taskName: string; nickname: string; itemId: string | null }
+    | { error: string }
+  > {
+    const { threadId, task_name, display_name, item_id, role, fork_turns, model } = args;
+    const trimmed = args.message.trim();
+    if (!trimmed) return { error: "Empty message can't be sent to an agent" };
+    const parent = await bb.sdk.threads.get({ threadId });
+    const parentPath = canonicalName(threadId);
+    const usedNames = (byRoot.all(rootId(threadId)) as CollabRow[])
+      .map((row) => row.display_name)
+      .filter((name): name is string => Boolean(name));
+    const displayName = (display_name?.trim() || nextHumorousName(usedNames)).slice(0, 64);
+    const slug = /^[a-z0-9_]+$/.test(task_name) ? task_name : slugFromName(displayName);
+    const taskName = `${parentPath === "/root" ? "/root" : parentPath}/${slug}`;
+    const rootThreadId = rootId(threadId);
+    // Explicit item_id, exact text match, or a fresh item — never an
+    // arbitrary unassigned Next row (that repurposed unrelated slices).
+    const requested = item_id?.trim() || null;
+    const itemId =
+      role === "verifier"
+        ? requested
+        : hooks?.claimItem?.(rootThreadId, {
+            itemId: requested,
+            message: trimmed,
+            source: "tool",
+          }) ?? requested;
+    if (itemId && itemHasWorker(rootThreadId, itemId) && role !== "verifier") {
+      return {
+        error: `Slice ${itemId} already has a worker. Spawn again so UltraGoal can open a new Now row.`,
+      };
+    }
+    if (byName.get(rootId(threadId), taskName)) {
+      return { error: `An agent named ${taskName} already exists.` };
+    }
+    const prompt = [
+      trimmed,
+      `The new agent's canonical task name is ${taskName}.`,
+      `Your call sign is ${displayName}.`,
+      role === "verifier"
+        ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes."
+        : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
+      "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
+      role === "verifier"
+        ? ""
+        : "When the slice is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <one-sentence evidence>. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const spawnArgs = {
+      projectId: parent.projectId ?? args.projectId,
+      parentThreadId: threadId,
+      providerId: parent.providerId,
+      model: model ?? undefined,
+      permissionMode: "full" as const,
+      environment: parent.environmentId
+        ? { type: "reuse" as const, environmentId: parent.environmentId }
+        : { type: "project-default" as const },
+      prompt,
+      title: shortSliceTitle(trimmed) || displayName,
+      visibility: "hidden" as const,
+      origin: "plugin" as const,
+    };
+    const child =
+      fork_turns === "none"
+        ? await bb.sdk.threads.spawn(spawnArgs)
+        : await bb.sdk.threads
+            .fork({
+              sourceThreadId: threadId,
+              input: [{ type: "text", text: prompt, mentions: [] }],
+              title: shortSliceTitle(trimmed) || displayName,
+              permissionMode: "full",
+              visibility: "hidden",
+              workspace: "reuse",
+              // Plugin-origin children skip bb's parent "needs help"
+              // notifications; UltraGoal handles its own crew.
+              origin: "plugin",
+            })
+            .catch(() => bb.sdk.threads.spawn(spawnArgs));
+    insert.run({
+      thread_id: child.id,
+      root_thread_id: rootId(threadId),
+      parent_thread_id: threadId,
+      task_name: taskName,
+      created_at: Date.now(),
+      display_name: displayName,
+      item_id: itemId,
+      role: role === "verifier" ? "verifier" : "worker",
+      source_thread_id: null,
+      last_verify_hash: null,
+    });
+    try {
+      await applyWorkTitle(child.id, trimmed);
+    } catch {
+      // Title from spawn/fork is enough if update is unavailable.
+    }
+    if (itemId) hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
+    hooks?.onChange?.(rootThreadId);
+    return { threadId: child.id, taskName, nickname: displayName, itemId };
+  }
+
   return {
     rootId,
     rowOf,
@@ -558,6 +671,27 @@ export function createCollabStore(
       return { threadId: child.id, nickname: displayName };
     },
 
+    // Programmatic spawn with the exact same machinery as the spawn_agent
+    // tool, for the plugin's own recovery staffing (rescuing a slice whose
+    // worker died while the root turn is blocked and cannot re-staff it).
+    async spawnWorker(args: {
+      parentThreadId: string;
+      itemId: string | null;
+      displayName?: string;
+      message: string;
+    }): Promise<{ threadId: string; taskName: string; nickname: string } | { error: string }> {
+      const result = await spawnAgent({
+        threadId: args.parentThreadId,
+        projectId: undefined,
+        task_name: `${slugFromName(args.displayName ?? "rescue")}_${Date.now().toString(36)}`,
+        display_name: args.displayName,
+        item_id: args.itemId ?? undefined,
+        role: "worker",
+        message: args.message,
+      });
+      return result;
+    },
+
     registerTools() {
       bb.agents.registerTool({
         name: "spawn_agent",
@@ -605,115 +739,29 @@ export function createCollabStore(
           { task_name, display_name, item_id, role, message, fork_turns, model },
           { threadId, projectId },
         ) {
-          const trimmed = message.trim();
-          if (!trimmed) {
-            return { content: [{ type: "text", text: "Empty message can't be sent to an agent" }], isError: true };
-          }
-          const parent = await bb.sdk.threads.get({ threadId });
-          const parentPath = canonicalName(threadId);
-          const usedNames = (byRoot.all(rootId(threadId)) as CollabRow[])
-            .map((row) => row.display_name)
-            .filter((name): name is string => Boolean(name));
-          const displayName = (display_name?.trim() || nextHumorousName(usedNames)).slice(0, 64);
-          const slug = /^[a-z0-9_]+$/.test(task_name) ? task_name : slugFromName(displayName);
-          const taskName = `${parentPath === "/root" ? "/root" : parentPath}/${slug}`;
-          const rootThreadId = rootId(threadId);
-          // Explicit item_id, exact text match, or a fresh item — never an
-          // arbitrary unassigned Next row (that repurposed unrelated slices).
-          const requested = item_id?.trim() || null;
-          const itemId =
-            role === "verifier"
-              ? requested
-              : hooks?.claimItem?.(rootThreadId, {
-                  itemId: requested,
-                  message: trimmed,
-                  source: "tool",
-                }) ?? requested;
-          if (itemId && itemHasWorker(rootThreadId, itemId) && role !== "verifier") {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Slice ${itemId} already has a worker. Spawn again so UltraGoal can open a new Now row.`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          if (byName.get(rootId(threadId), taskName)) {
-            return {
-              content: [{ type: "text", text: `An agent named ${taskName} already exists.` }],
-              isError: true,
-            };
-          }
-          const prompt = [
-            trimmed,
-            `The new agent's canonical task name is ${taskName}.`,
-            `Your call sign is ${displayName}.`,
-            role === "verifier"
-              ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes."
-              : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
-            "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
-            role === "verifier"
-              ? ""
-              : "When the slice is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <one-sentence evidence>. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
-          ]
-            .filter(Boolean)
-            .join("\n\n");
-          const spawnArgs = {
-            projectId: parent.projectId ?? projectId,
-            parentThreadId: threadId,
-            providerId: parent.providerId,
-            model: model ?? undefined,
-            permissionMode: "full" as const,
-            environment: parent.environmentId
-              ? { type: "reuse" as const, environmentId: parent.environmentId }
-              : { type: "project-default" as const },
-            prompt,
-            title: shortSliceTitle(trimmed) || displayName,
-            visibility: "hidden" as const,
-            origin: "plugin" as const,
-          };
-          const child =
-            fork_turns === "none"
-              ? await bb.sdk.threads.spawn(spawnArgs)
-              : await bb.sdk.threads
-                  .fork({
-                    sourceThreadId: threadId,
-                    input: [{ type: "text", text: prompt, mentions: [] }],
-                    title: shortSliceTitle(trimmed) || displayName,
-                    permissionMode: "full",
-                    visibility: "hidden",
-                    workspace: "reuse",
-                    // Plugin-origin children skip bb's parent "needs help"
-                    // notifications; UltraGoal handles its own crew.
-                    origin: "plugin",
-                  })
-                  .catch(() => bb.sdk.threads.spawn(spawnArgs));
-          insert.run({
-            thread_id: child.id,
-            root_thread_id: rootId(threadId),
-            parent_thread_id: threadId,
-            task_name: taskName,
-            created_at: Date.now(),
-            display_name: displayName,
-            item_id: itemId,
-            role: role === "verifier" ? "verifier" : "worker",
-            source_thread_id: null,
-            last_verify_hash: null,
+          const result = await spawnAgent({
+            threadId,
+            projectId,
+            task_name,
+            display_name,
+            item_id,
+            role,
+            message,
+            fork_turns,
+            model,
           });
-          try {
-            await applyWorkTitle(child.id, trimmed);
-          } catch {
-            // Title from spawn/fork is enough if update is unavailable.
+          if ("error" in result) {
+            return { content: [{ type: "text", text: result.error }], isError: true };
           }
-          if (itemId) hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
-          hooks?.onChange?.(rootThreadId);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ task_name: taskName, nickname: displayName, item_id: itemId }),
+                text: JSON.stringify({
+                  task_name: result.taskName,
+                  nickname: result.nickname,
+                  item_id: result.itemId,
+                }),
               },
             ],
           };

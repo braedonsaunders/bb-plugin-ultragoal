@@ -28,8 +28,15 @@ function readOpenCodeTokens(sessionId: string): number | null {
   const db = openSqlite(join(homedir(), ".local/share/opencode/opencode.db"));
   if (!db) return null;
   try {
+    // Task subagents run as child sessions with their own message rows, so a
+    // goal's usage is the whole session tree, not just the root session.
     const rows = db.all<{ total: number | null }>(
-      `SELECT SUM(
+      `WITH RECURSIVE tree(id) AS (
+         SELECT ?
+         UNION ALL
+         SELECT s.id FROM session s JOIN tree ON s.parent_id = tree.id
+       )
+       SELECT SUM(
          COALESCE(json_extract(data, '$.tokens.input'), 0) +
          COALESCE(json_extract(data, '$.tokens.output'), 0) +
          COALESCE(json_extract(data, '$.tokens.reasoning'), 0) +
@@ -37,7 +44,8 @@ function readOpenCodeTokens(sessionId: string): number | null {
          COALESCE(json_extract(data, '$.tokens.cache.write'), 0)
        ) AS total
        FROM message
-       WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'`,
+       WHERE session_id IN (SELECT id FROM tree)
+         AND json_extract(data, '$.role') = 'assistant'`,
       sessionId,
     );
     const total = rows[0]?.total;

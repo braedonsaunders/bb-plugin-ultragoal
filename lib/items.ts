@@ -54,6 +54,11 @@ export function createItemStore(bb: BbPluginApi) {
       return (listStmt.all(threadId) as ItemRow[]).map(rowToItem);
     },
 
+    updatedAt(threadId: string, itemId: string): number | null {
+      const row = (listStmt.all(threadId) as ItemRow[]).find((entry) => entry.id === itemId);
+      return row?.updated_at ?? null;
+    },
+
     clear(threadId: string): void {
       clearStmt.run(threadId);
     },
