@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+Two live-monitoring findings become architecture — completed work integrates itself, and the orchestrator stops busy-polling:
+
+- **The Refinery.** Completed ≠ integrated: verified slices were stranding in worker worktree branches while local main and the remote stayed stale. Every slice completion (ULTRAGOAL_DONE, or VERIFY_PASS when verification is on) now squash-merges its worker's managed worktree into the base branch through a per-goal serial queue — one merge at a time; merge conflicts escalate to the orchestrator with the branch named. Pushing the remote remains the orchestrator's job.
+- **Event-gated continuation.** The root was re-prompted on every idle, so a goal correctly waiting on one long slice degenerated into a 20-30s poll loop ("HEAD unchanged…" ~50 times). The root now gets a turn only when something it must act on happened — slice completed, finding reported, worker blocked/failed, verification cap reached — or on the progress heartbeat. Waiting on live workers is the scheduler's business.
+
 ## 0.8.4
 
 - Stall-nudge state is durable (last_nudge_at / nudge_count on the worker row): the cooldown lived in in-memory maps that reset on every plugin reload, which turned "at most one nudge per 15 minutes" into a nudge per release during rapid shipping — one worker collected 11 identical resumes.

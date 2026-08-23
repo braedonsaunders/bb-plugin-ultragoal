@@ -756,6 +756,66 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  // The Refinery (docs/architecture-research.md): completed ≠ integrated.
+  // Every completed slice whose worker ran in a managed worktree is
+  // squash-merged into the base branch, one merge at a time per goal;
+  // conflicts escalate to the orchestrator. Pushing the remote stays the
+  // orchestrator's job.
+  const integrating = new Map<string, Promise<void>>();
+
+  // Event-gated continuation: the root gets a turn when something it must act
+  // on happened (completion, finding, blocked worker, failure) or the
+  // progress heartbeat is due — never as a busy-poll loop while it waits on
+  // live workers.
+  const lastGoalEvent = new Map<string, number>();
+  function markGoalEvent(rootThreadId: string): void {
+    lastGoalEvent.set(rootThreadId, Date.now());
+  }
+
+  function queueIntegration(rootThreadId: string, workerThreadId: string, itemId: string | null): void {
+    if (!itemId) return;
+    const prev = integrating.get(rootThreadId) ?? Promise.resolve();
+    const next = prev
+      .then(() => integrateWorker(rootThreadId, workerThreadId, itemId))
+      .catch(() => {});
+    integrating.set(rootThreadId, next);
+  }
+
+  async function integrateWorker(
+    rootThreadId: string,
+    workerThreadId: string,
+    itemId: string,
+  ): Promise<void> {
+    try {
+      const worker = await bb.sdk.threads.get({ threadId: workerThreadId });
+      if (!worker.environmentId) return;
+      const environment = await bb.sdk.environments.get({ environmentId: worker.environmentId });
+      if (!environment.isWorktree || !environment.managed) return;
+      const base =
+        environment.mergeBaseBranch ?? environment.defaultBranch ?? environment.baseBranch;
+      if (!base) return;
+      await bb.sdk.environments.squashMerge({
+        environmentId: worker.environmentId,
+        mergeBaseBranch: base,
+      });
+      bb.log.info(
+        `Integrated slice ${itemId}: squash-merged ${environment.branchName ?? worker.environmentId} into ${base} on ${rootThreadId}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/no changes|nothing to (merge|commit)|up.to.date|already/i.test(message)) {
+        bb.log.info(`Integration skipped for slice ${itemId} on ${rootThreadId}: ${message}`);
+        return;
+      }
+      bb.log.warn(`Integration failed for slice ${itemId} (${workerThreadId}) on ${rootThreadId}: ${message}`);
+      await sendSteering(
+        rootThreadId,
+        `INTEGRATION CONFLICT: completed slice ${itemId} (worker ${workerThreadId}) could not be squash-merged into the default branch automatically: ${message}. Merge that worker's branch manually (rebase-train: merge, run gates, push) before anything else — a completed slice that is not on the default branch does not exist.`,
+        "auto",
+      );
+    }
+  }
+
   const MAX_VERIFY_FAILS = 3;
   const MAX_STALL_NUDGES = 3;
   const STALL_NUDGE_AFTER_MS = 3 * 60_000;
@@ -971,6 +1031,7 @@ export default function plugin(bb: BbPluginApi) {
       if (view(goal).settings.verifyEnabled) return false;
       // The injected report contract is the only completion signal.
       const contract = structuredReport(report);
+      if (contract === "blocked") markGoalEvent(rootThreadId);
       if (contract !== "done") return false;
     }
     const item = items
@@ -978,6 +1039,7 @@ export default function plugin(bb: BbPluginApi) {
       .find((row) => row.id === itemId && row.status === "in_progress");
     if (!item) return false;
     items.setStatus(rootThreadId, itemId, "completed");
+    markGoalEvent(rootThreadId);
     const closed = findings.markFixedByItem(
       rootThreadId,
       itemId,
@@ -1011,7 +1073,10 @@ export default function plugin(bb: BbPluginApi) {
       reconciledReports.add(key);
       try {
         const output = (await bb.sdk.threads.output({ threadId: agent.threadId })).output ?? null;
-        if (completeItemFor(rootThreadId, agent.itemId, output)) changed = true;
+        if (completeItemFor(rootThreadId, agent.itemId, output)) {
+          queueIntegration(rootThreadId, agent.threadId, agent.itemId);
+          changed = true;
+        }
       } catch {
         // Unreadable worker output leaves the slice open for the orchestrator.
       }
@@ -1395,6 +1460,16 @@ export default function plugin(bb: BbPluginApi) {
     const latestGoal = store.get(threadId) ?? goal;
     const snap = await viewFresh(latestGoal);
     const due = !isBudgetExhausted(snap) && progressIsDue(latestGoal, snap.settings.progressUpdateMinutes);
+    // Nothing new since the root's last turn and no heartbeat due: the root
+    // has no job — waiting on live workers is the scheduler's business, not a
+    // reason to burn a polling turn every idle.
+    if (!due && latestGoal.lastContinueAt != null) {
+      const lastEvent = lastGoalEvent.get(threadId) ?? 0;
+      if (lastEvent <= latestGoal.lastContinueAt) {
+        bb.log.info(`Goal continue skipped on ${threadId}: no new events; next turn on event or heartbeat`);
+        return;
+      }
+    }
     const text = isBudgetExhausted(snap)
       ? budgetLimitPrompt(snap)
       : due
@@ -1797,11 +1872,13 @@ Keep the plan current as steps complete or the next best action changes. When a 
         },
       );
       if (fixItem) findings.linkItem(rootThreadId, result.finding.id, fixItem.id);
+      markGoalEvent(rootThreadId);
       bb.log.info(
         `Finding ${result.finding.id} reported on ${rootThreadId}${fixItem ? ` -> fix slice ${fixItem.id}` : ""}`,
       );
       void publishFresh(rootThreadId);
       void scheduleReady(rootThreadId);
+      void nudgeRoot(rootThreadId);
       return {
         content: [
           {
@@ -1991,7 +2068,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
     }
     if (parentRoot && parentRoot !== thread.id && !pendingInteraction) {
       if (child.role !== "verifier") {
-        completeItemFor(parentRoot, child.item_id, lastAssistantText);
+        if (completeItemFor(parentRoot, child.item_id, lastAssistantText)) {
+          queueIntegration(parentRoot, thread.id, child.item_id);
+        }
         await maybeVerifyWorker(thread.id);
       } else {
         const sourceItemId = child.source_thread_id
@@ -2000,6 +2079,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
         const passed = completeItemFor(parentRoot, sourceItemId, lastAssistantText, {
           requirePass: true,
         });
+        if (passed && child.source_thread_id) {
+          queueIntegration(parentRoot, child.source_thread_id, sourceItemId);
+        }
         // A failed verdict goes back to the worker WITH the findings — a
         // blind resume just repeats the same mistake. Three failed cycles
         // hand the slice to the orchestrator instead of looping forever.
@@ -2038,6 +2120,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
               );
             }
           } else {
+            markGoalEvent(parentRoot);
             bb.log.warn(
               `Slice held by ${child.source_thread_id} failed verification ${fails}x on ${parentRoot}; leaving it to the orchestrator`,
             );
@@ -2100,6 +2183,10 @@ Keep the plan current as steps complete or the next best action changes. When a 
 
   bb.events.on("thread.failed", async ({ thread, error }) => {
     running.set(thread.id, false);
+    const failedChild = collab.rowOf(thread.id);
+    if (failedChild && failedChild.root_thread_id !== thread.id) {
+      markGoalEvent(failedChild.root_thread_id);
+    }
     if (usesNativeGoal(thread.providerId)) return;
     const goal = store.get(thread.id);
     if (!goal || !isUnfinished(goal.status)) return;
