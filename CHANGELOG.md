@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4
+
+- One agent = one slice, permanently. Workers are never reused across slices: followup_task no longer reassigns work, refuses retired workers whose slice is completed, and the orchestrator is instructed to spawn a fresh agent per slice. Thread reuse was why Now rows opened onto chats full of unrelated finished slices.
+- Live native Task calls are no longer guess-paired onto plan items; they render as their own honest rows instead of borrowing a stale title and an idle named lead.
+- A live agent always fronts its Now row; an idle named worker can no longer be shown as the lead of someone else's running work.
+
 ## 0.3.3
 
 - Now is strictly the live list: one row per running subagent, titled by its slice. Open slices without a running worker move to Next until a worker picks them up.

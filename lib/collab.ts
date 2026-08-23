@@ -13,6 +13,7 @@ const SPAWN_AGENT_DESCRIPTION = `
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 This is the default way UltraGoal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
+ONE AGENT = ONE SLICE, ALWAYS. Spawn a fresh agent for every slice and let it die when the slice is done. Never send a finished worker a new slice — retired workers refuse follow-ups, and thread reuse is what breaks the live Now view.
 Give every worker a short humorous display_name (for example "Sir Syncs-a-Lot") and pass item_id from get_goal when that slice is still open and unassigned. If the slice is taken or finished, UltraGoal opens a new Now row from your message. Prefer this over the native Task tool — native Task subagents are tracked in Now automatically but cannot be messaged or verified.
 When verification is on, a separate verifier is launched after each worker returns. Do not mark that slice complete until the verifier reports VERIFY_PASS.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
@@ -81,6 +82,8 @@ export function createCollabStore(
       rootThreadId: string,
       args: { itemId: string | null; message: string; workerThreadId?: string },
     ) => string | null;
+    /** Status of a plan item, so retired workers can refuse new slices. */
+    itemStatus?: (rootThreadId: string, itemId: string) => string | null;
   },
 ) {
   const db = bb.storage.database();
@@ -724,7 +727,7 @@ export function createCollabStore(
       bb.agents.registerTool({
         name: "followup_task",
         description:
-          "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+          "Steer an existing agent about the ONE slice it was spawned for (clarify, unblock, course-correct). One agent = one slice: a worker whose slice is finished is retired and cannot take new work — spawn a fresh agent with spawn_agent instead.",
         experimental_statusLabels: { pending: "Sending follow-up", completed: "Sent follow-up" },
         parameters: z.object({
           target: z
@@ -748,28 +751,29 @@ export function createCollabStore(
           if (!agent) {
             return { content: [{ type: "text", text: `Agent not found: ${target}` }], isError: true };
           }
+          const rootThreadId = rootId(threadId);
+          // One thread = one slice. A worker whose slice is done is retired;
+          // reusing it is what desynchronized Now from reality.
+          if (agent.item_id) {
+            const status = hooks?.itemStatus?.(rootThreadId, agent.item_id);
+            if (status === "completed") {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `${agent.task_name} is retired: its slice is completed. One agent = one slice. Spawn a fresh agent with spawn_agent for new work.`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+          }
           await bb.sdk.threads.send({
             threadId: agent.thread_id,
             mode: "auto",
             permissionMode: "full",
             input: [{ type: "text", text: trimmed }],
           });
-          const rootThreadId = rootId(threadId);
-          const itemId =
-            hooks?.claimItem?.(rootThreadId, {
-              itemId: agent.item_id,
-              message: trimmed,
-              workerThreadId: agent.thread_id,
-            }) ?? agent.item_id;
-          if (itemId && itemId !== agent.item_id) {
-            setMeta.run({
-              thread_id: agent.thread_id,
-              display_name: agent.display_name,
-              item_id: itemId,
-            });
-          } else if (itemId) {
-            hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
-          }
           hooks?.onChange?.(rootThreadId);
           return "";
         },

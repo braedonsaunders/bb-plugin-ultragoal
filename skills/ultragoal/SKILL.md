@@ -15,7 +15,7 @@ The root thread is the orchestrator. It does not implement the UltraGoal itself.
 
 1. Call `update_plan` with concrete remaining work.
 2. Mark independent slices `in_progress`.
-3. `spawn_agent` or `followup_task` one worker per in-progress slice (several in the same turn). Give each a humorous `display_name` (e.g. "Sir Syncs-a-Lot"). Prefer these over the native Task tool — native Task subagents appear in Now automatically but cannot be messaged, retitled, or verified.
+3. `spawn_agent` one FRESH worker per in-progress slice (several in the same turn). One agent = one slice, always: never send a finished worker a new slice — retired workers refuse follow-ups. `followup_task` is only for steering a worker about the slice it already owns. Give each worker a humorous `display_name` (e.g. "Sir Syncs-a-Lot"). Prefer these over the native Task tool — native Task subagents appear in Now automatically but cannot be messaged or verified.
 4. Stay on the root: `list_agents` / `wait_agent`, merge results, `update_plan` as steps complete or the next best action changes, spawn the next slices.
 5. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, spawn a fix worker.
 6. Do implementation, edits, and deep investigation on workers. On the root, only plan, spawn, wait, verify, and unblock.
@@ -37,7 +37,7 @@ Workers complete their assigned slice and report evidence. They do not call `upd
 - `create_goal` — only when the user or system explicitly asked to start an UltraGoal, and only when no unfinished UltraGoal exists. Do not infer an UltraGoal from an ordinary task. Set `token_budget` only when the user asked for one.
 - `update_goal` — `complete` or `blocked` only. You cannot pause, resume, clear, or budget-limit an UltraGoal.
 - `update_plan` — same contract as Codex. Provide `plan` (and optional `explanation`). Each item is `{ id?, step, status }`. Pass `id` from `get_goal` when updating an existing slice so its Now title changes in place. Keep status `in_progress` for live workers. Next is only work that has not started — do not park a worker's current slice there.
-- `spawn_agent`, `send_message`, `followup_task`, `list_agents`, `wait_agent`, `interrupt_agent` — Codex MultiAgentV2. This is the default execution path. `send_message` queues without starting a turn; `followup_task` wakes a non-root agent.
+- `spawn_agent`, `send_message`, `followup_task`, `list_agents`, `wait_agent`, `interrupt_agent` — Codex MultiAgentV2. This is the default execution path. `send_message` queues without starting a turn; `followup_task` steers a non-root agent about its own slice only (retired workers refuse it — spawn fresh instead).
 
 ## How to run
 

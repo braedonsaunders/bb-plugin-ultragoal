@@ -206,6 +206,9 @@ export default function plugin(bb: BbPluginApi) {
       if (created) collab.setWorkTitleForItem(rootThreadId, created.id, title);
       return created?.id ?? itemId;
     },
+    itemStatus(rootThreadId, itemId) {
+      return items.list(rootThreadId).find((item) => item.id === itemId)?.status ?? null;
+    },
     nextItemId(rootThreadId) {
       const used = new Set(
         (agentCache.get(rootThreadId) ?? [])
@@ -378,42 +381,21 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
-  // One GoalAgent per live native Task call in the open turn, paired in start
-  // order with in-progress plan items that no live UltraGoal worker holds.
-  function nativeTaskAgents(
-    threadId: string,
-    tasks: LiveNativeTask[],
-    agents: GoalAgent[],
-  ): GoalAgent[] {
-    if (tasks.length === 0) return [];
-    const held = new Set(
-      agents
-        .filter(
-          (agent) =>
-            agent.role !== "verifier" &&
-            (agent.status === "running" || agent.status === "starting") &&
-            agent.itemId,
-        )
-        .map((agent) => agent.itemId as string),
-    );
-    const openItems = items
-      .list(threadId)
-      .filter((item) => item.status === "in_progress" && !held.has(item.id));
-    let slot = 0;
-    return tasks.map((task, index) => {
-      const item = openItems[slot];
-      if (item) slot += 1;
-      return {
-        threadId,
-        taskName: `task/${task.key}`,
-        nickname: `Subagent ${index + 1}`,
-        title: item ? shortSliceTitle(item.step) || null : null,
-        itemId: item?.id ?? null,
-        role: "worker" as const,
-        status: "running" as const,
-        summary: null,
-      };
-    });
+  // One GoalAgent per live native Task call in the open turn. Never paired to
+  // plan items: native Task events carry no slice text, and guessing a pairing
+  // is exactly what put wrong titles and wrong leads on Now rows. An honest
+  // generic row beats a confident lie.
+  function nativeTaskAgents(threadId: string, tasks: LiveNativeTask[]): GoalAgent[] {
+    return tasks.map((task, index) => ({
+      threadId,
+      taskName: `task/${task.key}`,
+      nickname: `Subagent ${index + 1}`,
+      title: null,
+      itemId: null,
+      role: "worker" as const,
+      status: "running" as const,
+      summary: null,
+    }));
   }
 
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
@@ -438,7 +420,7 @@ export default function plugin(bb: BbPluginApi) {
       }
       agentCache.set(goal.threadId, [
         ...assigned,
-        ...nativeTaskAgents(goal.threadId, liveTasks, assigned),
+        ...nativeTaskAgents(goal.threadId, liveTasks),
       ]);
     } catch (error) {
       bb.log.warn(

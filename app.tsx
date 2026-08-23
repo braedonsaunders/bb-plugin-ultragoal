@@ -1215,11 +1215,14 @@ function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
       agent.status !== "error",
   );
   const named = workers.filter(isNamedWorker);
-  const pool = named.length > 0 ? named : workers;
+  // Liveness beats naming: an idle named worker must never front a row whose
+  // actual live occupant is someone else.
   return (
-    pool.find((agent) => isLiveAgent(agent)) ??
-    pool.find((agent) => agent.status === "idle" || agent.status === "unknown") ??
-    pool[0]
+    named.find(isLiveAgent) ??
+    workers.find(isLiveAgent) ??
+    named.find((agent) => agent.status === "idle" || agent.status === "unknown") ??
+    named[0] ??
+    workers[0]
   );
 }
 
