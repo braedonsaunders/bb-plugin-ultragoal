@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+- Worker briefs demand single-run slices: never end a turn to ask to continue, narrate interim progress, or breathe between batches — a turn ends at ULTRAGOAL_DONE or ULTRAGOAL_BLOCKED. (Observed: a worker pausing after every file group, the orchestrator hand-prodding it each time, and the parent feed filling with identical per-turn completion notifications.)
+
 ## 0.8.2
 
 The verification loop stops fighting the stall machinery (observed live on the parlour greenfield goal as the same workers "finishing" over and over while auditors multiplied past the name pool):

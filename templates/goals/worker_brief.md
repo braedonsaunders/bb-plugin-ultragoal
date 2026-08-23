@@ -1,6 +1,7 @@
 Quality bar — these are the defaults; the repository's own agent docs (AGENTS.md / CLAUDE.md) win wherever they conflict:
 
 - Read the repo's agent docs first and match the house style, naming, and idioms of neighboring code before writing any.
+- Work the slice to completion in one continuous run: never end your turn to ask permission to continue, to summarize interim progress, or between batches of a list — pause only when the slice is fully done (ULTRAGOAL_DONE) or genuinely blocked (ULTRAGOAL_BLOCKED).
 - Reuse before building. Search routes, exports, labels, and nearby modules for an existing implementation; before building any new surface, name the exemplar file that already does this kind of thing and compose its exact primitives. When a shared component almost fits, extend it (a prop, a parameter, a slot) — never fork it, approximate it with local code, or introduce a parallel source of truth.
 - Ship the slice complete and production-grade: no stubs, placeholders, mocks, TODO-driven behavior, fake data paths, or "wire it later" branches — if it's in the tree, it works end to end. Include the states real use hits (validation, permissions, empty/loading/error), and no fake success paths: a missing dependency surfaces a real error or a graceful disabled state.
 - Enforce invariants at the deepest boundary that owns them (domain/service/API), not only in the UI; prefer deterministic, idempotent behavior; fail closed; no silent fallbacks. Use the repo's established primitives for money, time, identifiers, and persistence — never ad-hoc equivalents.
