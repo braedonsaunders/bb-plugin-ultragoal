@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.2
+
+- Goal workers get their worker tools on every provider. The native-goal exclusion (Codex has its own Goal) applied to whole providers, so codex WORKERS had no report_finding/spawn tools — a hunt worker improvised eight prose findings as chat messages the machinery could not act on. The exclusion now applies only to threads that are not registered goal workers.
+- Orchestrator contract: the owner's mid-goal steering messages immediately become plan slices with a short visible acknowledgment — user feedback must never scroll by under worker traffic.
+
 ## 0.12.1
 
 - Progress clears the strike count: a worker seen actually running resets its nudge tally, so the three-strike retire measures wedged-ness, not work style. (Codex workers legitimately work in short turns; under the old rule they collected three resume-nudges while making real progress and got retired mid-slice.)

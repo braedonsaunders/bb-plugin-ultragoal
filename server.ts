@@ -2220,10 +2220,17 @@ Keep the plan current as steps complete or the next best action changes. When a 
   collab.registerTools();
 
   bb.agents.configure((context) => {
-    if (usesNativeGoal(context.provider.id) || context.origin.pluginId === "side-chat") {
+    const row = collab.rowOf(context.thread.id);
+    // A registered goal worker gets its worker tools whatever its provider —
+    // the native-goal exclusion is about ROOTS (Codex has its own Goal), and
+    // excluding codex workers left them unable to report_finding, so hunts
+    // flooded the root with prose findings nothing could act on.
+    if (
+      (usesNativeGoal(context.provider.id) && !row) ||
+      context.origin.pluginId === "side-chat"
+    ) {
       return { tools: [], skills: [] };
     }
-    const row = collab.rowOf(context.thread.id);
     const parentId = row?.parent_thread_id ?? context.thread.parentThreadId;
     const rootId = row?.root_thread_id ?? parentId ?? context.thread.id;
     const inherited = parentId ? store.get(rootId) : null;

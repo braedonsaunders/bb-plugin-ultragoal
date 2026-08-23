@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-ultragoal",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Codex-style /ultragoal for Cursor, OpenCode, Claude Code, and Pi. Sets a durable objective and keeps the thread working until it is done, blocked, paused, or limited.",
   "license": "MIT",
   "author": "Braedon Saunders",
