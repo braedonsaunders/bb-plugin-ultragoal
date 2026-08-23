@@ -299,37 +299,24 @@ export default function plugin(bb: BbPluginApi) {
     return agent.threadId === rootThreadId && agent.taskName.startsWith("task/");
   }
 
+  // Agents keep only the item links they actually claimed (spawn, follow-up,
+  // claimItem). Never invent an assignment to fill a row: a Now row without a
+  // real worker must say so instead of pointing at an unrelated thread.
   function assignLiveAgents(threadId: string, agents: GoalAgent[]): GoalAgent[] {
-    const open = items.list(threadId).filter((item) => item.status !== "completed");
+    const open = new Map(
+      items.list(threadId).filter((item) => item.status !== "completed").map((item) => [item.id, item]),
+    );
     const next = agents.map((agent) => ({ ...agent }));
-    const claimed = new Set<string>();
-    const assignable = (agent: GoalAgent) =>
-      agent.role !== "verifier" &&
-      !isRootNativeAgent(threadId, agent) &&
-      agent.status !== "stopped" &&
-      agent.status !== "completed" &&
-      agent.status !== "error";
+    const live = (agent: GoalAgent) =>
+      agent.status === "running" || agent.status === "starting";
     for (const agent of next) {
-      if (isRootNativeAgent(threadId, agent)) continue;
-      if (agent.itemId && open.some((item) => item.id === agent.itemId) && !claimed.has(agent.itemId)) {
-        claimed.add(agent.itemId);
-        const item = open.find((row) => row.id === agent.itemId);
-        if (item?.status === "pending" && assignable(agent)) {
-          items.setStatus(threadId, item.id, "in_progress");
-        }
-        continue;
+      if (agent.role === "verifier" || isRootNativeAgent(threadId, agent)) continue;
+      if (!agent.itemId) continue;
+      const item = open.get(agent.itemId);
+      if (!item) continue;
+      if (item.status === "pending" && live(agent)) {
+        items.setStatus(threadId, item.id, "in_progress");
       }
-      if (!assignable(agent)) continue;
-      if (agent.itemId && claimed.has(agent.itemId)) agent.itemId = null;
-      const match =
-        open.find((item) => item.status === "in_progress" && !claimed.has(item.id)) ??
-        open.find((item) => item.status === "pending" && !claimed.has(item.id)) ??
-        open.find((item) => !claimed.has(item.id));
-      if (!match) continue;
-      collab.setMeta(agent.threadId, { itemId: match.id });
-      agent.itemId = match.id;
-      claimed.add(match.id);
-      if (match.status === "pending") items.setStatus(threadId, match.id, "in_progress");
     }
     return oneWorkerPerItem(threadId, next);
   }
@@ -525,6 +512,72 @@ export default function plugin(bb: BbPluginApi) {
     } finally {
       staffing.delete(threadId);
     }
+  }
+
+  const DONE_SIGNAL =
+    /\b(is done|done\.|shipped|completed|complete\.|landed|implemented|fixed and verified|verify_pass)\b/i;
+  const BLOCK_SIGNAL = /\b(blocked|failed|cannot|can't|unable|verify_fail|not done)\b/i;
+
+  function reportSaysDone(text: string | null | undefined): boolean {
+    const head = (text ?? "").trim().slice(0, 600);
+    if (!head) return false;
+    return DONE_SIGNAL.test(head) && !BLOCK_SIGNAL.test(head);
+  }
+
+  // Close the loop Codex Goal closes inside the provider: a finished worker
+  // finishes its plan item. With verification on, only VERIFY_PASS completes
+  // the slice; with it off, the worker's own done report does.
+  function completeItemFor(
+    rootThreadId: string,
+    itemId: string | null,
+    report: string | null | undefined,
+    options?: { requirePass?: boolean },
+  ): boolean {
+    if (!itemId) return false;
+    const goal = store.get(rootThreadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return false;
+    if (options?.requirePass) {
+      if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
+    } else {
+      if (view(goal).settings.verifyEnabled) return false;
+      if (!reportSaysDone(report)) return false;
+    }
+    const item = items
+      .list(rootThreadId)
+      .find((row) => row.id === itemId && row.status === "in_progress");
+    if (!item) return false;
+    items.setStatus(rootThreadId, itemId, "completed");
+    bb.log.info(`Goal slice ${itemId} completed on ${rootThreadId} from worker report`);
+    return true;
+  }
+
+  const reconciledReports = new Set<string>();
+
+  // Finished workers whose idle event predates this plugin build (or was
+  // missed) still close out their slices.
+  async function reconcileFinishedSlices(rootThreadId: string): Promise<boolean> {
+    const goal = store.get(rootThreadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return false;
+    if (view(goal).settings.verifyEnabled) return false;
+    const openIds = new Set(
+      items.list(rootThreadId).filter((item) => item.status === "in_progress").map((item) => item.id),
+    );
+    let changed = false;
+    for (const agent of agentCache.get(rootThreadId) ?? []) {
+      if (agent.role === "verifier" || !agent.itemId || !openIds.has(agent.itemId)) continue;
+      if (agent.status === "running" || agent.status === "starting") continue;
+      if (agent.threadId === rootThreadId) continue;
+      const key = `${agent.threadId}:${agent.itemId}`;
+      if (reconciledReports.has(key)) continue;
+      reconciledReports.add(key);
+      try {
+        const output = (await bb.sdk.threads.output({ threadId: agent.threadId })).output ?? null;
+        if (completeItemFor(rootThreadId, agent.itemId, output)) changed = true;
+      } catch {
+        // Unreadable worker output leaves the slice open for the orchestrator.
+      }
+    }
+    return changed;
   }
 
   async function maybeVerifyWorker(workerThreadId: string): Promise<void> {
@@ -906,8 +959,12 @@ export default function plugin(bb: BbPluginApi) {
       if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
       try {
         await requestProgressUpdate(threadId, goal);
+        const reconciled = await reconcileFinishedSlices(threadId);
         const accounted = await account(threadId, { busy: goalIsBusy(threadId), scan: true });
-        if (accounted) publish(threadId, view(accounted));
+        if (accounted || reconciled) {
+          const latest = store.get(threadId);
+          if (latest) publish(threadId, view(latest));
+        }
       } catch (error) {
         bb.log.warn(
           `Goal progress pulse failed on ${threadId}: ${
@@ -1310,7 +1367,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     await applyUserSlash(thread.id, lastUserText(rows));
   });
 
-  bb.events.on("thread.idle", async ({ thread }) => {
+  bb.events.on("thread.idle", async ({ thread, lastAssistantText }) => {
     const child = collab.rowOf(thread.id);
     const parentRoot = child?.root_thread_id;
     const pendingInteraction = (thread as { hasPendingInteraction?: boolean })
@@ -1320,8 +1377,16 @@ Keep the plan current as steps complete or the next best action changes. When a 
       // Approval resumes the provider turn; let the next idle event finish up.
       if (approved > 0) return;
     }
-    if (parentRoot && parentRoot !== thread.id && !thread.hasPendingInteraction) {
-      if (child.role !== "verifier") await maybeVerifyWorker(thread.id);
+    if (parentRoot && parentRoot !== thread.id && !pendingInteraction) {
+      if (child.role !== "verifier") {
+        completeItemFor(parentRoot, child.item_id, lastAssistantText);
+        await maybeVerifyWorker(thread.id);
+      } else {
+        const sourceItemId = child.source_thread_id
+          ? (collab.rowOf(child.source_thread_id)?.item_id ?? child.item_id)
+          : child.item_id;
+        completeItemFor(parentRoot, sourceItemId, lastAssistantText, { requirePass: true });
+      }
       void publishFresh(parentRoot);
       void nudgeRoot(parentRoot);
     }
