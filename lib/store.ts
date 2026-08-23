@@ -223,6 +223,10 @@ export function createGoalStore(bb: BbPluginApi) {
     // positional — new statements append at the END, never mid-array.
     `ALTER TABLE collab_agents ADD COLUMN retired_at INTEGER`,
     `ALTER TABLE collab_agents ADD COLUMN verify_fails INTEGER`,
+    // Nudge state is durable: in-memory cooldowns reset on plugin reload,
+    // which turned a 15-minute cooldown into a nudge per release.
+    `ALTER TABLE collab_agents ADD COLUMN last_nudge_at INTEGER`,
+    `ALTER TABLE collab_agents ADD COLUMN nudge_count INTEGER`,
   ]);
   importLegacyGoalDatabase(db);
 

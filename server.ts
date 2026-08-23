@@ -757,11 +757,11 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   const MAX_VERIFY_FAILS = 3;
+  const MAX_STALL_NUDGES = 3;
   const STALL_NUDGE_AFTER_MS = 3 * 60_000;
   const STALL_NUDGE_COOLDOWN_MS = 15 * 60_000;
   const RESCUE_AFTER_MS = 10 * 60_000;
   const firstSeenIdle = new Map<string, number>();
-  const lastStallNudge = new Map<string, number>();
   const healing = new Set<string>();
 
   async function healStalls(rootThreadId: string): Promise<void> {
@@ -799,15 +799,28 @@ export default function plugin(bb: BbPluginApi) {
         // with the findings). Past the fail cap the slice is the
         // orchestrator's call, not a nudge loop's.
         if (liveVerifierSources.has(agent.threadId)) continue;
-        if ((collab.rowOf(agent.threadId)?.verify_fails ?? 0) >= MAX_VERIFY_FAILS) continue;
+        const row = collab.rowOf(agent.threadId);
+        if ((row?.verify_fails ?? 0) >= MAX_VERIFY_FAILS) continue;
+        // A worker that has been nudged repeatedly and still never reports is
+        // wedged: retire it and let the scheduler restaff the slice with a
+        // fresh worker (which also carries the current brief contract).
+        if ((row?.nudge_count ?? 0) >= MAX_STALL_NUDGES) {
+          collab.forget(agent.threadId);
+          bb.log.info(
+            `Retired unresponsive worker ${agent.nickname} (${agent.threadId}) after ${row?.nudge_count} nudges on ${rootThreadId}; slice ${agent.itemId} returns to the scheduler`,
+          );
+          continue;
+        }
         const since = firstSeenIdle.get(agent.threadId);
         if (since == null) {
           firstSeenIdle.set(agent.threadId, now);
           continue;
         }
         if (now - since < STALL_NUDGE_AFTER_MS) continue;
-        if (now - (lastStallNudge.get(agent.threadId) ?? 0) < STALL_NUDGE_COOLDOWN_MS) continue;
-        lastStallNudge.set(agent.threadId, now);
+        // Cooldown reads the durable row, not an in-memory map that resets on
+        // every plugin reload.
+        if (now - (row?.last_nudge_at ?? 0) < STALL_NUDGE_COOLDOWN_MS) continue;
+        collab.bumpNudge(agent.threadId);
         try {
           await bb.sdk.threads.send({
             threadId: agent.threadId,

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.4
+
+- Stall-nudge state is durable (last_nudge_at / nudge_count on the worker row): the cooldown lived in in-memory maps that reset on every plugin reload, which turned "at most one nudge per 15 minutes" into a nudge per release during rapid shipping — one worker collected 11 identical resumes.
+- Nudges cap at three: a worker that still never reports is wedged — it is retired and the scheduler restaffs the slice with a fresh worker, which also moves old crews onto the current single-run brief contract.
+
 ## 0.8.3
 
 - Worker briefs demand single-run slices: never end a turn to ask to continue, narrate interim progress, or breathe between batches — a turn ends at ULTRAGOAL_DONE or ULTRAGOAL_BLOCKED. (Observed: a worker pausing after every file group, the orchestrator hand-prodding it each time, and the parent feed filling with identical per-turn completion notifications.)

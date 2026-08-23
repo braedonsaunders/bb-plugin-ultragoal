@@ -44,6 +44,8 @@ interface CollabRow {
   last_verify_hash: string | null;
   retired_at?: number | null;
   verify_fails?: number | null;
+  last_nudge_at?: number | null;
+  nudge_count?: number | null;
 }
 
 function nicknameOf(taskName: string, fallback?: string | null): string {
@@ -127,6 +129,9 @@ export function createCollabStore(
   );
   const bumpFails = db.prepare(
     "UPDATE collab_agents SET verify_fails = COALESCE(verify_fails, 0) + 1 WHERE thread_id = ?",
+  );
+  const bumpNudgeStmt = db.prepare(
+    "UPDATE collab_agents SET last_nudge_at = @at, nudge_count = COALESCE(nudge_count, 0) + 1 WHERE thread_id = @thread_id",
   );
   // Retire, never delete: a deleted row lets discovery resurrect the dead
   // thread and re-claim its slice.
@@ -654,6 +659,12 @@ export function createCollabStore(
 
     setVerifyHash(threadId: string, hash: string) {
       setHash.run({ thread_id: threadId, last_verify_hash: hash });
+    },
+
+    /** Records a stall nudge; returns the new total. */
+    bumpNudge(threadId: string): number {
+      bumpNudgeStmt.run({ thread_id: threadId, at: Date.now() });
+      return (byThread.get(threadId) as CollabRow | undefined)?.nudge_count ?? 1;
     },
 
     /** Records one failed verification for a worker; returns the new total. */
