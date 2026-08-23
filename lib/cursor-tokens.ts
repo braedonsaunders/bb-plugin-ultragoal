@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const DEFAULT_WINDOW = 200_000;
 const sessionCache = new Map<string, { stamp: string; tokens: number }>();
 
-type SqliteDb = {
+export type SqliteDb = {
   all<T = Record<string, unknown>>(sql: string, ...params: unknown[]): T[];
   close(): void;
 };
@@ -48,7 +48,7 @@ function textOf(value: unknown): string {
   return "";
 }
 
-function openSqlite(file: string): SqliteDb | null {
+export function openSqlite(file: string): SqliteDb | null {
   if (!existsSync(file)) return null;
   try {
     const { DatabaseSync } = require("node:sqlite") as {

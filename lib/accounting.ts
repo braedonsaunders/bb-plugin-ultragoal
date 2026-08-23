@@ -5,6 +5,7 @@ import {
   providerSessionId,
   readCursorSessionTokens,
 } from "./cursor-tokens.js";
+import { readProviderSessionTokens } from "./provider-tokens.js";
 
 const NEW_SESSION_SCANS_PER_TICK = 8;
 const tokensByGoalSession = new Map<string, Map<string, number>>();
@@ -83,6 +84,21 @@ async function officialTokensIfCheap(bb: BbPluginApi, threadId: string): Promise
       tokenUsageFromUnknown(event);
     if (total != null && total > 0) return total;
   }
+  // Last resort for providers with no local session store: the context-window
+  // snapshot bb relays. It's the live window, not cumulative usage, so it
+  // undercounts — but it moves, and it beats a frozen zero.
+  const windowEvents = await listEvents(bb, {
+    threadId,
+    types: ["thread/contextWindowUsage/updated"],
+    order: "desc",
+    limit: "4",
+  });
+  for (const event of windowEvents) {
+    const data = (event.data ?? event) as Record<string, unknown>;
+    const usage = data.contextWindowUsage as Record<string, unknown> | undefined;
+    const used = numberFrom(usage?.usedTokens);
+    if (used != null && used > 0) return used;
+  }
   return null;
 }
 
@@ -92,12 +108,15 @@ export async function readThreadTokens(
   options?: { allowScan?: boolean },
 ): Promise<number | null> {
   const sessionId = await sessionIdForThread(bb, threadId);
-  const cursor = sessionId
-    ? options?.allowScan === false
-      ? peekCursorSessionTokens(sessionId)
-      : readCursorSessionTokens(sessionId)
-    : null;
-  if (cursor != null) return cursor;
+  if (sessionId && options?.allowScan === false) {
+    return peekCursorSessionTokens(sessionId);
+  }
+  if (sessionId) {
+    // Whichever provider ran this session (Cursor, OpenCode, Claude Code,
+    // Codex) left cumulative usage in its own store; try them all.
+    const stored = readCursorSessionTokens(sessionId) ?? readProviderSessionTokens(sessionId);
+    if (stored != null) return stored;
+  }
   if (options?.allowScan === false) return null;
   return officialTokensIfCheap(bb, threadId);
 }

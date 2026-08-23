@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3
+
+- Token accounting works on every provider, not just Cursor. Usage is read straight from each provider's own session store — OpenCode's opencode.db message tokens, Claude Code's ~/.claude/projects JSONL usage lines, Codex's rollout total_token_usage — keyed by the thread's provider session id, on top of the existing Cursor readers. Goals orchestrated by OpenCode/Claude/Codex no longer sit at "Tokens 0".
+- Providers with no local store fall back to bb's context-window usage snapshot instead of freezing at zero.
+
 ## 0.4.2
 
 - Plan steps that declare their worker ("Hunt B: … — worker thr_x") now link that worker to the slice. Orchestrators that write assignments into the plan instead of passing item_id get correctly titled Now rows, and the declared slice leaves Up next. The "worker thr_x" annotation is stripped from displayed titles.
