@@ -218,6 +218,10 @@ export function createGoalStore(bb: BbPluginApi) {
     // equality with task_name is the structural marker of that copy. Null it
     // so the naming pass generates a real (work-related) name.
     `UPDATE collab_agents SET display_name = NULL WHERE display_name = task_name AND (role IS NULL OR role != 'verifier')`,
+    // Retirement tombstones: forgetting a worker must survive rediscovery of
+    // its (dead) thread, so rows are retired, never deleted. Migrations are
+    // positional — new statements append at the END, never mid-array.
+    `ALTER TABLE collab_agents ADD COLUMN retired_at INTEGER`,
   ]);
   importLegacyGoalDatabase(db);
 

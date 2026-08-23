@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+Live cutover of the running goal surfaced four defects; all fixed structurally:
+
+- Plugin-staffed workers are fresh spawns into isolated managed worktrees (hostId from the parent environment) — forking a very large root session fails at thread.start, and sharing the root's directory would put concurrent writers in one checkout. Slice briefs are self-contained by design, so no conversation fork is needed.
+- Worker rows are retired, never deleted: a deleted row let child-thread discovery resurrect a dead worker and re-claim its slice, blocking restaffs forever. All readers filter retired rows; discovery's seen-set includes them.
+- A failed staffing spawn rolls back its claim, so the slice returns to pending instead of stranding in_progress until the stale window; scheduler spawn errors are caught per-item and heal passes log failures instead of dying as unhandled rejections.
+- Verifiers now inspect their worker's environment, not the root's — the worker's edits may not exist anywhere else yet.
+- Commit-subject discipline in the worker quality bar: subjects describe the actual change and never repeat an existing subject verbatim; slices rebase onto the latest default branch before final verification; restaffed continuation workers are told to check the log and title their commits by what they add. (Observed in the field: parallel halves of one slice landing as identical-subject commit pairs across a merge.)
+
 ## 0.8.0
 
 Clean cut: the DAG contract is the only path. Every compatibility shim is deleted, not deprecated:

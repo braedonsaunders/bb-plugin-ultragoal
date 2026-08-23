@@ -42,6 +42,7 @@ interface CollabRow {
   role: GoalAgentRole | null;
   source_thread_id: string | null;
   last_verify_hash: string | null;
+  retired_at?: number | null;
 }
 
 function nicknameOf(taskName: string, fallback?: string | null): string {
@@ -107,18 +108,27 @@ export function createCollabStore(
         item_id = COALESCE(@item_id, item_id)
     WHERE thread_id = @thread_id
   `);
-  const byThread = db.prepare("SELECT * FROM collab_agents WHERE thread_id = ?");
-  const byRoot = db.prepare("SELECT * FROM collab_agents WHERE root_thread_id = ?");
+  const byThread = db.prepare(
+    "SELECT * FROM collab_agents WHERE thread_id = ? AND retired_at IS NULL",
+  );
+  const byRoot = db.prepare(
+    "SELECT * FROM collab_agents WHERE root_thread_id = ? AND retired_at IS NULL",
+  );
+  const byRootAll = db.prepare("SELECT thread_id FROM collab_agents WHERE root_thread_id = ?");
   const byName = db.prepare(
-    "SELECT * FROM collab_agents WHERE root_thread_id = ? AND task_name = ?",
+    "SELECT * FROM collab_agents WHERE root_thread_id = ? AND task_name = ? AND retired_at IS NULL",
   );
   const bySource = db.prepare(
-    "SELECT * FROM collab_agents WHERE source_thread_id = ? AND role = 'verifier'",
+    "SELECT * FROM collab_agents WHERE source_thread_id = ? AND role = 'verifier' AND retired_at IS NULL",
   );
   const setHash = db.prepare(
     "UPDATE collab_agents SET last_verify_hash = @last_verify_hash WHERE thread_id = @thread_id",
   );
-  const removeRow = db.prepare("DELETE FROM collab_agents WHERE thread_id = ?");
+  // Retire, never delete: a deleted row lets discovery resurrect the dead
+  // thread and re-claim its slice.
+  const removeRow = db.prepare(
+    "UPDATE collab_agents SET retired_at = @retired_at, item_id = NULL WHERE thread_id = @thread_id",
+  );
 
   function itemHasWorker(rootThreadId: string, itemId: string | null): boolean {
     if (!itemId) return false;
@@ -303,7 +313,9 @@ export function createCollabStore(
   ): Promise<GoalAgent[]> {
     const root = rootId(threadId);
     const rows = byRoot.all(root) as CollabRow[];
-    const seen = new Set(rows.map((row) => row.thread_id));
+    const seen = new Set(
+      (byRootAll.all(root) as Array<{ thread_id: string }>).map((row) => row.thread_id),
+    );
     const extras: CollabRow[] = [];
     if (options?.discover) {
       try {
@@ -460,11 +472,15 @@ export function createCollabStore(
     message: string;
     fork_turns?: string;
     model?: string;
+    /** Fresh spawn in an isolated managed worktree — no conversation fork.
+     * The plugin's own staffing uses this: slice briefs are self-contained,
+     * and forking a large root session fails at thread.start. */
+    fresh?: boolean;
   }): Promise<
     | { threadId: string; taskName: string; nickname: string; itemId: string | null }
     | { error: string }
   > {
-    const { threadId, task_name, display_name, item_id, role, fork_turns, model } = args;
+    const { threadId, task_name, display_name, item_id, role, fork_turns, model, fresh } = args;
     const trimmed = args.message.trim();
     if (!trimmed) return { error: "Empty message can't be sent to an agent" };
     const parent = await bb.sdk.threads.get({ threadId });
@@ -527,22 +543,35 @@ export function createCollabStore(
     ]
       .filter(Boolean)
       .join("\n\n");
+    const parentHostId = parent.environmentId
+      ? await bb.sdk.environments
+          .get({ environmentId: parent.environmentId })
+          .then((environment) => environment.hostId)
+          .catch(() => undefined)
+      : undefined;
     const spawnArgs = {
       projectId: parent.projectId ?? args.projectId,
       parentThreadId: threadId,
       providerId: parent.providerId,
       model: model ?? undefined,
       permissionMode: "full" as const,
-      environment: parent.environmentId
-        ? { type: "reuse" as const, environmentId: parent.environmentId }
-        : { type: "project-default" as const },
+      // Non-forked workers get their own managed worktree: sharing the root's
+      // environment would put concurrent writers in one directory.
+      environment: {
+        type: "host" as const,
+        hostId: parentHostId,
+        workspace: {
+          type: "managed-worktree" as const,
+          baseBranch: { kind: "default" as const },
+        },
+      },
       prompt,
       title: shortSliceTitle(trimmed) || displayName,
       visibility: "hidden" as const,
       origin: "plugin" as const,
     };
     const child =
-      fork_turns === "none"
+      fresh || fork_turns === "none"
         ? await bb.sdk.threads.spawn(spawnArgs)
         : await bb.sdk.threads
             .fork({
@@ -616,7 +645,7 @@ export function createCollabStore(
     },
 
     forget(threadId: string) {
-      removeRow.run(threadId);
+      removeRow.run({ thread_id: threadId, retired_at: Date.now() });
     },
 
     setVerifyHash(threadId: string, hash: string) {
@@ -639,6 +668,12 @@ export function createCollabStore(
       if (!root.projectId) {
         throw new Error("UltraGoal root thread has no project; cannot spawn a verifier");
       }
+      // The verifier inspects the worker's worktree — its edits may not exist
+      // anywhere else yet.
+      const source = await bb.sdk.threads
+        .get({ threadId: args.sourceThreadId })
+        .catch(() => null);
+      const verifyEnvironmentId = source?.environmentId ?? root.environmentId;
       const usedNames = (byRoot.all(args.rootThreadId) as CollabRow[])
         .map((row) => row.display_name)
         .filter((name): name is string => Boolean(name));
@@ -651,8 +686,8 @@ export function createCollabStore(
         providerId: args.providerId,
         model: args.model,
         permissionMode: "full",
-        environment: root.environmentId
-          ? { type: "reuse" as const, environmentId: root.environmentId }
+        environment: verifyEnvironmentId
+          ? { type: "reuse" as const, environmentId: verifyEnvironmentId }
           : { type: "project-default" as const },
         prompt: [
           args.prompt,
@@ -698,11 +733,12 @@ export function createCollabStore(
       const result = await spawnAgent({
         threadId: args.parentThreadId,
         projectId: undefined,
-        task_name: `${slugFromName(args.displayName ?? "rescue")}_${Date.now().toString(36)}`,
+        task_name: `${slugFromName(args.displayName ?? "worker")}_${Date.now().toString(36)}`,
         display_name: args.displayName,
         item_id: args.itemId ?? undefined,
         role: "worker",
         message: args.message,
+        fresh: true,
       });
       return result;
     },

@@ -621,7 +621,7 @@ export default function plugin(bb: BbPluginApi) {
     const lines = [`SLICE (item_id=${item.id}): ${item.step}`];
     if (restaffed) {
       lines.push(
-        "The previous worker on this slice died mid-work. Pick the slice up from the current worktree state and finish it.",
+        "The previous worker on this slice died mid-work. Pick the slice up from the current worktree state and finish it. It may have landed partial commits already: check the log first, keep its work, and give your commits their own subjects describing what THEY add — never repeat a prior commit's subject.",
       );
     }
     if (item.files.length > 0) {
@@ -716,17 +716,28 @@ export default function plugin(bb: BbPluginApi) {
           restaffed = true;
         }
         lastStaffTry.set(item.id, now);
-        const result = await collab.spawnWorker({
-          parentThreadId: rootThreadId,
-          itemId: item.id,
-          displayName: workRelatedName(
-            item.step,
-            agents.map((agent) => agent.nickname),
-          ),
-          message: itemBriefMessage(item, restaffed),
-        });
+        let result: Awaited<ReturnType<typeof collab.spawnWorker>>;
+        try {
+          result = await collab.spawnWorker({
+            parentThreadId: rootThreadId,
+            itemId: item.id,
+            displayName: workRelatedName(
+              item.step,
+              agents.map((agent) => agent.nickname),
+            ),
+            message: itemBriefMessage(item, restaffed),
+          });
+        } catch (error) {
+          result = { error: error instanceof Error ? error.message : String(error) };
+        }
         if ("error" in result) {
           bb.log.warn(`Scheduler could not staff slice ${item.id} on ${rootThreadId}: ${result.error}`);
+          // The spawn claims the slice before the thread exists; a failed
+          // spawn must roll that claim back or the slice strands in_progress
+          // until the stale window.
+          if (item.status === "pending") {
+            items.setStatus(rootThreadId, item.id, "pending");
+          }
         } else {
           slots -= 1;
           staffed = true;
@@ -804,6 +815,12 @@ export default function plugin(bb: BbPluginApi) {
       }
 
       await scheduleReady(rootThreadId);
+    } catch (error) {
+      bb.log.warn(
+        `Goal heal pass failed on ${rootThreadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     } finally {
       healing.delete(rootThreadId);
     }
