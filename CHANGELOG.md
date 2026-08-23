@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.9
+
+- New workers register the moment their thread starts. bb's thread.active lifecycle event now triggers immediate crew registration for goal-tree children, so a freshly spawned subagent renders as a named worker right away instead of flashing through anonymous "Subagent task" rows until the next discovery poll.
+- A slice with a known holder is always attributed to that worker. "Orchestrator" is reserved for slices no worker ever claimed while the root turn is running — it can no longer steal a slice whose worker just went idle awaiting close.
+
 ## 0.4.8
 
 - Parallelize by default, enforced concretely. Continuation and progress prompts now enumerate every open slice with no live worker and demand one fresh spawn_agent per slice in the same turn, instead of stating an abstract "don't implement on the root" rule the model can ignore. Skill and templates updated to match: spawning is the default for all work; inline root work is reserved for genuinely one-edit slices.

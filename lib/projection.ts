@@ -58,12 +58,30 @@ export function projectPane(
   }
   for (const item of items) {
     if (item.status !== "in_progress" || heldByLive.has(item.id)) continue;
-    if (rootRunning) {
-      // The model marked this slice active and no live worker holds it: the
-      // orchestrator itself is working it in the root thread.
+    const title = shortSliceTitle(item.step) || item.step.trim();
+    // A known holder always wins the attribution, even when the root turn is
+    // running: this slice belongs to that worker (now idle — likely reported,
+    // awaiting close), not to the orchestrator.
+    const holder = agents.find(
+      (agent) => agent.role !== "verifier" && agent.itemId === item.id,
+    );
+    if (holder) {
       now.push({
         key: `item:${item.id}`,
-        title: shortSliceTitle(item.step) || item.step.trim(),
+        title,
+        nickname: holder.nickname,
+        threadId: holder.threadId !== rootThreadId ? holder.threadId : null,
+        itemId: item.id,
+        kind: "unattended",
+      });
+      continue;
+    }
+    if (rootRunning) {
+      // No worker ever held this slice and the root turn is running: the
+      // orchestrator marked it active and is working it itself.
+      now.push({
+        key: `item:${item.id}`,
+        title,
         nickname: "Orchestrator",
         threadId: null,
         itemId: item.id,
@@ -71,16 +89,11 @@ export function projectPane(
       });
       continue;
     }
-    // Root idle and no live worker: genuinely unattended. The idle holder, if
-    // one claimed this slice, gives the row a name and a thread to open.
-    const holder = agents.find(
-      (agent) => agent.role !== "verifier" && agent.itemId === item.id,
-    );
     now.push({
       key: `item:${item.id}`,
-      title: shortSliceTitle(item.step) || item.step.trim(),
-      nickname: holder?.nickname ?? "",
-      threadId: holder && holder.threadId !== rootThreadId ? holder.threadId : null,
+      title,
+      nickname: "",
+      threadId: null,
       itemId: item.id,
       kind: "unattended",
     });

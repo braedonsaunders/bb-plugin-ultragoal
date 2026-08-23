@@ -1410,11 +1410,36 @@ Keep the plan current as steps complete or the next best action changes. When a 
     };
   });
 
+  // A goal-tree child just started: register it with the crew right now, so
+  // it renders as a named worker immediately instead of waiting for the next
+  // discovery poll (during which it shows as an anonymous "Subagent task").
+  async function registerNewChild(thread: { id: string; parentThreadId?: string | null }): Promise<void> {
+    if (!thread.parentThreadId || collab.rowOf(thread.id)) return;
+    const parentRoot = store.get(thread.parentThreadId)
+      ? thread.parentThreadId
+      : collab.rowOf(thread.parentThreadId)?.root_thread_id;
+    if (!parentRoot) return;
+    const goal = store.get(parentRoot);
+    if (!goal) return;
+    try {
+      await collab.listForRoot(parentRoot, { discover: true, refreshLimit: 8 });
+      await publishFresh(parentRoot);
+      void approveInteractions(thread.id);
+    } catch (error) {
+      bb.log.warn(
+        `Could not register new child ${thread.id} on ${parentRoot}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   bb.events.on("thread.active", async ({ thread }) => {
     running.set(thread.id, true);
     if (store.get(thread.id) || collab.rowOf(thread.id)) {
       void approveInteractions(thread.id);
     }
+    void registerNewChild(thread);
     const existing = store.get(thread.id);
     if (existing && (existing.status === "active" || existing.status === "budget_limited")) {
       const next = store.update(thread.id, { lastAccountedAt: Date.now() });
