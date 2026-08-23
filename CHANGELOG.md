@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- UltraGoal no longer spawns workers itself. Auto-staffing raced the orchestrator's own agentic spawning — it launched premature workers for unbriefed pending slices with thin one-line briefs and silently dropped their failures. The orchestrator spawns every worker via spawn_agent (or native spawns, which are tracked); the plugin only cleans up errored worker threads and keeps nudging the model to staff open slices.
+- Crew hiding in the sidebar outlives the goal: clearing an UltraGoal no longer dumps its hidden worker subthreads into the thread list. The UltraGoal pill disappears on clear; the workers stay tucked away.
+
 ## 0.4.0
 
 Architecture consolidation: rows are projected liveness, semantics are structured annotations, and nothing is guessed from prose.

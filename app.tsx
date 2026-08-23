@@ -213,10 +213,13 @@ const GOAL_MARK_STYLE =
   "display:inline-flex;align-items:center;flex:0 0 auto;height:14px;padding:0 4px;border:1px solid currentColor;border-radius:3px;font-size:9px;font-weight:600;letter-spacing:.04em;line-height:1;opacity:.55";
 
 function injectGoalSidebarMarks(
-  crews: Array<{ threadId: string; agents: GoalAgent[]; workerIds?: string[] }>,
+  crews: Array<{ threadId: string; active?: boolean; agents: GoalAgent[]; workerIds?: string[] }>,
   extraHideIds?: ReadonlySet<string>,
 ) {
+  // Workers of any crew — active or cleared — stay hidden. The pill marks
+  // only threads with a live goal.
   const goalIds = new Set(crews.map((crew) => crew.threadId));
+  const markIds = new Set(crews.filter((crew) => crew.active !== false).map((crew) => crew.threadId));
   const workerIds = new Set(
     crews.flatMap((crew) => [
       ...(crew.workerIds ?? []),
@@ -261,7 +264,7 @@ function injectGoalSidebarMarks(
       }
     }
     let mark = container.querySelector("[data-goal-mark]") as HTMLElement | null;
-    if (!goalIds.has(id)) {
+    if (!markIds.has(id)) {
       mark?.remove();
       continue;
     }
@@ -317,7 +320,7 @@ function SidebarGoalMarks() {
     .map((thread) => `${thread.id}:${thread.parentThreadId ?? ""}:${thread.originPluginId ?? ""}`)
     .join(",");
   const [crews, setCrews] = useState<
-    Array<{ threadId: string; agents: GoalAgent[]; workerIds: string[] }>
+    Array<{ threadId: string; active?: boolean; agents: GoalAgent[]; workerIds: string[] }>
   >([]);
 
   const load = useCallback(async () => {
@@ -326,6 +329,7 @@ function SidebarGoalMarks() {
       setCrews(
         next.crews.map((crew) => ({
           threadId: crew.threadId,
+          active: crew.active,
           agents: crew.agents,
           workerIds: crew.workerIds ?? crew.agents.map((agent) => agent.threadId),
         })),

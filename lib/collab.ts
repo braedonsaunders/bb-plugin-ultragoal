@@ -458,6 +458,13 @@ export function createCollabStore(
     threadIdsForRoot(rootThreadId: string): string[] {
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => row.thread_id);
     },
+    listRoots(): string[] {
+      return (
+        db.prepare("SELECT DISTINCT root_thread_id FROM collab_agents").all() as Array<{
+          root_thread_id: string;
+        }>
+      ).map((row) => row.root_thread_id);
+    },
     workersOnItem(rootThreadId: string, itemId: string): string[] {
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[])
         .filter((row) => row.role !== "verifier" && row.item_id === itemId)
@@ -490,69 +497,6 @@ export function createCollabStore(
 
     verifiersFor(sourceThreadId: string): CollabRow[] {
       return bySource.all(sourceThreadId) as CollabRow[];
-    },
-
-    async spawnWorker(args: {
-      rootThreadId: string;
-      itemId: string | null;
-      step: string;
-      objective: string;
-    }): Promise<{ threadId: string; nickname: string; itemId: string | null } | null> {
-      if (args.itemId && itemHasWorker(args.rootThreadId, args.itemId)) {
-        return null;
-      }
-      const root = await bb.sdk.threads.get({ threadId: args.rootThreadId });
-      if (!root.projectId) {
-        throw new Error("UltraGoal root thread has no project; cannot spawn a worker");
-      }
-      const usedNames = (byRoot.all(args.rootThreadId) as CollabRow[])
-        .map((row) => row.display_name)
-        .filter((name): name is string => Boolean(name));
-      const displayName = nextHumorousName(usedNames);
-      const slug = slugFromName(displayName);
-      const taskName = `/root/${slug}`;
-      const model = "model" in root && typeof root.model === "string" ? root.model : undefined;
-      const child = await bb.sdk.threads.spawn({
-        projectId: root.projectId,
-        parentThreadId: args.rootThreadId,
-        providerId: root.providerId,
-        ...(model ? { model } : {}),
-        permissionMode: "full",
-        environment: root.environmentId
-          ? { type: "reuse" as const, environmentId: root.environmentId }
-          : { type: "project-default" as const },
-        prompt: [
-          `Parent Goal: ${args.objective}`,
-          args.itemId
-            ? `Assigned slice (item_id=${args.itemId}): ${args.step}`
-            : `Assigned slice: ${args.step}`,
-          "Complete only this slice. Inspect the worktree and implement the fix. Report evidence when done.",
-          `Your call sign is ${displayName}. The new agent's canonical task name is ${taskName}.`,
-          "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
-        ].join("\n\n"),
-        title: shortSliceTitle(args.step) || displayName,
-        visibility: "hidden" as const,
-        origin: "plugin",
-      });
-      insert.run({
-        thread_id: child.id,
-        root_thread_id: args.rootThreadId,
-        parent_thread_id: args.rootThreadId,
-        task_name: taskName,
-        created_at: Date.now(),
-        display_name: displayName,
-        item_id: args.itemId,
-        role: "worker",
-        source_thread_id: null,
-        last_verify_hash: null,
-      });
-      try {
-        await applyWorkTitle(child.id, args.step);
-      } catch {
-        // Title from spawn is enough if update is unavailable.
-      }
-      hooks?.onChange?.(args.rootThreadId);
-      return { threadId: child.id, nickname: displayName, itemId: args.itemId };
     },
 
     async spawnVerifier(args: {

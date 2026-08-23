@@ -481,8 +481,12 @@ export default function plugin(bb: BbPluginApi) {
 
   const verifying = new Set<string>();
   const staffing = new Set<string>();
-  const MAX_PARALLEL_WORKERS = 4;
 
+  // Staffing belongs to the orchestrator model, not the plugin. UltraGoal
+  // used to auto-spawn a worker for every open item — which raced the model's
+  // own orchestration, spawned premature workers for unbriefed pending
+  // slices, and silently dropped failures. Now the plugin only cleans up
+  // errored workers; the continuation prompt tells the model to staff slices.
   async function ensureCrew(threadId: string): Promise<void> {
     const goal = store.get(threadId);
     if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
@@ -490,47 +494,19 @@ export default function plugin(bb: BbPluginApi) {
     staffing.add(threadId);
     try {
       const snap = await viewFresh(store.get(threadId) ?? goal);
-      const open = snap.items.filter((item) => item.status !== "completed");
-      if (open.length === 0) return;
       for (const agent of snap.agents.filter((row) => row.role === "worker")) {
         if (agent.status !== "error" && agent.status !== "unknown") continue;
         collab.forget(agent.threadId);
+        bb.log.info(`Dropped errored Goal worker ${agent.nickname} (${agent.threadId}) on ${threadId}`);
         try {
           await bb.sdk.threads.stop({ threadId: agent.threadId });
         } catch {
           // Failed forks can be dropped from the Goal store even if stop is unavailable.
         }
       }
-      const latest = await viewFresh(store.get(threadId) ?? goal);
-      const workers = latest.agents.filter((agent) => agent.role === "worker");
-      const staffed = new Set(
-        workers
-          .filter((agent) => agent.itemId && agent.status !== "error" && agent.status !== "unknown")
-          .map((agent) => agent.itemId as string),
-      );
-      const live = workers.filter(
-        (agent) => agent.status === "running" || agent.status === "starting",
-      ).length;
-      const slots = Math.max(0, MAX_PARALLEL_WORKERS - live);
-      if (slots === 0) return;
-      const needs = open.filter((item) => !staffed.has(item.id)).slice(0, slots);
-      for (const item of needs) {
-        if (item.status === "pending") items.setStatus(threadId, item.id, "in_progress");
-        const spawned = await collab.spawnWorker({
-          rootThreadId: threadId,
-          itemId: item.id,
-          step: item.step,
-          objective: goal.objective,
-        });
-        if (spawned) {
-          staffed.add(item.id);
-          bb.log.info(`Goal worker ${spawned.nickname} assigned to ${item.id} on ${threadId}`);
-        }
-      }
-      if (needs.length > 0) await viewFresh(store.get(threadId) ?? goal);
     } catch (error) {
       bb.log.warn(
-        `Could not staff Goal crew on ${threadId}: ${
+        `Could not tidy Goal crew on ${threadId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -1154,15 +1130,19 @@ export default function plugin(bb: BbPluginApi) {
       return { providers: await listExecutionCatalog(bb, threadId) };
     },
     async listCrews() {
+      // Every root that ever staffed a crew, not just active goals: clearing
+      // a goal must not dump its (hidden) worker threads into the sidebar.
+      const roots = new Set<string>([...store.listActiveThreadIds(), ...collab.listRoots()]);
       const crews = [];
-      for (const threadId of store.listActiveThreadIds()) {
+      for (const threadId of roots) {
         const goal = store.get(threadId);
-        if (!goal) continue;
-        const snap = view(goal);
+        const active = Boolean(goal && (goal.status === "active" || goal.status === "budget_limited"));
+        const snap = goal ? view(goal) : null;
         crews.push({
           threadId,
-          items: snap.items,
-          agents: snap.agents,
+          active,
+          items: snap?.items ?? [],
+          agents: snap?.agents ?? agentCache.get(threadId) ?? [],
           workerIds: collab.threadIdsForRoot(threadId),
         });
       }
