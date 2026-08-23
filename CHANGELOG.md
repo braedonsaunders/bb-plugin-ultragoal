@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1
+
+Owner decisions moved from a sidebar card to the native center-pane question surface:
+
+- request_decision now raises a real pending interaction in the user's thread (bb.ui.requestInput + a plugin pending-interaction renderer): question, consequences, clickable option buttons, a custom-answer field, and "Dismiss for now". Clicking an answer resolves the durable decision and wakes the orchestrator with it.
+- Interactions cap at one hour, so a keeper re-raises the card until the decision is answered (dismissal stops the nagging for the session; the decision stays open and answerable via bb ultragoal decide, which also aborts any live card). Cards survive plugin/server restarts via the pulse sweep.
+- The right-pane "Needs you" section is deleted — the status card and get_goal keep reporting open decisions.
+
 ## 0.10.0
 
 Owner decisions are first-class ("Needs you"). A parked decision was one sentence inside one progress note, then buried under poll turns — invisible to the person it waited on:

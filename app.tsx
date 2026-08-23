@@ -6,6 +6,7 @@ import {
   useComposerView,
   useRealtime,
   useRpc,
+  type PluginPendingInteractionProps,
 } from "@get-bb/plugin-sdk/app";
 import type { GoalAgent, GoalItem, GoalSnapshot, NowRow } from "./contract";
 import { rpcContract } from "./contract";
@@ -703,7 +704,6 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-        <DecisionsSection decisions={goal.decisions} threadId={threadId} />
         {items.length === 0 && agents.length === 0 ? (
           <div className="px-2 py-8 text-sm leading-relaxed text-muted-foreground">
             No requirements yet. Resume the UltraGoal and the agent will fill this list with
@@ -1203,50 +1203,6 @@ function NowSection({
   );
 }
 
-function DecisionsSection({
-  decisions,
-  threadId,
-}: {
-  decisions: GoalSnapshot["decisions"];
-  threadId: string;
-}) {
-  if (decisions.length === 0) return null;
-  return (
-    <section className="px-1 pb-2">
-      <div className="flex items-center gap-1.5 px-1 pb-1 pt-1.5">
-        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-foreground" />
-        <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-foreground">
-          Needs you
-        </span>
-        <span className="text-[10px] text-muted-foreground">{decisions.length}</span>
-      </div>
-      <ul className="space-y-1.5">
-        {decisions.map((decision) => (
-          <li
-            key={decision.id}
-            className="rounded-md border border-foreground/25 px-2 py-1.5"
-          >
-            <div className="text-[13px] leading-snug text-foreground">{decision.question}</div>
-            {decision.context ? (
-              <div className="mt-1 text-[11px] leading-snug text-muted-foreground">
-                {decision.context}
-              </div>
-            ) : null}
-            {decision.options.length > 0 ? (
-              <div className="mt-1 text-[11px] text-muted-foreground">
-                Options: {decision.options.join(" · ")}
-              </div>
-            ) : null}
-            <div className="mt-1 font-mono text-[10px] text-muted-foreground">
-              bb ultragoal decide {decision.id} &lt;answer&gt; --thread {threadId}
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
 function ItemGroup({
   title,
   items,
@@ -1325,7 +1281,94 @@ function ItemGroup({
   );
 }
 
+function OwnerDecisionCard({
+  interaction,
+  submit,
+  cancel,
+}: PluginPendingInteractionProps) {
+  const payload = (interaction.payload ?? {}) as {
+    question?: string;
+    context?: string | null;
+    options?: string[];
+  };
+  const [custom, setCustom] = useState("");
+  const [busy, setBusy] = useState(false);
+  const answer = async (value: string) => {
+    if (busy || !value.trim()) return;
+    setBusy(true);
+    try {
+      await submit({ answer: value.trim() });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="rounded-md border border-border p-3">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+        Owner decision
+      </div>
+      <div className="mt-1 text-sm leading-snug text-foreground">
+        {payload.question ?? interaction.title}
+      </div>
+      {payload.context ? (
+        <div className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+          {payload.context}
+        </div>
+      ) : null}
+      {(payload.options ?? []).length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {(payload.options ?? []).map((option) => (
+            <button
+              key={option}
+              type="button"
+              disabled={busy}
+              className="rounded-md border border-border px-2.5 py-1 text-[12px] text-foreground hover:bg-state-hover disabled:opacity-50"
+              onClick={() => void answer(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <form
+        className="mt-2 flex gap-1.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void answer(custom);
+        }}
+      >
+        <input
+          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          placeholder="Custom answer"
+          value={custom}
+          disabled={busy}
+          onChange={(event) => setCustom(event.target.value)}
+        />
+        <button
+          type="submit"
+          className="rounded-md border border-border px-2.5 py-1 text-[12px] text-foreground hover:bg-state-hover disabled:opacity-50"
+          disabled={busy || !custom.trim()}
+        >
+          Answer
+        </button>
+      </form>
+      <button
+        type="button"
+        className="mt-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+        disabled={busy}
+        onClick={() => void cancel()}
+      >
+        Dismiss for now
+      </button>
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
+  app.slots.pendingInteraction({
+    id: "owner-decision",
+    component: OwnerDecisionCard,
+  });
   app.slots.experimental_threadHeaderAction({
     id: "ultragoal-provider-icon",
     title: "Provider",

@@ -777,6 +777,103 @@ export default function plugin(bb: BbPluginApi) {
     lastGoalEvent.set(rootThreadId, Date.now());
   }
 
+  // Owner decisions render as native center-pane question cards
+  // (bb.ui.requestInput + the plugin's owner-decision renderer). Interactions
+  // cap at one hour, so a keeper re-raises the card until the durable decision
+  // record is answered; answering from the CLI aborts the live card.
+  const decisionKeepers = new Set<string>();
+  const decisionDismissed = new Set<string>();
+  const decisionAborts = new Map<string, AbortController>();
+
+  async function applyDecisionAnswer(
+    rootThreadId: string,
+    decisionId: string,
+    answer: string,
+  ): Promise<boolean> {
+    const resolved = decisions.resolve(rootThreadId, decisionId, "answered", answer);
+    if (!resolved) return false;
+    markGoalEvent(rootThreadId);
+    decisionAborts.get(decisionId)?.abort();
+    const goal = store.get(rootThreadId);
+    if (goal) publish(rootThreadId, view(goal));
+    bb.log.info(`Owner decision ${decisionId} answered on ${rootThreadId}: ${answer.slice(0, 80)}`);
+    await sendSteering(
+      rootThreadId,
+      `OWNER DECISION ANSWERED (${decisionId}): "${resolved.question}" -> ${answer}. Act on this now and resolve any dependent work.`,
+      (await threadIsRunning(bb, rootThreadId)) ? "auto" : "start",
+    );
+    return true;
+  }
+
+  function raiseDecisionPrompt(rootThreadId: string, decisionId: string): void {
+    if (decisionKeepers.has(decisionId) || decisionDismissed.has(decisionId)) return;
+    decisionKeepers.add(decisionId);
+    void (async () => {
+      try {
+        while (true) {
+          const current = decisions.get(rootThreadId, decisionId);
+          if (!current || current.status !== "open") return;
+          const controller = new AbortController();
+          decisionAborts.set(decisionId, controller);
+          let result: Awaited<ReturnType<typeof bb.ui.requestInput>>;
+          try {
+            result = await bb.ui.requestInput(
+              {
+                threadId: rootThreadId,
+                rendererId: "owner-decision",
+                title: current.question,
+                payload: {
+                  decisionId: current.id,
+                  question: current.question,
+                  context: current.context,
+                  options: current.options,
+                  threadId: rootThreadId,
+                },
+                timeoutMs: 60 * 60_000,
+              },
+              { signal: controller.signal },
+            );
+          } catch (error) {
+            bb.log.warn(
+              `Owner-decision prompt failed on ${rootThreadId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            return;
+          } finally {
+            decisionAborts.delete(decisionId);
+          }
+          if (result.outcome === "submitted") {
+            const raw = result.value as { answer?: unknown } | string | null;
+            const answer = (
+              typeof raw === "string" ? raw : String((raw as { answer?: unknown })?.answer ?? "")
+            ).trim();
+            if (!answer) continue;
+            await applyDecisionAnswer(rootThreadId, decisionId, answer);
+            return;
+          }
+          if (result.reason === "timeout") continue;
+          if (result.reason === "user") {
+            // Dismissed: stop nagging this session; the decision stays open,
+            // visible in status, answerable via CLI.
+            decisionDismissed.add(decisionId);
+            return;
+          }
+          // Lifecycle cancel (restart/stop/abort): the pulse sweep re-raises.
+          return;
+        }
+      } finally {
+        decisionKeepers.delete(decisionId);
+      }
+    })();
+  }
+
+  function ensureDecisionPrompts(rootThreadId: string): void {
+    for (const decision of decisions.list(rootThreadId, "open")) {
+      raiseDecisionPrompt(rootThreadId, decision.id);
+    }
+  }
+
   function queueIntegration(rootThreadId: string, workerThreadId: string, itemId: string | null): void {
     if (!itemId) return;
     const prev = integrating.get(rootThreadId) ?? Promise.resolve();
@@ -1438,6 +1535,7 @@ export default function plugin(bb: BbPluginApi) {
       const goal = store.get(threadId);
       if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
       try {
+        ensureDecisionPrompts(threadId);
         await requestProgressUpdate(threadId, goal);
         const reconciled = await reconcileFinishedSlices(threadId);
         const accounted = await account(threadId, { busy: goalIsBusy(threadId), scan: true });
@@ -1940,6 +2038,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       }
       const decision = decisions.request(rootThreadId, { question, context, options });
       bb.log.info(`Owner decision ${decision.id} requested on ${rootThreadId}: ${question.slice(0, 80)}`);
+      raiseDecisionPrompt(rootThreadId, decision.id);
       void publishFresh(rootThreadId);
       return {
         content: [
@@ -1948,9 +2047,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
             text: JSON.stringify({
               decision_id: decision.id,
               status: decision.status,
-              answer_command: `bb ultragoal decide ${decision.id} <answer> --thread ${rootThreadId}`,
-              reminder:
-                "Post one short user-visible chat message stating this question now, then continue other work — do not wait idle on the answer.",
+              note: "The question renders as a native card in the user's thread; you will be woken with the answer. Continue all work that does not depend on it — do not wait idle.",
             }),
           },
         ],
@@ -1977,6 +2074,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
           isError: true,
         };
       }
+      decisionAborts.get(resolved.id)?.abort();
       markGoalEvent(rootThreadId);
       void publishFresh(rootThreadId);
       return {
@@ -2373,19 +2471,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
         if (!decisionId || !answer) {
           return { exitCode: 1, stderr: "Usage: bb ultragoal decide <decision_id> <answer> [--thread <id>]" };
         }
-        const resolved = decisions.resolve(threadId, decisionId, "answered", answer);
-        if (!resolved) return { exitCode: 1, stderr: `Decision not found: ${decisionId}` };
-        markGoalEvent(threadId);
-        const goal = store.get(threadId);
-        if (goal) {
-          publish(threadId, view(goal));
-          await sendSteering(
-            threadId,
-            `OWNER DECISION ANSWERED (${resolved.id}): "${resolved.question}" -> ${answer}. Act on this now and resolve any dependent work.`,
-            (await threadIsRunning(bb, threadId)) ? "auto" : "start",
-          );
-        }
-        return { exitCode: 0, stdout: `Decision ${resolved.id} answered: ${answer}` };
+        const applied = await applyDecisionAnswer(threadId, decisionId, answer);
+        if (!applied) return { exitCode: 1, stderr: `Decision not found: ${decisionId}` };
+        return { exitCode: 0, stdout: `Decision ${decisionId} answered: ${answer}` };
       }
 
       if (action === "workers") {
