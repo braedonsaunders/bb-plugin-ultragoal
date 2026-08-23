@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+Architecture consolidation: rows are projected liveness, semantics are structured annotations, and nothing is guessed from prose.
+
+- The pane model (Now rows and Up next) is computed in exactly one server-side fold (lib/projection.ts) and shipped inside the snapshot; the UI renders it verbatim and derives nothing. Server and pane can no longer disagree.
+- Titles come only from structure: a claimed plan item's own step text (authoritative, never rewritten from messages), the first line of a spawn_agent call, or an explicit "SLICE (item_id=...):" marker in a spawn prompt. Free-line guessing — which turned context like "HEAD is 38b9e4ed" into row titles — is gone; an unclaimed native subagent shows honestly as "Subagent task".
+- Machine-readable completion: every spawned worker is instructed to end with ULTRAGOAL_DONE: <evidence> or ULTRAGOAL_BLOCKED: <blocker>; the completion loop honors the contract first and falls back to prose only for workers spawned without it.
+- spawn_agent no longer auto-claims an arbitrary unassigned Next item when item_id is omitted; it claims by explicit id, exact text match, or creates a fresh row.
+
 ## 0.3.9
 
 - Slice extraction skips bullet lines, so a prompt's file list can no longer become the Now row title.

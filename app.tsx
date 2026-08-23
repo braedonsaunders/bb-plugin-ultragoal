@@ -7,7 +7,7 @@ import {
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
-import type { GoalAgent, GoalItem, GoalSnapshot } from "./contract";
+import type { GoalAgent, GoalItem, GoalSnapshot, NowRow } from "./contract";
 import { rpcContract } from "./contract";
 import { providerLabel, providerMarkSpec, providerMarkSvg } from "./lib/provider-marks";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles";
@@ -510,20 +510,10 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   const agents = goal?.agents ?? [];
   const doneItems = items.filter((item) => item.status === "completed");
   const liveAgents = agents.filter((agent) => agent.status === "running" || agent.status === "starting");
-  const liveItemIds = new Set(
-    agents
-      .filter((agent) => agent.status === "running" || agent.status === "starting")
-      .map((agent) => agent.itemId)
-      .filter((id): id is string => Boolean(id)),
-  );
-  const nowItems = nowDisplayItems(items, agents);
-  const nowIds = new Set(nowItems.map((item) => item.id));
-  const nextItems = items.filter(
-    (item) =>
-      (item.status === "pending" || item.status === "in_progress") &&
-      !nowIds.has(item.id) &&
-      !liveItemIds.has(item.id),
-  );
+  // The pane model is computed server-side (lib/projection.ts) and rendered
+  // verbatim; the UI derives nothing.
+  const nowRows = goal?.now ?? [];
+  const nextItems = goal?.next ?? [];
   const done = doneItems.length;
   const elapsed = goal ? liveSeconds(goal, now) : 0;
   const hours = Math.max(elapsed / 3600, 1 / 60);
@@ -737,7 +727,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
             value={items.length > 0 ? `${done}/${items.length}` : "—"}
             hint={
               items.length > 0
-                ? `${nowItems.length} now · ${nextItems.length} next`
+                ? `${nowRows.length} now · ${nextItems.length} next`
                 : liveAgents.length > 0
                   ? `${liveAgents.length} live`
                   : "awaiting plan"
@@ -802,11 +792,10 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
         ) : (
           <>
             <NowSection
-              items={nowItems}
-              agents={agents}
+              rows={nowRows}
               collapsed={collapsed.now}
               onToggleCollapsed={() => toggleCollapsed("now")}
-              onOpenAgent={(agent) => navigate.toThread(agent.threadId)}
+              onOpenThread={(id) => navigate.toThread(id)}
             />
             <ItemGroup
               title="Up next"
@@ -1155,100 +1144,16 @@ function SectionHeading({
   );
 }
 
-function isLiveAgent(agent: GoalAgent): boolean {
-  return agent.status === "running" || agent.status === "starting";
-}
-
-function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
-  // Now is the live list: exactly one row per running subagent, titled by its
-  // slice. Open items without a running worker belong in Next, not here.
-  const open = new Map(
-    items.filter((item) => item.status === "in_progress").map((item) => [item.id, item]),
-  );
-  const seen = new Set<string>();
-  const out: GoalItem[] = [];
-  for (const agent of agents) {
-    if (agent.role === "verifier" || !isLiveAgent(agent)) continue;
-    if (!isNamedWorker(agent) && !isNativeTask(agent)) continue;
-    const item = agent.itemId ? open.get(agent.itemId) : undefined;
-    if (item) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      out.push(item);
-      continue;
-    }
-    const id = `live:${agent.taskName}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    out.push({
-      id,
-      step: agent.title?.trim() || "Subagent task",
-      status: "in_progress",
-    });
-  }
-  return out;
-}
-
-function agentStatusLabel(status: GoalAgent["status"]): string {
-  if (status === "starting") return "starting";
-  if (status === "running") return "running";
-  if (status === "completed") return "done";
-  if (status === "error") return "error";
-  if (status === "stopped") return "stopped";
-  if (status === "idle") return "idle";
-  return "unknown";
-}
-
-function isNativeTask(agent: GoalAgent): boolean {
-  return agent.taskName.startsWith("task/");
-}
-
-function isNamedWorker(agent: GoalAgent): boolean {
-  return !isNativeTask(agent) && !/^Subagent \d+$/i.test(agent.nickname);
-}
-
-function primaryAgent(agents: GoalAgent[]): GoalAgent | undefined {
-  const workers = agents.filter(
-    (agent) =>
-      agent.role !== "verifier" &&
-      agent.status !== "stopped" &&
-      agent.status !== "error",
-  );
-  const named = workers.filter(isNamedWorker);
-  // Liveness beats naming: an idle named worker must never front a row whose
-  // actual live occupant is someone else.
-  return (
-    named.find(isLiveAgent) ??
-    workers.find(isLiveAgent) ??
-    named.find((agent) => agent.status === "idle" || agent.status === "unknown") ??
-    named[0] ??
-    workers[0]
-  );
-}
-
-function nowHeading(item: GoalItem, agent?: GoalAgent): string {
-  const task = shortSliceTitle(item.step) || agent?.title?.trim() || "";
-  if (task && task !== agent?.nickname) return task;
-  if (agent?.title && agent.title !== agent.nickname) return agent.title;
-  return task || currentSliceTitle(item.step);
-}
-
-function NowRow({
-  item,
-  agents,
-  onOpenAgent,
+// Now rows arrive fully computed from the server (lib/projection.ts): one row
+// per live subagent, already titled. The UI only renders.
+function NowRowView({
+  row,
+  onOpenThread,
 }: {
-  item: GoalItem;
-  agents: GoalAgent[];
-  onOpenAgent: (agent: GoalAgent) => void;
+  row: NowRow;
+  onOpenThread: (threadId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const crew = agents.filter(
-    (agent) =>
-      (agent.itemId === item.id || `live:${agent.taskName}` === item.id) &&
-      (isNamedWorker(agent) || isNativeTask(agent)),
-  );
-  const lead = primaryAgent(crew);
   return (
     <li className="rounded-md">
       <button
@@ -1262,37 +1167,34 @@ function NowRow({
           <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
         </span>
         <span className="min-w-0 flex-1 truncate text-[13px] leading-5 text-foreground">
-          {nowHeading(item, lead)}
+          {row.title}
         </span>
-        {lead ? (
-          <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
-            {lead.nickname}
-          </span>
-        ) : null}
+        <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
+          {row.nickname}
+        </span>
       </button>
       {open ? (
         <div className="mb-1 ml-5 space-y-1.5 border-l border-border/70 py-1 pl-2.5">
-          {lead ? (
+          {row.threadId ? (
             <button
               type="button"
               className="block w-full min-w-0 text-left hover:text-foreground"
-              onClick={() => onOpenAgent(lead)}
+              onClick={() => onOpenThread(row.threadId as string)}
             >
               <div className="truncate text-[12px] leading-4 text-foreground">
-                {lead.nickname}
+                {row.nickname}
                 <span className="ml-1.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-                  {lead.role === "verifier" ? "verify · " : ""}
-                  {lead.status === "idle" || lead.status === "unknown"
-                    ? "working"
-                    : agentStatusLabel(lead.status)}
+                  running
                 </span>
               </div>
               <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
-                {nowHeading(item, lead)}
+                {row.title}
               </div>
             </button>
           ) : (
-            <div className="text-[11px] text-muted-foreground">Waiting for a worker.</div>
+            <div className="text-[11px] text-muted-foreground">
+              Native subagent running inside the root thread.
+            </div>
           )}
         </div>
       ) : null}
@@ -1301,37 +1203,29 @@ function NowRow({
 }
 
 function NowSection({
-  items,
-  agents,
+  rows,
   collapsed,
   onToggleCollapsed,
-  onOpenAgent,
+  onOpenThread,
 }: {
-  items: GoalItem[];
-  agents: GoalAgent[];
+  rows: NowRow[];
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  onOpenAgent: (agent: GoalAgent) => void;
+  onOpenThread: (threadId: string) => void;
 }) {
-  const live = agents.filter(isLiveAgent);
-  if (items.length === 0 && live.length === 0) return null;
+  if (rows.length === 0) return null;
   return (
     <section className="px-1 pb-1">
       <SectionHeading
         title="Now"
-        count={String(items.length)}
+        count={String(rows.length)}
         collapsed={collapsed}
         onToggle={onToggleCollapsed}
       />
       {collapsed ? null : (
         <ul>
-          {items.map((item) => (
-            <NowRow
-              key={item.id}
-              item={item}
-              agents={agents}
-              onOpenAgent={onOpenAgent}
-            />
+          {rows.map((row) => (
+            <NowRowView key={row.key} row={row} onOpenThread={onOpenThread} />
           ))}
         </ul>
       )}

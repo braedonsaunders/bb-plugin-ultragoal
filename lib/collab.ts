@@ -76,7 +76,6 @@ export function createCollabStore(
   bb: BbPluginApi,
   hooks?: {
     onChange?: (rootThreadId: string) => void;
-    nextItemId?: (rootThreadId: string) => string | null;
     retitleItem?: (rootThreadId: string, itemId: string, message: string) => void;
     claimItem?: (
       rootThreadId: string,
@@ -85,6 +84,9 @@ export function createCollabStore(
         message: string;
         workerThreadId?: string;
         createIfMissing?: boolean;
+        /** "tool": spawn_agent message (first line is the task). "prompt": a
+         * discovered thread's spawn prompt (only SLICE markers are trusted). */
+        source?: "tool" | "prompt";
       },
     ) => string | null;
     /** Status of a plan item, so retired workers can refuse new slices. */
@@ -422,6 +424,7 @@ export function createCollabStore(
           workerThreadId: agent.threadId,
           // Idle stragglers may re-link an open slice but never mint new ones.
           createIfMissing: live,
+          source: "prompt",
         });
         if (!claimed) continue;
         const row = byId.get(agent.threadId);
@@ -671,11 +674,17 @@ export function createCollabStore(
           const slug = /^[a-z0-9_]+$/.test(task_name) ? task_name : slugFromName(displayName);
           const taskName = `${parentPath === "/root" ? "/root" : parentPath}/${slug}`;
           const rootThreadId = rootId(threadId);
-          const requested = item_id?.trim() || hooks?.nextItemId?.(rootThreadId) || null;
+          // Explicit item_id, exact text match, or a fresh item — never an
+          // arbitrary unassigned Next row (that repurposed unrelated slices).
+          const requested = item_id?.trim() || null;
           const itemId =
             role === "verifier"
               ? requested
-              : hooks?.claimItem?.(rootThreadId, { itemId: requested, message: trimmed }) ?? requested;
+              : hooks?.claimItem?.(rootThreadId, {
+                  itemId: requested,
+                  message: trimmed,
+                  source: "tool",
+                }) ?? requested;
           if (itemId && itemHasWorker(rootThreadId, itemId) && role !== "verifier") {
             return {
               content: [
@@ -701,7 +710,12 @@ export function createCollabStore(
               ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes."
               : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
             "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
-          ].join("\n\n");
+            role === "verifier"
+              ? ""
+              : "When the slice is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <one-sentence evidence>. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
           const spawnArgs = {
             projectId: parent.projectId ?? projectId,
             parentThreadId: threadId,

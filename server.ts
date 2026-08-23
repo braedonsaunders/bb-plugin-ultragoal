@@ -22,27 +22,46 @@ import {
   type LiveNativeTask,
 } from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
+import { projectPane } from "./lib/projection.js";
 
 const SLICE_PREAMBLE =
-  /^(you are|parent goal|parent objective|complete only|the new agent's|do not|constraints\b|local main|skip |when done|report |end with|if )/i;
+  /^(you are|parent goal|parent objective|complete only|the new agent's|do not|constraints\b|local main|skip |when done|report |end with|if |head is)/i;
 
-function sliceTitleFromMessage(message: string): string {
-  // Spawn prompts open with role boilerplate ("You are a Goal worker...");
-  // the actual slice is the first informative line after it.
-  for (const raw of message.trim().split(/\n/).slice(0, 8)) {
-    const line = raw
-      .replace(/^#+\s*/, "")
-      .trim()
-      .replace(/^(?:assigned\s+)?slice\s*\([^)]*\)\s*:\s*/i, "");
-    if (!line) continue;
-    // Bullet lines are supporting detail (file lists), not the task sentence.
-    if (/^[-*•]\s/.test(line)) continue;
-    const title = currentSliceTitle(line);
-    if (title.length < 8 || title.length > 180) continue;
-    if (SLICE_PREAMBLE.test(title)) continue;
-    return title;
+// Titles come from structure, never from guessing at prose. Two structured
+// sources exist and each gets its own extractor:
+//   - a spawn_agent message, whose first line IS the task by tool contract;
+//   - an explicit "SLICE:" / "SLICE (item_id=...):" marker line in a prompt.
+// Guessing "the first informative line" is what turned context like
+// "HEAD is 38b9e4ed" into Now row titles.
+
+function titleFromFirstLine(message: string): string {
+  const line = message.trim().split(/\n/)[0]?.replace(/^#+\s*/, "").trim() ?? "";
+  const cleaned = line.replace(/^(?:assigned\s+)?slice\s*(?:\([^)]*\))?\s*:\s*/i, "");
+  if (/^[-*•]\s/.test(cleaned)) return "";
+  const title = currentSliceTitle(cleaned);
+  if (title.length < 8 || title.length > 180) return "";
+  if (SLICE_PREAMBLE.test(title)) return "";
+  return title;
+}
+
+function titleFromSliceMarker(message: string): string {
+  for (const raw of message.trim().split(/\n/).slice(0, 16)) {
+    const match = /^(?:#+\s*)?(?:assigned\s+)?slice\s*(?:\([^)]*\))?\s*:\s*(.+)$/i.exec(raw.trim());
+    if (!match) continue;
+    const title = currentSliceTitle(match[1]!.trim());
+    if (title.length >= 8 && title.length <= 180 && !SLICE_PREAMBLE.test(title)) return title;
   }
   return "";
+}
+
+// Machine-readable worker completion, injected into every spawned worker's
+// prompt. Prose regex remains only as a fallback for workers that predate the
+// contract or were spawned natively without it.
+function structuredReport(text: string | null | undefined): "done" | "blocked" | null {
+  const tail = (text ?? "").slice(-2000);
+  if (/\bULTRAGOAL_BLOCKED\b/.test(tail)) return "blocked";
+  if (/\bULTRAGOAL_DONE\b/.test(tail)) return "done";
+  return null;
 }
 import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
 import {
@@ -80,6 +99,8 @@ function snapshotOf(
   agentRunning: boolean,
   agents: GoalAgent[],
 ): GoalSnapshot {
+  const itemList = items.list(goal.threadId);
+  const pane = projectPane(goal.threadId, itemList, agents);
   return {
     threadId: goal.threadId,
     objective: goal.objective,
@@ -95,8 +116,10 @@ function snapshotOf(
     lastProgressAt: goal.lastProgressAt,
     lastAccountedAt: goal.lastAccountedAt,
     agentRunning,
-    items: items.list(goal.threadId),
+    items: itemList,
     agents,
+    now: pane.now,
+    next: pane.next,
     settings: resolveGoalSettings(
       {
         verifyEnabled: goal.verifyEnabledOverride,
@@ -187,39 +210,34 @@ export default function plugin(bb: BbPluginApi) {
       void publishFresh(rootThreadId);
     },
     retitleItem(rootThreadId, itemId, message) {
-      const title = sliceTitleFromMessage(message);
+      const title = titleFromFirstLine(message);
       if (!title) return;
       items.updateStep(rootThreadId, itemId, title);
       items.setStatus(rootThreadId, itemId, "in_progress");
       collab.setWorkTitleForItem(rootThreadId, itemId, title);
     },
-    claimItem(rootThreadId, { itemId, message, workerThreadId, createIfMissing }) {
-      const title = sliceTitleFromMessage(message);
-      if (!title) {
-        // No extractable slice text, but an explicit item reference still
-        // claims: promote it so the slice leaves Next while it is worked.
-        if (itemId) {
-          const prior = items.list(rootThreadId).find((item) => item.id === itemId);
-          if (prior && prior.status !== "completed") {
-            items.setStatus(rootThreadId, itemId, "in_progress");
-            collab.setWorkTitleForItem(rootThreadId, itemId, prior.step);
-          }
+    claimItem(rootThreadId, { itemId, message, workerThreadId, createIfMissing, source }) {
+      // An explicit item reference is the strongest claim: the item's own step
+      // text is authoritative and is never rewritten from the message.
+      const preferred = itemId
+        ? items.list(rootThreadId).find((item) => item.id === itemId)
+        : undefined;
+      if (preferred && preferred.status !== "completed") {
+        const occupants = workersOnItem(rootThreadId, preferred.id);
+        const free =
+          occupants.length === 0 ||
+          (Boolean(workerThreadId) && occupants.every((id) => id === workerThreadId));
+        if (free) {
+          items.setStatus(rootThreadId, preferred.id, "in_progress");
+          collab.setWorkTitleForItem(rootThreadId, preferred.id, preferred.step);
+          return preferred.id;
         }
-        return itemId;
       }
-      const preferred = itemId ? items.list(rootThreadId).find((item) => item.id === itemId) : undefined;
-      const occupants = itemId ? workersOnItem(rootThreadId, itemId) : [];
-      const exclusive =
-        Boolean(workerThreadId) &&
-        occupants.length > 0 &&
-        occupants.every((id) => id === workerThreadId);
-      const free = occupants.length === 0;
-      if (preferred && preferred.status !== "completed" && (free || exclusive)) {
-        items.updateStep(rootThreadId, preferred.id, title);
-        items.setStatus(rootThreadId, preferred.id, "in_progress");
-        collab.setWorkTitleForItem(rootThreadId, preferred.id, title);
-        return preferred.id;
-      }
+      // Otherwise the message must yield a title through structure: the first
+      // line of a spawn_agent call, or an explicit SLICE marker in a prompt.
+      const title =
+        source === "prompt" ? titleFromSliceMarker(message) : titleFromFirstLine(message);
+      if (!title) return null;
       // Match an existing unheld open slice by text before minting a duplicate.
       const normalized = title.toLowerCase().replace(/\s+/g, " ").trim();
       const match = items
@@ -232,29 +250,16 @@ export default function plugin(bb: BbPluginApi) {
         );
       if (match) {
         items.setStatus(rootThreadId, match.id, "in_progress");
-        collab.setWorkTitleForItem(rootThreadId, match.id, title);
+        collab.setWorkTitleForItem(rootThreadId, match.id, match.step);
         return match.id;
       }
       if (createIfMissing === false) return null;
       const created = items.add(rootThreadId, title, "in_progress");
       if (created) collab.setWorkTitleForItem(rootThreadId, created.id, title);
-      return created?.id ?? itemId;
+      return created?.id ?? null;
     },
     itemStatus(rootThreadId, itemId) {
       return items.list(rootThreadId).find((item) => item.id === itemId)?.status ?? null;
-    },
-    nextItemId(rootThreadId) {
-      const used = new Set(
-        (agentCache.get(rootThreadId) ?? [])
-          .map((agent) => agent.itemId)
-          .filter((id): id is string => Boolean(id)),
-      );
-      const open = items.list(rootThreadId).filter((item) => item.status !== "completed");
-      return (
-        open.find((item) => item.status === "pending" && !used.has(item.id))?.id ??
-        open.find((item) => !used.has(item.id))?.id ??
-        null
-      );
     },
   });
   workersOnItem = (rootThreadId, itemId) => collab.workersOnItem(rootThreadId, itemId);
@@ -560,7 +565,11 @@ export default function plugin(bb: BbPluginApi) {
       if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
     } else {
       if (view(goal).settings.verifyEnabled) return false;
-      if (!reportSaysDone(report)) return false;
+      // The injected report contract decides first; prose is a fallback for
+      // workers spawned without it.
+      const contract = structuredReport(report);
+      if (contract === "blocked") return false;
+      if (contract !== "done" && !reportSaysDone(report)) return false;
     }
     const item = items
       .list(rootThreadId)

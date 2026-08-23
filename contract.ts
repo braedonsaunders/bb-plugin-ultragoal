@@ -41,6 +41,16 @@ export const goalAgentSchema = z.object({
   summary: z.string().nullable(),
 });
 
+// One rendered row in Now: a genuinely live subagent and its slice. Computed
+// server-side in lib/projection.ts; the UI renders it verbatim.
+export const nowRowSchema = z.object({
+  key: z.string(),
+  title: z.string(),
+  nickname: z.string(),
+  threadId: z.string().nullable(),
+  itemId: z.string().nullable(),
+});
+
 export const goalSettingsSchema = z.object({
   verifyEnabled: z.boolean(),
   verifyProvider: z.string(),
@@ -66,6 +76,8 @@ export const goalSnapshotSchema = z.object({
   agentRunning: z.boolean(),
   items: z.array(goalItemSchema),
   agents: z.array(goalAgentSchema),
+  now: z.array(nowRowSchema),
+  next: z.array(goalItemSchema),
   settings: goalSettingsSchema,
 });
 
@@ -75,6 +87,7 @@ export type GoalItem = z.infer<typeof goalItemSchema>;
 export type GoalAgentStatus = z.infer<typeof goalAgentStatusSchema>;
 export type GoalAgent = z.infer<typeof goalAgentSchema>;
 export type GoalAgentRole = z.infer<typeof goalAgentRoleSchema>;
+export type NowRow = z.infer<typeof nowRowSchema>;
 export type GoalSettings = z.infer<typeof goalSettingsSchema>;
 export type GoalSnapshot = z.infer<typeof goalSnapshotSchema>;
 
