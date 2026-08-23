@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1
+
+Live-goal monitoring caught a restaff hazard; two structural guards close it:
+
+- A slice whose step declares a live thread ("— thr_x running") is held — the declared owner just claimed a different item id from its spawn prompt — and is never double-staffed. Orchestrators even write "SOLE owner thr_x" into their todos; the scheduler now believes them.
+- An unmanaged in_progress slice the crew never touched is a native-todo mirror line, often a ghost of work already live under another item id. While the root runs free it stays the orchestrator's to staff; the scheduler takes it over only when the root is blocked (the original rescue semantics). Previously-held slices whose workers all died still restaff unconditionally.
+
 ## 0.6.0
 
 - Sidebar provider marks moved out into their own plugin, [Thread Provider Icons](https://github.com/braedonsaunders/bb-plugin-thread-provider-icons). Drawing every thread's provider logo was generic chrome that had nothing to do with goals, and bundling it meant you could not have the icons without UltraGoal or UltraGoal without the icons. Install `thread-provider-icons` to keep them. UltraGoal's own sidebar marks — the goal pill and worker-row hiding — are unchanged, as is the provider icon in the thread header.

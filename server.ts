@@ -733,6 +733,31 @@ export default function plugin(bb: BbPluginApi) {
           if (holders.some((agent) => agent.status === "idle" || agent.status === "completed")) {
             continue;
           }
+          // A step that declares a live thread ("— thr_x running") IS held —
+          // the declared owner just claimed a different item id from its
+          // spawn prompt. Never double-staff a declared live owner.
+          const declaredLive = (item.step.match(/thr_[a-z0-9]+/gi) ?? []).some((ref) =>
+            agents.some(
+              (agent) =>
+                agent.threadId === ref &&
+                (agent.status === "running" || agent.status === "starting"),
+            ),
+          );
+          if (declaredLive) continue;
+          // An unmanaged slice the crew never touched is a native-todo mirror
+          // line: while the root runs free it is the orchestrator's to staff
+          // (and often a ghost of work already live under another item id).
+          // The plugin takes it over only when the root is blocked and cannot
+          // — the original rescue semantics.
+          const everHeld =
+            holders.length > 0 || collab.workersOnItem(rootThreadId, item.id).length > 0;
+          if (
+            !item.managed &&
+            !everHeld &&
+            (liveTaskCounts.get(rootThreadId) ?? 0) === 0
+          ) {
+            continue;
+          }
           const updatedAt = items.updatedAt(rootThreadId, item.id);
           if (updatedAt == null || now - updatedAt < RESCUE_AFTER_MS) continue;
           for (const holder of holders) collab.forget(holder.threadId);
