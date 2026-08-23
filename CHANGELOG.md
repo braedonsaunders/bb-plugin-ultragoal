@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.0
+
+Active supervision without the poll spam. Event gating (0.9.0) over-corrected: it killed the busy-poll loop but also idled the orchestrator's judgment — nobody reviewed worker direction, merged branches promptly, or narrated substance:
+
+- The 5-minute heartbeat is now a SUPERVISION PASS with explicit duties, in order: inspect each live worker's recent output and steer drift with one targeted follow-up (direction is the orchestrator's job; liveness is the plugin's); merge landed branches rebase-train and push the remote; reconcile the plan with reality; end with a substantive visible update (SHAs, one line per worker on what it is actually doing, what is next, risks) — never a bare "no change".
+- More things count as wake events: the scheduler staffing new workers, and a successful auto-integration (the root's cue to push the remote). The gate still blocks empty polling turns.
+
 ## 0.12.2
 
 - Goal workers get their worker tools on every provider. The native-goal exclusion (Codex has its own Goal) applied to whole providers, so codex WORKERS had no report_finding/spawn tools — a hunt worker improvised eight prose findings as chat messages the machinery could not act on. The exclusion now applies only to threads that are not registered goal workers.

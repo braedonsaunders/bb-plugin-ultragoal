@@ -757,6 +757,7 @@ export default function plugin(bb: BbPluginApi) {
         } else {
           slots -= 1;
           staffed = true;
+          markGoalEvent(rootThreadId);
           inFlightFiles.push(...item.files);
           bb.log.info(
             `Scheduler staffed ${restaffed ? "abandoned" : "ready"} slice ${item.id} with ${result.nickname} (${result.threadId}) on ${rootThreadId}`,
@@ -921,6 +922,7 @@ export default function plugin(bb: BbPluginApi) {
         environmentId: worker.environmentId,
         mergeBaseBranch: base,
       });
+      markGoalEvent(rootThreadId);
       bb.log.info(
         `Integrated slice ${itemId}: squash-merged ${environment.branchName ?? worker.environmentId} into ${base} on ${rootThreadId}`,
       );
