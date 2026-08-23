@@ -517,8 +517,12 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       .filter((id): id is string => Boolean(id)),
   );
   const nowItems = nowDisplayItems(items, agents);
+  const nowIds = new Set(nowItems.map((item) => item.id));
   const nextItems = items.filter(
-    (item) => item.status === "pending" && !liveItemIds.has(item.id),
+    (item) =>
+      (item.status === "pending" || item.status === "in_progress") &&
+      !nowIds.has(item.id) &&
+      !liveItemIds.has(item.id),
   );
   const done = doneItems.length;
   const elapsed = goal ? liveSeconds(goal, now) : 0;
@@ -1156,24 +1160,23 @@ function isLiveAgent(agent: GoalAgent): boolean {
 }
 
 function nowDisplayItems(items: GoalItem[], agents: GoalAgent[]): GoalItem[] {
-  // Every open in-progress slice is a Now row, so Now always reconciles with
-  // the done/total counter. Live agents without a plan item get a synthesized
-  // row on top of that.
+  // Now is the live list: exactly one row per running subagent, titled by its
+  // slice. Open items without a running worker belong in Next, not here.
+  const open = new Map(
+    items.filter((item) => item.status === "in_progress").map((item) => [item.id, item]),
+  );
   const seen = new Set<string>();
   const out: GoalItem[] = [];
-  for (const item of items) {
-    if (item.status !== "in_progress" || seen.has(item.id)) continue;
-    seen.add(item.id);
-    out.push(item);
-  }
-  const live = agents.filter(
-    (agent) =>
-      agent.role !== "verifier" &&
-      isLiveAgent(agent) &&
-      (isNamedWorker(agent) || isNativeTask(agent)),
-  );
-  for (const agent of live) {
-    if (agent.itemId && seen.has(agent.itemId)) continue;
+  for (const agent of agents) {
+    if (agent.role === "verifier" || !isLiveAgent(agent)) continue;
+    if (!isNamedWorker(agent) && !isNativeTask(agent)) continue;
+    const item = agent.itemId ? open.get(agent.itemId) : undefined;
+    if (item) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      out.push(item);
+      continue;
+    }
     const id = `live:${agent.taskName}`;
     if (seen.has(id)) continue;
     seen.add(id);

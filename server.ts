@@ -419,7 +419,9 @@ export default function plugin(bb: BbPluginApi) {
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
     try {
       const [listed, liveTasks] = await Promise.all([
-        collab.listForRoot(goal.threadId),
+        // Now renders from liveness, so the crew's thread statuses must be
+        // fresh, not cache defaults.
+        collab.listForRoot(goal.threadId, { refreshLimit: 24 }),
         listLiveNativeTasks(bb, goal.threadId),
       ]);
       await syncNativePlan(goal.threadId);

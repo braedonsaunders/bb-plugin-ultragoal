@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3
+
+- Now is strictly the live list: one row per running subagent, titled by its slice. Open slices without a running worker move to Next until a worker picks them up.
+- Crew thread statuses refresh on every pane update so liveness reflects reality, not cache defaults.
+
 ## 0.3.2
 
 - A finished worker now finishes its slice: with verification off, the worker's own done report completes the plan item; with verification on, only VERIFY_PASS does. A reconcile sweep also closes slices whose workers finished earlier.
