@@ -41,14 +41,17 @@ export const goalAgentSchema = z.object({
   summary: z.string().nullable(),
 });
 
-// One rendered row in Now: a genuinely live subagent and its slice. Computed
-// server-side in lib/projection.ts; the UI renders it verbatim.
+// One rendered row in Now: in-progress work. Either a genuinely live subagent
+// and its slice (live: true), or a started slice no live worker holds
+// (live: false — begun, then left unattended). Computed server-side in
+// lib/projection.ts; the UI renders it verbatim.
 export const nowRowSchema = z.object({
   key: z.string(),
   title: z.string(),
   nickname: z.string(),
   threadId: z.string().nullable(),
   itemId: z.string().nullable(),
+  live: z.boolean(),
 });
 
 export const goalSettingsSchema = z.object({

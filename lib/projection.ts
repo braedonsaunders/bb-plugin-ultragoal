@@ -4,12 +4,14 @@ import { shortSliceTitle } from "./titles.js";
 // The pane model is computed here and nowhere else. One fold, one set of
 // rules, shipped to the UI inside the snapshot so server and pane can never
 // disagree:
-//   - A Now row exists iff a worker agent is genuinely live. Rows are never
-//     synthesized from stored state.
-//   - A row's title is its claimed plan item's step (authoritative), else the
-//     worker thread's own title, else an honest "Subagent task". Titles are
-//     never guessed from prose here.
-//   - Next is every open item no live worker holds.
+//   - Now is all in-progress work. A live row (live: true) exists iff a worker
+//     agent is genuinely live. Every started item no live worker holds also
+//     gets a row (live: false) — begun, then left unattended — so an
+//     in-progress slice can never sit under "Up next".
+//   - A live row's title is its claimed plan item's step (authoritative), else
+//     the worker thread's own title, else an honest "Subagent task". Titles
+//     are never guessed from prose here.
+//   - Next is untouched work only: pending items no live worker holds.
 
 function isLive(agent: GoalAgent): boolean {
   return agent.status === "running" || agent.status === "starting";
@@ -49,11 +51,25 @@ export function projectPane(
       nickname: agent.nickname,
       threadId: isChildThread ? agent.threadId : null,
       itemId: item?.id ?? null,
+      live: true,
     });
   }
-  const next = items.filter(
-    (item) =>
-      (item.status === "pending" || item.status === "in_progress") && !heldByLive.has(item.id),
-  );
+  for (const item of items) {
+    if (item.status !== "in_progress" || heldByLive.has(item.id)) continue;
+    // The idle holder, if one claimed this slice, gives the row a name and a
+    // thread to open; the row still renders as idle, never as running.
+    const holder = agents.find(
+      (agent) => agent.role !== "verifier" && agent.itemId === item.id,
+    );
+    now.push({
+      key: `item:${item.id}`,
+      title: shortSliceTitle(item.step) || item.step.trim(),
+      nickname: holder?.nickname ?? "",
+      threadId: holder && holder.threadId !== rootThreadId ? holder.threadId : null,
+      itemId: item.id,
+      live: false,
+    });
+  }
+  const next = items.filter((item) => item.status === "pending" && !heldByLive.has(item.id));
   return { now, next };
 }

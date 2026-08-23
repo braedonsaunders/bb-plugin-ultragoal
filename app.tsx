@@ -1167,14 +1167,26 @@ function NowRowView({
         aria-expanded={open}
       >
         <span className="w-2 shrink-0 text-[9px] text-muted-foreground">{open ? "▾" : "▸"}</span>
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-foreground">
-          <span className="h-1.5 w-1.5 rounded-full bg-foreground" />
+        <span
+          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border ${
+            row.live ? "border-foreground" : "border-muted-foreground/60"
+          }`}
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              row.live ? "bg-foreground" : "bg-muted-foreground/60"
+            }`}
+          />
         </span>
-        <span className="min-w-0 flex-1 truncate text-[13px] leading-5 text-foreground">
+        <span
+          className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${
+            row.live ? "text-foreground" : "text-foreground/80"
+          }`}
+        >
           {row.title}
         </span>
         <span className="max-w-[7.5rem] shrink-0 truncate text-right text-[11px] leading-5 text-muted-foreground">
-          {row.nickname}
+          {row.live ? row.nickname : row.nickname ? `${row.nickname} · idle` : "idle"}
         </span>
       </button>
       {open ? (
@@ -1188,7 +1200,7 @@ function NowRowView({
               <div className="truncate text-[12px] leading-4 text-foreground">
                 {row.nickname}
                 <span className="ml-1.5 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-                  running
+                  {row.live ? "running" : "idle"}
                 </span>
               </div>
               <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
@@ -1197,7 +1209,9 @@ function NowRowView({
             </button>
           ) : (
             <div className="text-[11px] text-muted-foreground">
-              Native subagent running inside the root thread.
+              {row.live
+                ? "Native subagent running inside the root thread."
+                : "Started, but no worker is on it right now."}
             </div>
           )}
         </div>
@@ -1296,13 +1310,6 @@ function ItemGroup({
               >
                 {shortSliceTitle(item.step) || currentSliceTitle(item.step)}
               </span>
-              {active ? (
-                // Started but no live worker holds it. Spell it out: the dot
-                // marker alone reads like a checked box at this size.
-                <span className="mt-0.5 shrink-0 rounded-sm bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
-                  in progress
-                </span>
-              ) : null}
             </li>
           );
         })}
