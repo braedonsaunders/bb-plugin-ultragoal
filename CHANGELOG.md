@@ -21,6 +21,8 @@ The model plans, deterministic code schedules. Research synthesis across Anthrop
 - **Work-related humorous names.** Plugin-spawned workers derive their display names from the slice's own text ("Captain Suites", "The Idempotency Reckoning") instead of a generic pool, and the orchestrator guidance asks for the same.
 - Pane: Up next shows a "blocked" chip for slices with unmet deps; Settings gains a Worker slots input; the header shows the slot count; `bb ultragoal pane` includes findings counts.
 
+## 0.4.11
+
 Now is verified against the provider's own subagent lifecycle, and stalls get healed instead of displayed:
 
 - Task calls pair to OpenCode's part state by call id (bb's toolCall id equals OpenCode's callID), making the provider store the liveness authority. This kills two phantom-row bugs: OpenCode rewrites the tool name on completion (so bb-side scans left every finished task dangling open), and killed subagents never emit a completion at all. Running task rows are titled from the call's own description.
