@@ -35,6 +35,8 @@ function sliceTitleFromMessage(message: string): string {
       .trim()
       .replace(/^(?:assigned\s+)?slice\s*\([^)]*\)\s*:\s*/i, "");
     if (!line) continue;
+    // Bullet lines are supporting detail (file lists), not the task sentence.
+    if (/^[-*•]\s/.test(line)) continue;
     const title = currentSliceTitle(line);
     if (title.length < 8 || title.length > 180) continue;
     if (SLICE_PREAMBLE.test(title)) continue;

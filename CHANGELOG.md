@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.9
+
+- Slice extraction skips bullet lines, so a prompt's file list can no longer become the Now row title.
+
 ## 0.3.8
 
 - Slice titles are extracted from the first informative line of a spawn prompt, not just line one — prompts that open with "You are a Goal worker..." boilerplate now yield the real task, so Now rows stop repeating the agent name.
