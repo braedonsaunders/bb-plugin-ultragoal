@@ -80,7 +80,12 @@ export function createCollabStore(
     retitleItem?: (rootThreadId: string, itemId: string, message: string) => void;
     claimItem?: (
       rootThreadId: string,
-      args: { itemId: string | null; message: string; workerThreadId?: string },
+      args: {
+        itemId: string | null;
+        message: string;
+        workerThreadId?: string;
+        createIfMissing?: boolean;
+      },
     ) => string | null;
     /** Status of a plan item, so retired workers can refuse new slices. */
     itemStatus?: (rootThreadId: string, itemId: string) => string | null;
@@ -397,20 +402,27 @@ export function createCollabStore(
     // shows the task, the plan item leaves Next, and idle completion works.
     if (hooks?.claimItem) {
       const byId = new Map(all.map((row) => [row.thread_id, row]));
+      const CLAIM_WINDOW_MS = 6 * 60 * 60_000;
       for (const agent of agents) {
         if (agent.role === "verifier" || agent.itemId) continue;
-        if (agent.status !== "running" && agent.status !== "starting") continue;
+        const recent =
+          Date.now() - (byId.get(agent.threadId)?.created_at ?? 0) < CLAIM_WINDOW_MS;
+        // Live workers always claim; recent idle ones claim too so their done
+        // reports can close the right slice (reconcile picks it up).
+        if (agent.status !== "running" && agent.status !== "starting" && !recent) continue;
         if (claimTried.has(agent.threadId)) continue;
         claimTried.add(agent.threadId);
         const prompt = await spawnPromptOf(agent.threadId);
         if (!prompt) continue;
         const requested = /\bitem_id=([A-Za-z0-9_]+)/.exec(prompt)?.[1] ?? null;
-        const claimed =
-          hooks.claimItem(root, {
-            itemId: requested,
-            message: prompt,
-            workerThreadId: agent.threadId,
-          }) ?? requested;
+        const live = agent.status === "running" || agent.status === "starting";
+        const claimed = hooks.claimItem(root, {
+          itemId: requested,
+          message: prompt,
+          workerThreadId: agent.threadId,
+          // Idle stragglers may re-link an open slice but never mint new ones.
+          createIfMissing: live,
+        });
         if (!claimed) continue;
         const row = byId.get(agent.threadId);
         if (row) row.item_id = claimed;

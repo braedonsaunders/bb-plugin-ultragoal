@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.7
+
+- Recently finished workers without a slice link also claim from their spawn prompt (link-only, never minting new items), so their done reports close the right slice via reconcile.
+- Slice claims match an existing unheld open item by text before creating a new one, preventing duplicate plan rows.
+
 ## 0.3.6
 
 - Discovered native children claim their slice from the spawn prompt (SLICE item_id and text), so their Now rows show the task instead of repeating the agent name, the plan item leaves Up next while it is worked, and idle completion closes it.

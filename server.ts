@@ -186,7 +186,7 @@ export default function plugin(bb: BbPluginApi) {
       items.setStatus(rootThreadId, itemId, "in_progress");
       collab.setWorkTitleForItem(rootThreadId, itemId, title);
     },
-    claimItem(rootThreadId, { itemId, message, workerThreadId }) {
+    claimItem(rootThreadId, { itemId, message, workerThreadId, createIfMissing }) {
       const title = sliceTitleFromMessage(message);
       if (!title) {
         // No extractable slice text, but an explicit item reference still
@@ -213,6 +213,22 @@ export default function plugin(bb: BbPluginApi) {
         collab.setWorkTitleForItem(rootThreadId, preferred.id, title);
         return preferred.id;
       }
+      // Match an existing unheld open slice by text before minting a duplicate.
+      const normalized = title.toLowerCase().replace(/\s+/g, " ").trim();
+      const match = items
+        .list(rootThreadId)
+        .find(
+          (item) =>
+            item.status !== "completed" &&
+            item.step.toLowerCase().replace(/\s+/g, " ").trim() === normalized &&
+            workersOnItem(rootThreadId, item.id).length === 0,
+        );
+      if (match) {
+        items.setStatus(rootThreadId, match.id, "in_progress");
+        collab.setWorkTitleForItem(rootThreadId, match.id, title);
+        return match.id;
+      }
+      if (createIfMissing === false) return null;
       const created = items.add(rootThreadId, title, "in_progress");
       if (created) collab.setWorkTitleForItem(rootThreadId, created.id, title);
       return created?.id ?? itemId;
