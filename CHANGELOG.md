@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1
+
+- Restaffed workers are pointed at their predecessor's slice branch (bb names worker branches after the item id), so a continuation checks out or cherry-picks the furthest prior work instead of redoing the slice in a fresh worktree. (Field case: a provider upgrade made every pre-upgrade session unresumable — steering them died instantly; the three-strike retire converges such zombies onto fresh sessions, and continuations must inherit the stranded branch work.)
+
 ## 0.11.0
 
 Worker execution is pinned — changing the composer's model can no longer hijack a goal's crew:

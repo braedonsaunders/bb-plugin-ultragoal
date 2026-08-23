@@ -637,7 +637,7 @@ export default function plugin(bb: BbPluginApi) {
     const lines = [`SLICE (item_id=${item.id}): ${item.step}`];
     if (restaffed) {
       lines.push(
-        "The previous worker on this slice died mid-work. Pick the slice up from the current worktree state and finish it. It may have landed partial commits already: check the log first, keep its work, and give your commits their own subjects describing what THEY add — never repeat a prior commit's subject.",
+        `The previous worker on this slice died mid-work. Its partial work may exist on a prior slice branch — run \`git branch -a | grep ${item.id.replace(/_/g, "-")}\` (bb names slice branches after the item id) and continue from the furthest branch by checking it out or cherry-picking, rather than redoing the work. Give your commits their own subjects describing what THEY add — never repeat a prior commit's subject.`,
       );
     }
     if (item.files.length > 0) {
