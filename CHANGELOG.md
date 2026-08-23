@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.1
+
+- Integration-failure escalations are rate-limited to one per goal per 30 minutes — a persistently dirty base checkout produced a dozen identical conflict steers in ninety minutes, which reads as noise and buries real signal. The warn log still records every failure.
+
 ## 0.14.0
 
 External auditors are first-class finding sources:

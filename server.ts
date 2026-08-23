@@ -779,6 +779,8 @@ export default function plugin(bb: BbPluginApi) {
   // conflicts escalate to the orchestrator. Pushing the remote stays the
   // orchestrator's job.
   const integrating = new Map<string, Promise<void>>();
+  const INTEGRATION_STEER_COOLDOWN_MS = 30 * 60_000;
+  const integrationSteerAt = new Map<string, number>();
 
   // Event-gated continuation: the root gets a turn when something it must act
   // on happened (completion, finding, blocked worker, failure) or the
@@ -933,6 +935,11 @@ export default function plugin(bb: BbPluginApi) {
         return;
       }
       bb.log.warn(`Integration failed for slice ${itemId} (${workerThreadId}) on ${rootThreadId}: ${message}`);
+      // One escalation per goal per cooldown window: twelve identical
+      // dirty-checkout steers in ninety minutes is noise, not urgency.
+      const lastSteer = integrationSteerAt.get(rootThreadId) ?? 0;
+      if (Date.now() - lastSteer < INTEGRATION_STEER_COOLDOWN_MS) return;
+      integrationSteerAt.set(rootThreadId, Date.now());
       await sendSteering(
         rootThreadId,
         `INTEGRATION CONFLICT: completed slice ${itemId} (worker ${workerThreadId}) could not be squash-merged into the default branch automatically: ${message}. Merge that worker's branch manually (rebase-train: merge, run gates, push) before anything else — a completed slice that is not on the default branch does not exist.`,
