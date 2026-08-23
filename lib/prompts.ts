@@ -59,13 +59,32 @@ function planInstruction(goal: GoalSnapshot): string {
               `- ${agent.nickname} (${agent.role}, ${agent.status}${agent.itemId ? `, item_id=${agent.itemId}` : ", unassigned"})`,
           ),
         ]
-      : [
-          "No subagents are running. Spawn one worker per in-progress slice before doing implementation on the root.",
-        ];
+      : [];
+  const heldByLive = new Set(
+    agents
+      .filter(
+        (agent) =>
+          agent.role !== "verifier" &&
+          (agent.status === "running" || agent.status === "starting") &&
+          agent.itemId,
+      )
+      .map((agent) => agent.itemId as string),
+  );
+  const unstaffed = goal.items.filter(
+    (item) => item.status !== "completed" && !heldByLive.has(item.id),
+  );
+  const staffingLines =
+    unstaffed.length > 0
+      ? [
+          `STAFFING: ${unstaffed.length} open slice${unstaffed.length === 1 ? " has" : "s have"} no live worker. Parallelize: spawn_agent one fresh worker per slice NOW, all in this turn, before anything else. Do not implement any of these on the root thread — serial root work is the slowest possible path.`,
+          ...unstaffed.map((item) => `- spawn_agent for item_id=${item.id}: ${item.step}`),
+        ]
+      : [];
   return [
     "Current requirement plan (keep update_plan current as steps complete or the next best action changes):",
     ...lines,
     ...agentLines,
+    ...staffingLines,
   ].join("\n");
 }
 

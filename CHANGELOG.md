@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.8
+
+- Parallelize by default, enforced concretely. Continuation and progress prompts now enumerate every open slice with no live worker and demand one fresh spawn_agent per slice in the same turn, instead of stating an abstract "don't implement on the root" rule the model can ignore. Skill and templates updated to match: spawning is the default for all work; inline root work is reserved for genuinely one-edit slices.
+
 ## 0.4.7
 
 - Now rows are attributed to whoever is actually on the work. A started slice no live worker holds is the orchestrator's own work while the root turn is running — it renders live as "Orchestrator", not "idle". Only when the root is idle too does a slice show as unattended.

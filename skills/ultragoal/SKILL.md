@@ -20,7 +20,7 @@ The root thread is the orchestrator. It does not implement the UltraGoal itself.
 5. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, spawn a fix worker.
 6. Do implementation, edits, and deep investigation on workers. On the root, only plan, spawn, wait, verify, and unblock.
 
-Spawn even for a single remaining slice. Work locally on the root only when a slice is too small to hand off (one obvious edit) or spawn failed.
+Always parallelize. Every open slice gets its own worker, spawned in the same turn — spawning is the default for all work, including small fixes, follow-ups, and re-checks. Never work a slice inline on the root while other slices wait; that serializes the whole goal. Spawn even for a single remaining slice. Work locally on the root only when a slice is genuinely one obvious edit or a spawn failed.
 
 Workers complete their assigned slice and report evidence. They do not call `update_goal`, take over the parent plan, or re-orchestrate the whole UltraGoal.
 
