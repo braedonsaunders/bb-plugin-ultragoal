@@ -23,19 +23,24 @@ import {
 } from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 
+const SLICE_PREAMBLE =
+  /^(you are|parent goal|parent objective|complete only|the new agent's|do not|constraints\b|local main|skip |when done|report |end with|if )/i;
+
 function sliceTitleFromMessage(message: string): string {
-  const line =
-    message
+  // Spawn prompts open with role boilerplate ("You are a Goal worker...");
+  // the actual slice is the first informative line after it.
+  for (const raw of message.trim().split(/\n/).slice(0, 8)) {
+    const line = raw
+      .replace(/^#+\s*/, "")
       .trim()
-      .split(/\n/)[0]
-      ?.replace(/^#+\s*/, "")
-      .trim() ?? "";
-  const title = currentSliceTitle(line);
-  if (title.length < 8 || title.length > 180) return "";
-  if (/^(you are|parent goal|assigned slice|complete only|the new agent's)/i.test(title)) {
-    return "";
+      .replace(/^(?:assigned\s+)?slice\s*\([^)]*\)\s*:\s*/i, "");
+    if (!line) continue;
+    const title = currentSliceTitle(line);
+    if (title.length < 8 || title.length > 180) continue;
+    if (SLICE_PREAMBLE.test(title)) continue;
+    return title;
   }
-  return title;
+  return "";
 }
 import { extractCompleted, seedPlanFromOutput } from "./lib/plan-seed.js";
 import {

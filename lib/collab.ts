@@ -432,6 +432,7 @@ export function createCollabStore(
           display_name: row?.display_name ?? null,
           item_id: claimed,
         });
+        bb.log.info(`Linked ${agent.nickname} to ${claimed} from its spawn prompt`);
       }
     }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.8
+
+- Slice titles are extracted from the first informative line of a spawn prompt, not just line one — prompts that open with "You are a Goal worker..." boilerplate now yield the real task, so Now rows stop repeating the agent name.
+
 ## 0.3.7
 
 - Recently finished workers without a slice link also claim from their spawn prompt (link-only, never minting new items), so their done reports close the right slice via reconcile.
