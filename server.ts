@@ -1632,12 +1632,52 @@ export default function plugin(bb: BbPluginApi) {
     return true;
   }
 
+  // Root-turn watchdog: a root that stays "active" while its timeline stops
+  // growing is wedged in a provider turn — queued steers pile up unprocessed
+  // behind it. Workers get the three-strike retire; the root gets stopped and
+  // auto-continued, which also flushes its queue.
+  const ROOT_WEDGE_MS = 10 * 60_000;
+  const rootActivity = new Map<string, { rowId: string; at: number }>();
+
+  async function watchRootTurn(rootThreadId: string): Promise<void> {
+    if (!(await threadIsRunning(bb, rootThreadId))) {
+      rootActivity.delete(rootThreadId);
+      return;
+    }
+    const rows = await readTimeline(rootThreadId);
+    const last = rows.at(-1) as { id?: string } | undefined;
+    const rowId = String(last?.id ?? "");
+    const now = Date.now();
+    const seen = rootActivity.get(rootThreadId);
+    if (!seen || seen.rowId !== rowId) {
+      rootActivity.set(rootThreadId, { rowId, at: now });
+      return;
+    }
+    if (now - seen.at < ROOT_WEDGE_MS) return;
+    rootActivity.delete(rootThreadId);
+    bb.log.warn(
+      `Root turn wedged on ${rootThreadId}: active with no timeline growth for ${Math.round((now - seen.at) / 60000)}m — stopping and continuing`,
+    );
+    try {
+      await bb.sdk.threads.stop({ threadId: rootThreadId });
+    } catch {
+      return;
+    }
+    markGoalEvent(rootThreadId);
+    running.set(rootThreadId, false);
+    const goal = store.get(rootThreadId);
+    if (goal && (goal.status === "active" || goal.status === "budget_limited")) {
+      await continueIfIdle(rootThreadId, goal);
+    }
+  }
+
   async function pulseStaleProgress(): Promise<void> {
     for (const threadId of store.listActiveThreadIds()) {
       const goal = store.get(threadId);
       if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
       try {
         ensureDecisionPrompts(threadId);
+        await watchRootTurn(threadId);
         await requestProgressUpdate(threadId, goal);
         const reconciled = await reconcileFinishedSlices(threadId);
         const accounted = await account(threadId, { busy: goalIsBusy(threadId), scan: true });

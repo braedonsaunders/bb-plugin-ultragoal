@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.4
+
+- Root-turn watchdog: an orchestrator that stays "active" while its timeline stops growing for 10 minutes is wedged in a provider turn, with queued steers piling up unprocessed behind it. Workers already had the three-strike retire; the root now gets stopped and auto-continued, which also flushes its message queue. (Field case: a root sat "Working…" for 20 minutes with zero output and a growing steer backlog while its goal showed no open work.)
+
 ## 0.16.3
 
 - A blocked or usage-limited goal auto-resumes when its root thread runs again. thread.failed marked the goal blocked on any turn error (including transient infrastructure failures like "Command turn.submit failed"), but nothing flipped it back when the root recovered — the pane read Blocked/Stopped over a healthy, restarted thread. Recovery counts as a wake event; paused goals stay paused (user intent).
