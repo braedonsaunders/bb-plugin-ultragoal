@@ -100,7 +100,7 @@ function planInstruction(goal: GoalSnapshot): string {
   const schedulerLines: string[] = [];
   if (open.length > 0 && maxWorkers > 0) {
     schedulerLines.push(
-      `SCHEDULER: the UltraGoal scheduler staffs ready slices automatically (deps complete, file scopes disjoint) — one fresh worker per slice, up to ${maxWorkers} concurrent (${liveWorkers.length} live now). Do not spawn workers for plan items yourself; write the plan and the scheduler dispatches. Do not implement slices on the root thread.`,
+      `SCHEDULER: the UltraGoal scheduler staffs ready slices automatically (deps complete, file scopes disjoint) — one fresh worker per slice, up to ${maxWorkers} concurrent. Assigned workers occupy a slot until their slice closes (idle Codex turns still count). Do not spawn workers for plan items yourself; write the plan and the scheduler dispatches. Do not implement slices on the root thread.`,
     );
     const idleSlots = maxWorkers - liveWorkers.length - ready.length;
     if (idleSlots > 0 && open.length > ready.length + heldByLive.size) {
@@ -126,7 +126,9 @@ function planInstruction(goal: GoalSnapshot): string {
   const findingsLine =
     goal.findings.open > 0
       ? [
-          `FINDINGS: ${goal.findings.open} open finding(s) block completion. Their fix slices are staffed automatically; resolve_finding (with evidence) anything that is not a real defect.`,
+          goal.findings.open >= goal.settings.maxOpenFindings
+            ? `FINDINGS: ${goal.findings.open} open finding(s) are at the cap (${goal.settings.maxOpenFindings}). New distinct-file findings are recorded but do not mint another slice — resolve_finding false positives or finish existing fix slices before the hunt grows again.`
+            : `FINDINGS: ${goal.findings.open} open finding(s) block completion. Same-file findings attach to the existing slice; new files mint a fix slice until the cap (${goal.settings.maxOpenFindings}). resolve_finding (with evidence) anything that is not a real defect.`,
         ]
       : [];
   return [

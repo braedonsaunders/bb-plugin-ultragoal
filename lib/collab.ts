@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
 import { auditorNameFor, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
 import { workerQualityBrief } from "./prompts.js";
+import { isReasoningLevel, type ReasoningLevel, type ServiceTier } from "./execution.js";
 
 const MIN_WAIT_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -90,7 +91,12 @@ export function createCollabStore(
     /** Status of a plan item, so retired workers can refuse new slices. */
     itemStatus?: (rootThreadId: string, itemId: string) => string | null;
     /** Goal-level worker execution pin; null fields inherit the root thread. */
-    workerExecution?: (rootThreadId: string) => { providerId: string | null; model: string | null };
+    workerExecution?: (rootThreadId: string) => {
+      providerId: string | null;
+      model: string | null;
+      reasoningLevel: ReasoningLevel | null;
+      serviceTier: ServiceTier | null;
+    };
     /** DAG metadata of a plan item, injected into worker briefs. */
     itemBrief?: (
       rootThreadId: string,
@@ -328,7 +334,7 @@ export function createCollabStore(
 
   async function listForRoot(
     threadId: string,
-    options?: { discover?: boolean; refreshLimit?: number },
+    options?: { discover?: boolean; refreshLimit?: number; refreshHolders?: boolean },
   ): Promise<GoalAgent[]> {
     const root = rootId(threadId);
     const rows = byRoot.all(root) as CollabRow[];
@@ -401,6 +407,7 @@ export function createCollabStore(
       if (cached && (cached.status === "running" || cached.status === "starting")) {
         refreshIds.add(row.thread_id);
       }
+      if (options?.refreshHolders && row.item_id) refreshIds.add(row.thread_id);
     }
 
     const agents: GoalAgent[] = await Promise.all(
@@ -408,7 +415,7 @@ export function createCollabStore(
         const mapped = refreshIds.has(row.thread_id)
           ? await refreshStatus(row.thread_id)
           : (statusCache.get(row.thread_id) ?? {
-              status: "completed" as const,
+              status: "unknown" as const,
               summary: null,
               title: null,
             });
@@ -574,17 +581,28 @@ export function createCollabStore(
     // provider/model fields that carry no executionInputSources and re-derives
     // them from the project's stored defaults — which follow whatever the user
     // last picked in the composer. Order: tool arg, goal pin, root thread.
-    const pin = hooks?.workerExecution?.(rootThreadId) ?? { providerId: null, model: null };
+    const pin = hooks?.workerExecution?.(rootThreadId) ?? {
+      providerId: null,
+      model: null,
+      reasoningLevel: null,
+      serviceTier: null,
+    };
     const execProviderId = pin.providerId ?? parent.providerId;
     const execModel = model ?? pin.model ?? undefined;
+    const execReasoning = isReasoningLevel(pin.reasoningLevel) ? pin.reasoningLevel : undefined;
+    const execServiceTier = pin.serviceTier ?? undefined;
     const spawnArgs = {
       projectId: parent.projectId ?? args.projectId,
       parentThreadId: threadId,
       providerId: execProviderId,
       model: execModel,
+      reasoningLevel: execReasoning,
+      serviceTier: execServiceTier,
       executionInputSources: {
         ...(execProviderId ? { providerId: "explicit" as const } : {}),
         ...(execModel ? { model: "explicit" as const } : {}),
+        ...(execReasoning ? { reasoningLevel: "explicit" as const } : {}),
+        ...(execServiceTier ? { serviceTier: "explicit" as const } : {}),
       },
       permissionMode: "full" as const,
       // Non-forked workers get their own managed worktree: sharing the root's
@@ -728,6 +746,8 @@ export function createCollabStore(
       itemId: string | null;
       providerId: string;
       model: string;
+      reasoningLevel?: ReasoningLevel;
+      serviceTier?: ServiceTier | null;
       prompt: string;
       /** The slice text under audit, for a work-related auditor name. */
       workText?: string;
@@ -753,7 +773,14 @@ export function createCollabStore(
         parentThreadId: args.rootThreadId,
         providerId: args.providerId,
         model: args.model,
-        executionInputSources: { providerId: "explicit" as const, model: "explicit" as const },
+        reasoningLevel: args.reasoningLevel,
+        serviceTier: args.serviceTier ?? undefined,
+        executionInputSources: {
+          providerId: "explicit" as const,
+          model: "explicit" as const,
+          ...(args.reasoningLevel ? { reasoningLevel: "explicit" as const } : {}),
+          ...(args.serviceTier ? { serviceTier: "explicit" as const } : {}),
+        },
         permissionMode: "full",
         environment: verifyEnvironmentId
           ? { type: "reuse" as const, environmentId: verifyEnvironmentId }

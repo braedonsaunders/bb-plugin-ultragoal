@@ -40,6 +40,10 @@ interface GoalRow {
   max_workers: number | null;
   worker_provider: string | null;
   worker_model: string | null;
+  worker_reasoning: string | null;
+  worker_service_tier: string | null;
+  verify_reasoning: string | null;
+  verify_service_tier: string | null;
   intake_row_id: string | null;
   completion_summary: string | null;
 }
@@ -62,6 +66,10 @@ export interface StoredGoal
   maxWorkersOverride: number | null;
   workerProviderOverride: string | null;
   workerModelOverride: string | null;
+  workerReasoningOverride: string | null;
+  workerServiceTierOverride: string | null;
+  verifyReasoningOverride: string | null;
+  verifyServiceTierOverride: string | null;
   intakeRowId: string | null;
   completionSummary: string | null;
 }
@@ -106,8 +114,13 @@ function rowToGoal(row: GoalRow): StoredGoal {
       autoContinue: true,
       progressUpdateMinutes: 5,
       maxWorkers: 5,
+      maxOpenFindings: 50,
       workerProvider: "",
       workerModel: "",
+      workerReasoning: "",
+      workerServiceTier: null,
+      verifyReasoning: "medium",
+      verifyServiceTier: null,
     },
     lastProgressAt: row.last_progress_at,
     verifyEnabledOverride: row.verify_enabled == null ? null : row.verify_enabled === 1,
@@ -118,6 +131,10 @@ function rowToGoal(row: GoalRow): StoredGoal {
     maxWorkersOverride: row.max_workers,
     workerProviderOverride: row.worker_provider,
     workerModelOverride: row.worker_model,
+    workerReasoningOverride: row.worker_reasoning,
+    workerServiceTierOverride: row.worker_service_tier,
+    verifyReasoningOverride: row.verify_reasoning,
+    verifyServiceTierOverride: row.verify_service_tier,
     intakeRowId: row.intake_row_id ?? null,
     completionSummary: row.completion_summary ?? null,
   };
@@ -263,6 +280,10 @@ export function createGoalStore(bb: BbPluginApi) {
     // reload and silently skipped the first owner message after each reload.
     `ALTER TABLE goals ADD COLUMN intake_row_id TEXT`,
     `ALTER TABLE goals ADD COLUMN completion_summary TEXT`,
+    `ALTER TABLE goals ADD COLUMN worker_reasoning TEXT`,
+    `ALTER TABLE goals ADD COLUMN worker_service_tier TEXT`,
+    `ALTER TABLE goals ADD COLUMN verify_reasoning TEXT`,
+    `ALTER TABLE goals ADD COLUMN verify_service_tier TEXT`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -278,7 +299,8 @@ export function createGoalStore(bb: BbPluginApi) {
       blocked_streak, last_block_key, turn_count, max_turns, max_minutes,
       verify_enabled, verify_provider, verify_model, auto_continue,
       last_progress_at, progress_update_minutes, max_workers,
-      worker_provider, worker_model, intake_row_id, completion_summary
+      worker_provider, worker_model, worker_reasoning, worker_service_tier,
+      verify_reasoning, verify_service_tier, intake_row_id, completion_summary
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
@@ -286,7 +308,8 @@ export function createGoalStore(bb: BbPluginApi) {
       @blocked_streak, @last_block_key, 0, 40, 180,
       @verify_enabled, @verify_provider, @verify_model, @auto_continue,
       @last_progress_at, @progress_update_minutes, @max_workers,
-      @worker_provider, @worker_model, @intake_row_id, @completion_summary
+      @worker_provider, @worker_model, @worker_reasoning, @worker_service_tier,
+      @verify_reasoning, @verify_service_tier, @intake_row_id, @completion_summary
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -312,6 +335,10 @@ export function createGoalStore(bb: BbPluginApi) {
       max_workers = excluded.max_workers,
       worker_provider = excluded.worker_provider,
       worker_model = excluded.worker_model,
+      worker_reasoning = excluded.worker_reasoning,
+      worker_service_tier = excluded.worker_service_tier,
+      verify_reasoning = excluded.verify_reasoning,
+      verify_service_tier = excluded.verify_service_tier,
       intake_row_id = excluded.intake_row_id,
       completion_summary = excluded.completion_summary
   `);
@@ -357,6 +384,10 @@ export function createGoalStore(bb: BbPluginApi) {
         max_workers: existing?.maxWorkersOverride ?? null,
         worker_provider: existing?.workerProviderOverride ?? null,
         worker_model: existing?.workerModelOverride ?? null,
+        worker_reasoning: existing?.workerReasoningOverride ?? null,
+        worker_service_tier: existing?.workerServiceTierOverride ?? null,
+        verify_reasoning: existing?.verifyReasoningOverride ?? null,
+        verify_service_tier: existing?.verifyServiceTierOverride ?? null,
         intake_row_id: existing?.intakeRowId ?? null,
         completion_summary: existing?.completionSummary ?? null,
       };
@@ -392,6 +423,10 @@ export function createGoalStore(bb: BbPluginApi) {
         max_workers: null,
         worker_provider: null,
         worker_model: null,
+        worker_reasoning: null,
+        worker_service_tier: null,
+        verify_reasoning: null,
+        verify_service_tier: null,
         intake_row_id: null,
         completion_summary: null,
       };
@@ -424,6 +459,10 @@ export function createGoalStore(bb: BbPluginApi) {
         maxWorkersOverride: number | null;
         workerProviderOverride: string | null;
         workerModelOverride: string | null;
+        workerReasoningOverride: string | null;
+        workerServiceTierOverride: string | null;
+        verifyReasoningOverride: string | null;
+        verifyServiceTierOverride: string | null;
         completionSummary: string | null;
       }>,
     ): StoredGoal | null {
@@ -498,6 +537,22 @@ export function createGoalStore(bb: BbPluginApi) {
           patch.workerModelOverride === undefined
             ? existing.workerModelOverride
             : patch.workerModelOverride,
+        worker_reasoning:
+          patch.workerReasoningOverride === undefined
+            ? existing.workerReasoningOverride
+            : patch.workerReasoningOverride,
+        worker_service_tier:
+          patch.workerServiceTierOverride === undefined
+            ? existing.workerServiceTierOverride
+            : patch.workerServiceTierOverride,
+        verify_reasoning:
+          patch.verifyReasoningOverride === undefined
+            ? existing.verifyReasoningOverride
+            : patch.verifyReasoningOverride,
+        verify_service_tier:
+          patch.verifyServiceTierOverride === undefined
+            ? existing.verifyServiceTierOverride
+            : patch.verifyServiceTierOverride,
         intake_row_id: existing.intakeRowId,
         completion_summary:
           patch.completionSummary === undefined

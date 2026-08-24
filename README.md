@@ -15,7 +15,7 @@ bb plugin install ultragoal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.4.11'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.17.7'
 ```
 
 Or from a local checkout:
@@ -56,7 +56,7 @@ bb ultragoal resume
 bb ultragoal clear
 ```
 
-The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked slices get a chip), and **Previous**. The plan is read-only in the pane; the agent updates it. Settings control verification, the verifier model, progress-chat interval, worker slots, auto-continue, and the token budget.
+The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked slices get a chip), and **Previous**. The plan is read-only in the pane; the agent updates it. Settings control verification, the verifier and worker models (the same multi-provider picker as the composer), progress-chat interval, worker slots, auto-continue, and the token budget.
 
 Agent tools keep the Codex names (`get_goal`, `create_goal`, `update_goal`, `update_plan`) so orchestrators and Codex-style skills stay compatible.
 
@@ -65,8 +65,8 @@ Agent tools keep the Codex names (`get_goal`, `create_goal`, `update_goal`, `upd
 The split follows the research in [docs/architecture-research.md](docs/architecture-research.md): the model plans, deterministic code schedules.
 
 1. The orchestrator calls `update_plan` with the remaining work as a dependency DAG: every slice carries `files` (the disjoint file scope it owns), `check` (a runnable done-gate), and `deps` (what it waits for; `[]` = ready now).
-2. The plugin's ready-queue scheduler staffs one fresh worker per ready slice — deps complete, file scopes disjoint — up to the goal's worker slots (default 5), re-staffs slices whose workers die silently, and dispatches newly-unblocked slices the moment a worker finishes. Workers get humorous names derived from their slice's work.
-3. Hunt/audit slices stream: workers call `report_finding` per confirmed defect (fingerprint-deduplicated across sweeps), and each fresh finding auto-creates a ready fix slice that is staffed while the hunt continues. Open findings block goal completion.
+2. The plugin's ready-queue scheduler staffs one fresh worker per ready slice — deps complete, file scopes disjoint — up to the goal's worker slots (default 5). Assigned workers occupy a slot until their slice closes, including idle Codex turns. Pause stops the whole crew and parks in-progress slices.
+3. Hunt/audit slices stream: workers call `report_finding` per confirmed defect (fingerprint-deduplicated across sweeps). Same-file findings attach to the existing fix slice; a new file mints a ready slice until the open-finding cap (default 50). Open findings block goal completion.
 4. Workers stay hidden and implement only their slice, reporting evidence (commit SHAs, check output). Every brief carries a generalized quality bar ([templates/goals/worker_brief.md](templates/goals/worker_brief.md)) — reuse-first, complete production-grade slices, clean cutover, honest gates, crew-safe atomic commits — with the repo's own AGENTS.md taking precedence. They do not call `update_goal` or rewrite the parent plan.
 5. When verification is on (default), a second model audits each finished worker. The orchestrator should not mark that slice complete until `VERIFY_PASS`.
 6. If several minutes pass with no visible main-thread update, the plugin nudges the orchestrator to post one.

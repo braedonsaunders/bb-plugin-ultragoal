@@ -1,6 +1,18 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
+export const reasoningLevelSchema = z.enum([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "ultracode",
+  "max",
+  "ultra",
+]);
+export const serviceTierSchema = z.enum(["default", "fast"]);
+
 export const goalStatusSchema = z.enum([
   "active",
   "paused",
@@ -67,13 +79,19 @@ export const goalSettingsSchema = z.object({
   verifyEnabled: z.boolean(),
   verifyProvider: z.string(),
   verifyModel: z.string(),
+  verifyReasoning: reasoningLevelSchema,
+  verifyServiceTier: serviceTierSchema.nullable(),
   autoContinue: z.boolean(),
   progressUpdateMinutes: z.number().int(),
   /** Ready-queue scheduler slot count. 0 disables plugin-side staffing. */
   maxWorkers: z.number().int(),
+  /** Open findings past this cap are recorded but do not mint another fix slice. */
+  maxOpenFindings: z.number().int(),
   /** Worker execution pin. Empty = inherit the goal thread's provider/model. */
   workerProvider: z.string(),
   workerModel: z.string(),
+  workerReasoning: z.union([reasoningLevelSchema, z.literal("")]),
+  workerServiceTier: serviceTierSchema.nullable(),
 });
 
 // One rendered line of a worker thread's own history, mapped from its
@@ -224,11 +242,15 @@ export const rpcContract = defineRpcContract({
         verifyEnabled: z.boolean().optional(),
         verifyProvider: z.string().min(1).optional(),
         verifyModel: z.string().min(1).optional(),
+        verifyReasoning: reasoningLevelSchema.optional(),
+        verifyServiceTier: serviceTierSchema.nullable().optional(),
         autoContinue: z.boolean().optional(),
         progressUpdateMinutes: z.number().int().min(0).max(240).optional(),
         maxWorkers: z.number().int().min(0).max(16).optional(),
         workerProvider: z.string().nullable().optional(),
         workerModel: z.string().nullable().optional(),
+        workerReasoning: reasoningLevelSchema.nullable().optional(),
+        workerServiceTier: serviceTierSchema.nullable().optional(),
         tokenBudget: z.number().int().positive().nullable().optional(),
       })
       .strict(),
@@ -248,11 +270,18 @@ export const rpcContract = defineRpcContract({
           id: z.string(),
           displayName: z.string(),
           available: z.boolean(),
+          supportsServiceTier: z.boolean(),
+          brandPrefix: z.string().optional(),
           models: z.array(
             z.object({
               id: z.string(),
               displayName: z.string(),
               description: z.string().optional(),
+              isDefault: z.boolean().optional(),
+              defaultReasoning: reasoningLevelSchema.optional(),
+              reasoning: z.array(reasoningLevelSchema),
+              selectedOnly: z.boolean().optional(),
+              routeProviderId: z.string().optional(),
             }),
           ),
         }),

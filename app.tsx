@@ -11,6 +11,15 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { GoalAgent, GoalItem, GoalSnapshot, NowRow, WorkerTranscript, WorkerTranscriptEntry } from "./contract";
 import { rpcContract } from "./contract";
+import {
+  REASONING_LABELS,
+  selectionForModel,
+  selectionForProvider,
+  stripBrandPrefix,
+  type CatalogProvider,
+  type ExecutionSelection,
+  type ReasoningLevel,
+} from "./lib/execution";
 import { providerLabel, providerMarkSpec } from "./lib/provider-marks";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles";
 
@@ -717,7 +726,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
             ? ` · update every ${goal.settings.progressUpdateMinutes}m`
             : " · no chat updates"}
           {goal.settings.maxWorkers > 0
-            ? ` · ${goal.settings.maxWorkers} worker slots`
+            ? ` · ${goal.settings.maxWorkers} worker slots · ${goal.settings.maxOpenFindings} finding cap`
             : " · scheduler off"}
         </div>
       </div>
@@ -792,33 +801,33 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   );
 }
 
-type CatalogProvider = {
-  id: string;
-  displayName: string;
-  available?: boolean;
-  models: Array<{ id: string; displayName: string; description?: string }>;
-};
+function splitModelLabelTag(label: string): { base: string; tag: string | null } {
+  const match = label.match(/^(.*\S)\s*\(([^()]+)\)$/u);
+  if (!match) return { base: label, tag: null };
+  return { base: match[1], tag: match[2] };
+}
 
-function VerifierModelSwitcher({
+function ExecutionPicker({
   providers,
-  providerId,
-  model,
+  value,
   disabled,
   onChange,
 }: {
   providers: CatalogProvider[];
-  providerId: string;
-  model: string;
+  value: ExecutionSelection;
   disabled: boolean;
-  onChange: (providerId: string, model: string) => void;
+  onChange: (next: ExecutionSelection) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [browseId, setBrowseId] = useState(providerId);
+  const [browseId, setBrowseId] = useState(value.providerId);
+  const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setBrowseId(providerId);
-  }, [providerId]);
+    setBrowseId(value.providerId);
+    setQuery("");
+  }, [value.providerId]);
 
   useEffect(() => {
     if (!open) return;
@@ -829,85 +838,206 @@ function VerifierModelSwitcher({
     return () => window.removeEventListener("mousedown", onPointer);
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => searchRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
+
   const currentProvider =
-    providers.find((provider) => provider.id === providerId) ??
-    providers.find((provider) => provider.models.some((entry) => entry.id === model));
-  const currentModel = currentProvider?.models.find((entry) => entry.id === model);
+    providers.find((provider) => provider.id === value.providerId) ??
+    providers.find((provider) => provider.models.some((entry) => entry.id === value.model));
   const browsing =
     providers.find((provider) => provider.id === browseId) ?? currentProvider ?? providers[0];
+  const currentModel = currentProvider?.models.find((entry) => entry.id === value.model);
+  const triggerLabel = stripBrandPrefix(
+    currentModel?.displayName ?? value.model,
+    currentProvider?.id ?? value.providerId,
+    currentProvider?.brandPrefix,
+  );
+  const { base: triggerBase, tag: triggerTag } = splitModelLabelTag(triggerLabel);
+  const reasoningLabel = currentModel?.reasoning.includes(value.reasoningLevel)
+    ? REASONING_LABELS[value.reasoningLevel]
+    : null;
+  const visibleModels = (browsing?.models ?? []).filter((entry) => !entry.selectedOnly);
+  const moreModels = (browsing?.models ?? []).filter((entry) => entry.selectedOnly);
+  const needle = query.trim().toLowerCase();
+  const matches = (entry: (typeof visibleModels)[number]) => {
+    if (!needle) return true;
+    const haystack = `${entry.displayName} ${entry.id}`.toLowerCase();
+    let index = 0;
+    for (const char of needle) {
+      index = haystack.indexOf(char, index);
+      if (index < 0) return false;
+      index += 1;
+    }
+    return true;
+  };
+  const filteredVisible = needle ? visibleModels.filter(matches) : visibleModels;
+  const filteredMore = needle ? moreModels.filter(matches) : [];
+  const listed = [...filteredVisible, ...filteredMore];
+  const showSearch = visibleModels.length + moreModels.length > 5;
+  const showFast = Boolean(browsing?.supportsServiceTier);
+
+  const commitProvider = (provider: CatalogProvider) => {
+    const next = selectionForProvider(provider, value.reasoningLevel, value.serviceTier);
+    if (next) onChange(next);
+  };
 
   return (
     <div ref={rootRef} className="relative">
       <button
         type="button"
         disabled={disabled}
-        className="flex w-full items-center gap-2 rounded-md border border-border px-2 py-1.5 text-left text-sm hover:bg-state-hover disabled:opacity-50"
-        onClick={() => setOpen((value) => !value)}
+        aria-label="Provider, model and reasoning"
         aria-expanded={open}
+        className="flex h-7 w-full min-w-0 items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-foreground hover:bg-state-hover disabled:opacity-50"
+        onClick={() => setOpen((current) => !current)}
+        title={`${currentProvider?.displayName ?? providerLabel(value.providerId)}: ${triggerLabel}${reasoningLabel ? ` · ${reasoningLabel} reasoning` : ""}${value.serviceTier === "fast" ? " (Fast mode)" : ""}`}
       >
-        <ProviderMark providerId={currentProvider?.id ?? providerId} />
+        {value.serviceTier === "fast" ? (
+          <span className="text-[11px] text-muted-foreground" aria-hidden>
+            ⚡
+          </span>
+        ) : (
+          <ProviderMark providerId={currentProvider?.id ?? value.providerId} className="h-4 w-4" />
+        )}
         <span className="min-w-0 flex-1 truncate">
-          {currentProvider?.displayName ?? providerLabel(providerId)}
-          <span className="text-muted-foreground"> · </span>
-          {currentModel?.displayName ?? model}
+          {triggerBase}
+          {triggerTag ? <span className="text-muted-foreground"> {triggerTag}</span> : null}
         </span>
-        <span className="text-[10px] text-muted-foreground">{open ? "▾" : "▴"}</span>
+        {reasoningLabel ? (
+          <span className="shrink-0 text-[12px] text-muted-foreground">{reasoningLabel}</span>
+        ) : null}
+        {disabled ? null : <span className="text-[10px] text-muted-foreground">{open ? "▾" : "▴"}</span>}
       </button>
-      {open ? (
-        <div className="absolute bottom-full z-20 mb-1 flex max-h-72 w-full min-w-[16rem] overflow-hidden rounded-md border border-border bg-background shadow-md">
-          <ul className="w-[38%] shrink-0 overflow-y-auto border-r border-border py-1">
-            {providers.map((provider) => {
-              const active = browsing?.id === provider.id;
-              return (
-                <li key={provider.id}>
+      {open && !disabled ? (
+        <div className="absolute bottom-full z-30 mb-1 flex max-h-80 w-full min-w-[16rem] flex-col overflow-hidden rounded-md border border-border bg-background shadow-md">
+          {providers.length > 1 ? (
+            <div className="flex items-center gap-0.5 border-b border-border px-2 pt-1">
+              {providers.map((provider) => {
+                const active = browsing?.id === provider.id;
+                return (
                   <button
+                    key={provider.id}
                     type="button"
+                    title={provider.displayName}
                     disabled={provider.available === false && provider.models.length === 0}
-                    className={`flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[12px] disabled:opacity-40 ${
-                      active ? "bg-state-hover text-foreground" : "text-muted-foreground hover:bg-state-hover"
-                    }`}
-                    onClick={() => setBrowseId(provider.id)}
-                  >
-                    <ProviderMark providerId={provider.id} className="h-3 w-3" />
-                    <span className="truncate">{provider.displayName}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          <ul className="min-w-0 flex-1 overflow-y-auto py-1">
-            {(browsing?.models ?? []).map((entry) => {
-              const selected = browsing?.id === providerId && entry.id === model;
-              return (
-                <li key={entry.id}>
-                  <button
-                    type="button"
-                    className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left hover:bg-state-hover ${
-                      selected ? "bg-state-hover" : ""
+                    className={`flex h-8 w-8 items-center justify-center border-b-2 disabled:opacity-40 ${
+                      active
+                        ? "border-foreground text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
                     }`}
                     onClick={() => {
-                      if (browsing) onChange(browsing.id, entry.id);
-                      setOpen(false);
+                      setBrowseId(provider.id);
+                      setQuery("");
+                      commitProvider(provider);
                     }}
                   >
-                    <span className="text-[13px] text-foreground">{entry.displayName}</span>
-                    {entry.description ? (
-                      <span className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
-                        {entry.description}
-                      </span>
-                    ) : null}
+                    <ProviderMark providerId={provider.id} className="h-4 w-4" />
                   </button>
-                </li>
-              );
-            })}
-            {providers.length === 0 ? (
-              <li className="px-2.5 py-2 text-[12px] text-muted-foreground">Loading models…</li>
-            ) : (browsing?.models.length ?? 0) === 0 ? (
-              <li className="px-2.5 py-2 text-[12px] text-muted-foreground">
-                No models on this provider.
-              </li>
+                );
+              })}
+            </div>
+          ) : null}
+          {showSearch ? (
+            <div className="border-b border-border px-2 py-1.5">
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search models"
+                className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+          ) : null}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="px-1 pb-1">
+              <div className="sticky top-0 bg-background px-2 pb-[0.3125rem] pt-2 text-[11px] font-medium text-muted-foreground">
+                Model
+              </div>
+              {providers.length === 0 ? (
+                <div className="px-2 py-2 text-[12px] text-muted-foreground">Loading models…</div>
+              ) : listed.length === 0 ? (
+                <div className="px-2 py-2 text-[12px] text-muted-foreground">
+                  {needle ? "No models match your search" : "No models available"}
+                </div>
+              ) : (
+                listed.map((entry) => {
+                  const selected = browsing?.id === value.providerId && entry.id === value.model;
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className={`flex w-full items-center justify-between gap-2 rounded-sm px-2 py-[0.3125rem] text-left text-[13px] hover:bg-state-hover ${
+                        selected ? "bg-state-hover" : ""
+                      }`}
+                      onClick={() => {
+                        if (!browsing) return;
+                        onChange(
+                          selectionForModel(
+                            browsing,
+                            entry.id,
+                            value.reasoningLevel,
+                            value.serviceTier,
+                          ),
+                        );
+                      }}
+                    >
+                      <span className="min-w-0 truncate">
+                        {stripBrandPrefix(entry.displayName, browsing?.id ?? "", browsing?.brandPrefix)}
+                      </span>
+                      {entry.routeProviderId ? (
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {entry.routeProviderId}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            {(currentModel?.reasoning.length ?? 0) > 0 ? (
+              <>
+                <div className="border-t border-border" />
+                <div className="px-1 pb-1">
+                  <div className="sticky top-0 bg-background px-2 pb-[0.3125rem] pt-2 text-[11px] font-medium text-muted-foreground">
+                    Reasoning
+                  </div>
+                  {(currentModel?.reasoning ?? []).map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      className={`flex w-full items-center rounded-sm px-2 py-[0.3125rem] text-left text-[13px] hover:bg-state-hover ${
+                        level === value.reasoningLevel ? "bg-state-hover" : ""
+                      }`}
+                      onClick={() => onChange({ ...value, reasoningLevel: level })}
+                    >
+                      {REASONING_LABELS[level]}
+                    </button>
+                  ))}
+                </div>
+              </>
             ) : null}
-          </ul>
+            {showFast ? (
+              <>
+                <div className="border-t border-border" />
+                <label className="flex items-center justify-between gap-3 px-3 py-2 text-[13px]">
+                  <span>Fast mode</span>
+                  <input
+                    type="checkbox"
+                    checked={value.serviceTier === "fast"}
+                    onChange={(event) => {
+                      onChange({
+                        ...value,
+                        serviceTier: event.target.checked ? "fast" : "default",
+                      });
+                    }}
+                  />
+                </label>
+              </>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>
@@ -960,11 +1090,15 @@ function GoalSettingsPanel({
     verifyEnabled?: boolean;
     verifyProvider?: string;
     verifyModel?: string;
+    verifyReasoning?: ReasoningLevel;
+    verifyServiceTier?: ExecutionSelection["serviceTier"];
     autoContinue?: boolean;
     progressUpdateMinutes?: number;
     maxWorkers?: number;
     workerProvider?: string | null;
     workerModel?: string | null;
+    workerReasoning?: ReasoningLevel | null;
+    workerServiceTier?: ExecutionSelection["serviceTier"];
     tokenBudget?: number | null;
   }) => {
     setSaving(true);
@@ -1001,13 +1135,22 @@ function GoalSettingsPanel({
             <div className="mb-1 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
               Verifier model
             </div>
-            <VerifierModelSwitcher
+            <ExecutionPicker
               providers={providers}
-              providerId={settings.verifyProvider}
-              model={settings.verifyModel}
+              value={{
+                providerId: settings.verifyProvider,
+                model: settings.verifyModel,
+                reasoningLevel: settings.verifyReasoning,
+                serviceTier: settings.verifyServiceTier,
+              }}
               disabled={saving || !settings.verifyEnabled}
-              onChange={(providerId, model) => {
-                void save({ verifyProvider: providerId, verifyModel: model });
+              onChange={(next) => {
+                void save({
+                  verifyProvider: next.providerId,
+                  verifyModel: next.model,
+                  verifyReasoning: next.reasoningLevel,
+                  verifyServiceTier: next.serviceTier,
+                });
               }}
             />
           </div>
@@ -1050,26 +1193,44 @@ function GoalSettingsPanel({
                   disabled={saving}
                   onChange={(event) => {
                     if (event.target.checked) {
-                      const provider = providers[0];
-                      const model = provider?.models[0];
-                      if (provider && model) {
-                        void save({ workerProvider: provider.id, workerModel: model.id });
+                      const next = providers[0] ? selectionForProvider(providers[0]) : null;
+                      if (next) {
+                        void save({
+                          workerProvider: next.providerId,
+                          workerModel: next.model,
+                          workerReasoning: next.reasoningLevel,
+                          workerServiceTier: next.serviceTier,
+                        });
                       }
                     } else {
-                      void save({ workerProvider: null, workerModel: null });
+                      void save({
+                        workerProvider: null,
+                        workerModel: null,
+                        workerReasoning: null,
+                        workerServiceTier: null,
+                      });
                     }
                   }}
                 />
               </label>
             </div>
             {settings.workerProvider ? (
-              <VerifierModelSwitcher
+              <ExecutionPicker
                 providers={providers}
-                providerId={settings.workerProvider}
-                model={settings.workerModel}
+                value={{
+                  providerId: settings.workerProvider,
+                  model: settings.workerModel,
+                  reasoningLevel: settings.workerReasoning || "medium",
+                  serviceTier: settings.workerServiceTier,
+                }}
                 disabled={saving}
-                onChange={(providerId, model) => {
-                  void save({ workerProvider: providerId, workerModel: model });
+                onChange={(next) => {
+                  void save({
+                    workerProvider: next.providerId,
+                    workerModel: next.model,
+                    workerReasoning: next.reasoningLevel,
+                    workerServiceTier: next.serviceTier,
+                  });
                 }}
               />
             ) : (

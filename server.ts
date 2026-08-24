@@ -37,6 +37,15 @@ import {
 } from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 import { projectPane } from "./lib/projection.js";
+import {
+  filesOverlap,
+  findingAction,
+  freeSlots,
+  liveVerifierCount,
+  occupyingWorkerIds,
+  orphanInProgressIds,
+  threadAcceptsSteer,
+} from "./lib/scheduler.js";
 
 const SLICE_PREAMBLE =
   /^(you are|parent goal|parent objective|complete only|the new agent's|do not|constraints\b|local main|skip |when done|report |end with|if |head is)/i;
@@ -83,6 +92,7 @@ import {
   type StoredGoal,
 } from "./lib/store.js";
 import {
+  DEFAULT_MAX_OPEN_FINDINGS,
   DEFAULT_MAX_WORKERS,
   DEFAULT_PROGRESS_UPDATE_MINUTES,
   DEFAULT_VERIFY_MODEL,
@@ -90,6 +100,12 @@ import {
   resolveGoalSettings,
   type GoalSettingDefaults,
 } from "./lib/goal-settings.js";
+import {
+  BRAND_PREFIX,
+  catalogModelsFromOptions,
+  type CatalogModel,
+  type CatalogProvider,
+} from "./lib/execution.js";
 import { createHash } from "node:crypto";
 
 export { rpcContract };
@@ -142,11 +158,16 @@ function snapshotOf(
         verifyEnabled: goal.verifyEnabledOverride,
         verifyProvider: goal.verifyProviderOverride,
         verifyModel: goal.verifyModelOverride,
+        verifyReasoning: goal.verifyReasoningOverride,
+        verifyServiceTier: goal.verifyServiceTierOverride,
         autoContinue: goal.autoContinueOverride,
         progressUpdateMinutes: goal.progressUpdateMinutesOverride,
         maxWorkers: goal.maxWorkersOverride,
+        maxOpenFindings: null,
         workerProvider: goal.workerProviderOverride,
         workerModel: goal.workerModelOverride,
+        workerReasoning: goal.workerReasoningOverride,
+        workerServiceTier: goal.workerServiceTierOverride,
       },
       snapshotDefaults,
     ),
@@ -167,6 +188,7 @@ let snapshotDefaults: GoalSettingDefaults = {
   autoContinue: true,
   progressUpdateMinutes: DEFAULT_PROGRESS_UPDATE_MINUTES,
   maxWorkers: DEFAULT_MAX_WORKERS,
+  maxOpenFindings: DEFAULT_MAX_OPEN_FINDINGS,
 };
 
 export default function plugin(bb: BbPluginApi) {
@@ -207,8 +229,14 @@ export default function plugin(bb: BbPluginApi) {
     maxWorkers: {
       type: "string",
       label: "Max concurrent workers per goal (0 = scheduler off)",
-      description: "Ready-queue slot count: the scheduler keeps up to this many workers staffed on ready slices. Default 5.",
+      description: "Ready-queue slot count: assigned workers occupy a slot until their slice closes, including idle Codex turns. Default 5.",
       default: String(DEFAULT_MAX_WORKERS),
+    },
+    maxOpenFindings: {
+      type: "string",
+      label: "Max open findings per goal",
+      description: "New findings past this cap are recorded but do not mint another auto-staffed fix slice. Same-file findings attach to the existing slice. Default 50.",
+      default: String(DEFAULT_MAX_OPEN_FINDINGS),
     },
   });
 
@@ -222,6 +250,7 @@ export default function plugin(bb: BbPluginApi) {
       progressUpdateMinutes:
         parseNonNegativeInt(value.progressUpdateMinutes) ?? DEFAULT_PROGRESS_UPDATE_MINUTES,
       maxWorkers: parseNonNegativeInt(value.maxWorkers) ?? DEFAULT_MAX_WORKERS,
+      maxOpenFindings: parsePositiveInt(value.maxOpenFindings) ?? DEFAULT_MAX_OPEN_FINDINGS,
     };
   }
   void refreshDefaults();
@@ -252,6 +281,8 @@ export default function plugin(bb: BbPluginApi) {
       collab.setWorkTitleForItem(rootThreadId, itemId, title);
     },
     claimItem(rootThreadId, { itemId, message, workerThreadId, createIfMissing, source }) {
+      const existingGoal = store.get(rootThreadId);
+      if (existingGoal?.status === "paused") return null;
       // An explicit item reference is the strongest claim: the item's own step
       // text is authoritative and is never rewritten from the message.
       const preferred = itemId
@@ -315,11 +346,13 @@ export default function plugin(bb: BbPluginApi) {
     },
     workerExecution(rootThreadId) {
       const goal = store.get(rootThreadId);
-      if (!goal) return { providerId: null, model: null };
+      if (!goal) return { providerId: null, model: null, reasoningLevel: null, serviceTier: null };
       const resolved = view(goal).settings;
       return {
         providerId: resolved.workerProvider || null,
         model: resolved.workerModel || null,
+        reasoningLevel: resolved.workerReasoning || null,
+        serviceTier: resolved.workerServiceTier,
       };
     },
     itemBrief(rootThreadId, itemId) {
@@ -618,22 +651,6 @@ export default function plugin(bb: BbPluginApi) {
   const lastStaffTry = new Map<string, number>();
   const scheduling = new Set<string>();
 
-  function globPrefix(path: string): string {
-    return path.trim().replace(/\*+.*$/, "").replace(/\/+$/, "");
-  }
-
-  function filesOverlap(a: readonly string[], b: readonly string[]): boolean {
-    for (const rawA of a) {
-      const na = globPrefix(rawA);
-      for (const rawB of b) {
-        const nb = globPrefix(rawB);
-        if (!na || !nb) return true;
-        if (na === nb || na.startsWith(`${nb}/`) || nb.startsWith(`${na}/`)) return true;
-      }
-    }
-    return false;
-  }
-
   function itemBriefMessage(item: GoalItem, restaffed: boolean): string {
     const lines = [`SLICE (item_id=${item.id}): ${item.step}`];
     if (restaffed) {
@@ -671,19 +688,27 @@ export default function plugin(bb: BbPluginApi) {
       const maxWorkers = view(goal).settings.maxWorkers;
       if (maxWorkers <= 0) return;
       const agents = agentCache.get(rootThreadId) ?? [];
-      const liveWorkers = agents.filter(
-        (agent) =>
-          agent.role !== "verifier" &&
-          (agent.status === "running" || agent.status === "starting"),
-      );
-      let slots = maxWorkers - liveWorkers.length;
-      if (slots <= 0) return;
       const list = items.list(rootThreadId);
+      const openItemIds = new Set(
+        list.filter((item) => item.status !== "completed").map((item) => item.id),
+      );
+      const occupied = occupyingWorkerIds(agents, openItemIds);
+      let slots = freeSlots(maxWorkers, occupied.length);
+      if (slots <= 0) return;
       const completedIds = new Set(
         list.filter((item) => item.status === "completed").map((item) => item.id),
       );
       const heldLive = new Set(
-        liveWorkers.filter((agent) => agent.itemId).map((agent) => agent.itemId as string),
+        agents
+          .filter(
+            (agent) =>
+              agent.role !== "verifier" &&
+              agent.itemId &&
+              openItemIds.has(agent.itemId) &&
+              agent.status !== "error" &&
+              agent.status !== "stopped",
+          )
+          .map((agent) => agent.itemId as string),
       );
       const inFlightFiles = list
         .filter((item) => item.status !== "completed" && heldLive.has(item.id))
@@ -738,6 +763,13 @@ export default function plugin(bb: BbPluginApi) {
           restaffed = true;
         }
         lastStaffTry.set(item.id, now);
+        const still = store.get(rootThreadId);
+        if (
+          !still ||
+          (still.status !== "active" && still.status !== "budget_limited" && still.status !== "blocked")
+        ) {
+          return;
+        }
         let result: Awaited<ReturnType<typeof collab.spawnWorker>>;
         try {
           result = await collab.spawnWorker({
@@ -1033,6 +1065,12 @@ export default function plugin(bb: BbPluginApi) {
         // Cooldown reads the durable row, not an in-memory map that resets on
         // every plugin reload.
         if (now - (row?.last_nudge_at ?? 0) < STALL_NUDGE_COOLDOWN_MS) continue;
+        try {
+          const workerThread = await bb.sdk.threads.get({ threadId: agent.threadId });
+          if (!threadAcceptsSteer(workerThread)) continue;
+        } catch {
+          continue;
+        }
         collab.bumpNudge(agent.threadId);
         try {
           await bb.sdk.threads.send({
@@ -1071,12 +1109,22 @@ export default function plugin(bb: BbPluginApi) {
 
   async function viewFresh(goal: StoredGoal): Promise<GoalSnapshot> {
     try {
+      if (goal.status === "paused") {
+        const parked = parkGoalSlices(goal.threadId);
+        if (parked > 0) {
+          bb.log.info(`Paused goal ${goal.threadId}: parked ${parked} in-progress slice(s)`);
+        }
+      }
       const [listed, liveTasks, sessionId] = await Promise.all([
         // Now renders from liveness, so the crew's thread statuses must be
         // fresh, not cache defaults. Discovery registers children the
         // orchestrator spawned natively (outside spawn_agent) so they get
         // Now rows and auto-approval like any other worker.
-        collab.listForRoot(goal.threadId, { discover: true, refreshLimit: 24 }),
+        collab.listForRoot(goal.threadId, {
+          discover: goal.status === "active" || goal.status === "budget_limited" || goal.status === "blocked",
+          refreshLimit: 24,
+          refreshHolders: true,
+        }),
         listLiveNativeTasks(bb, goal.threadId),
         sessionIdForThread(bb, goal.threadId),
       ]);
@@ -1113,6 +1161,10 @@ export default function plugin(bb: BbPluginApi) {
       );
       liveTaskCounts.set(goal.threadId, native.aliveCalls);
       agentCache.set(goal.threadId, [...assigned, ...native.agents]);
+      const reclaimed = reclaimOrphanInProgress(goal.threadId);
+      if (reclaimed > 0) {
+        bb.log.info(`Demoted ${reclaimed} unheld in_progress slice(s) on ${goal.threadId}`);
+      }
       void healStalls(goal.threadId);
     } catch (error) {
       bb.log.warn(
@@ -1259,6 +1311,8 @@ export default function plugin(bb: BbPluginApi) {
     const resolved = view(goal).settings;
     if (!resolved.verifyEnabled) return;
     if (verifying.has(workerThreadId)) return;
+    const liveVerifiers = liveVerifierCount(agentCache.get(row.root_thread_id) ?? []);
+    if (liveVerifiers >= resolved.maxWorkers) return;
 
     let output = "";
     try {
@@ -1295,6 +1349,8 @@ export default function plugin(bb: BbPluginApi) {
         itemId: row.item_id,
         providerId: resolved.verifyProvider,
         model: resolved.verifyModel,
+        reasoningLevel: resolved.verifyReasoning,
+        serviceTier: resolved.verifyServiceTier,
         workText: item?.step ?? "",
         prompt: [
           "Independent verification of a finished Goal worker.",
@@ -1503,28 +1559,56 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   async function stopCrew(rootId: string): Promise<void> {
-    const agents = agentCache.get(rootId) ?? [];
-    await Promise.all(
-      agents
-        .filter((agent) => agent.status === "running" || agent.status === "starting")
-        .map(async (agent) => {
-          try {
-            await bb.sdk.threads.stop({ threadId: agent.threadId });
-          } catch (error) {
-            bb.log.warn(
-              `Could not stop Goal worker ${agent.threadId}: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          }
-        }),
-    );
+    const ids = new Set(collab.threadIdsForRoot(rootId));
+    for (const agent of agentCache.get(rootId) ?? []) ids.add(agent.threadId);
+    try {
+      const listed = await bb.sdk.threads.list({
+        parentThreadId: rootId,
+        includeHidden: true,
+        limit: 200,
+      });
+      for (const child of listed) ids.add(child.id);
+    } catch {
+      // Parent listing is best-effort; collab rows still get stopped.
+    }
+    await Promise.all([...ids].map((id) => stopThread(id)));
+  }
+
+  function parkGoalSlices(rootId: string): number {
+    for (const id of collab.threadIdsForRoot(rootId)) {
+      collab.forget(id);
+    }
+    agentCache.set(rootId, []);
+    let parked = 0;
+    for (const item of items.list(rootId)) {
+      if (item.status !== "in_progress") continue;
+      items.setStatus(rootId, item.id, "pending");
+      parked += 1;
+    }
+    return parked;
+  }
+
+  function reclaimOrphanInProgress(rootId: string): number {
+    const held = new Set<string>();
+    for (const agent of agentCache.get(rootId) ?? []) {
+      if (agent.role !== "verifier" && agent.itemId) held.add(agent.itemId);
+    }
+    for (const item of items.list(rootId)) {
+      if (collab.workersOnItem(rootId, item.id).length > 0) held.add(item.id);
+    }
+    const orphans = orphanInProgressIds(items.list(rootId), held);
+    for (const id of orphans) items.setStatus(rootId, id, "pending");
+    return orphans.length;
   }
 
   async function pauseGoal(threadId: string, reason: string): Promise<StoredGoal | null> {
     const goal = applyStatus(threadId, "paused", reason);
     await stopThread(threadId);
     await stopCrew(threadId);
+    const parked = parkGoalSlices(threadId);
+    if (parked > 0) {
+      bb.log.info(`Paused ${threadId}: parked ${parked} in-progress slice(s) back to pending`);
+    }
     const latest = store.get(threadId);
     if (latest) publish(threadId, await viewFresh(latest));
     return latest ?? goal;
@@ -1608,6 +1692,15 @@ export default function plugin(bb: BbPluginApi) {
     mode: "start" | "auto",
   ): Promise<boolean> {
     if (inflight.has(threadId)) return false;
+    try {
+      const thread = await bb.sdk.threads.get({ threadId });
+      if (!threadAcceptsSteer(thread)) {
+        bb.log.info(`Skipping Goal steer on ${threadId}: ${thread.status ?? "unavailable"}`);
+        return false;
+      }
+    } catch {
+      return false;
+    }
     inflight.add(threadId);
     try {
       await bb.sdk.threads.send({
@@ -1744,6 +1837,8 @@ export default function plugin(bb: BbPluginApi) {
       const goal = store.get(threadId);
       if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
       try {
+        const root = await bb.sdk.threads.get({ threadId }).catch(() => null);
+        if (!root || root.archivedAt || root.deletedAt) continue;
         ensureDecisionPrompts(threadId);
         await reviveErroredRoot(threadId);
         await watchRootTurn(threadId);
@@ -1907,11 +2002,15 @@ export default function plugin(bb: BbPluginApi) {
       verifyEnabled,
       verifyProvider,
       verifyModel,
+      verifyReasoning,
+      verifyServiceTier,
       autoContinue,
       progressUpdateMinutes,
       maxWorkers,
       workerProvider,
       workerModel,
+      workerReasoning,
+      workerServiceTier,
       tokenBudget,
     }) {
       const existing = store.get(threadId);
@@ -1920,11 +2019,15 @@ export default function plugin(bb: BbPluginApi) {
         verifyEnabledOverride: verifyEnabled,
         verifyProviderOverride: verifyProvider,
         verifyModelOverride: verifyModel,
+        verifyReasoningOverride: verifyReasoning,
+        verifyServiceTierOverride: verifyServiceTier,
         autoContinueOverride: autoContinue,
         progressUpdateMinutesOverride: progressUpdateMinutes,
         maxWorkersOverride: maxWorkers,
         workerProviderOverride: workerProvider,
         workerModelOverride: workerModel,
+        workerReasoningOverride: workerReasoning,
+        workerServiceTierOverride: workerServiceTier,
         tokenBudget,
       });
       const snap = next ? await viewFresh(next) : null;
@@ -2248,31 +2351,55 @@ Keep the plan current as steps complete or the next best action changes. When a 
         status: result.finding.status,
       };
     }
-    const fixItem = items.add(
-      rootThreadId,
-      `Fix: ${input.title} [${input.file.replace(/[:#]\d+([-:]\d+)?$/, "")}]`,
-      "pending",
-      {
-        deps: [],
-        files:
-          input.fixFiles && input.fixFiles.length > 0
-            ? input.fixFiles
-            : [input.file.replace(/[:#]\d+([-:]\d+)?$/, "")],
-        check: input.check ?? null,
-      },
-    );
-    if (fixItem) findings.linkItem(rootThreadId, result.finding.id, fixItem.id);
+    const goal = store.get(rootThreadId);
+    const maxOpenFindings = goal ? view(goal).settings.maxOpenFindings : DEFAULT_MAX_OPEN_FINDINGS;
+    const disposition = findingAction({
+      file: input.file,
+      openFindingCount: findings.counts(rootThreadId).open - 1,
+      maxOpenFindings,
+      openItems: items.list(rootThreadId),
+    });
+    let fixItemId: string | null = null;
+    if (disposition.action === "attach") {
+      findings.linkItem(rootThreadId, result.finding.id, disposition.attachItemId);
+      fixItemId = disposition.attachItemId;
+      bb.log.info(
+        `Finding ${result.finding.id} attached to existing slice ${disposition.attachItemId} on ${rootThreadId}`,
+      );
+    } else if (disposition.action === "mint") {
+      const fixItem = items.add(
+        rootThreadId,
+        `Fix: ${input.title} [${input.file.replace(/[:#]\d+([-:]\d+)?$/, "")}]`,
+        "pending",
+        {
+          deps: [],
+          files:
+            input.fixFiles && input.fixFiles.length > 0
+              ? input.fixFiles
+              : [input.file.replace(/[:#]\d+([-:]\d+)?$/, "")],
+          check: input.check ?? null,
+        },
+      );
+      if (fixItem) {
+        findings.linkItem(rootThreadId, result.finding.id, fixItem.id);
+        fixItemId = fixItem.id;
+      }
+      bb.log.info(
+        `Finding ${result.finding.id} registered on ${rootThreadId}${fixItem ? ` -> fix slice ${fixItem.id}` : ""}`,
+      );
+    } else {
+      bb.log.warn(
+        `Finding ${result.finding.id} recorded without a new slice on ${rootThreadId}: open-finding cap ${maxOpenFindings}`,
+      );
+    }
     markGoalEvent(rootThreadId);
-    bb.log.info(
-      `Finding ${result.finding.id} registered on ${rootThreadId}${fixItem ? ` -> fix slice ${fixItem.id}` : ""}`,
-    );
     void publishFresh(rootThreadId);
-    void scheduleReady(rootThreadId);
+    if (disposition.action === "mint") void scheduleReady(rootThreadId);
     void nudgeRoot(rootThreadId);
     return {
       created: true,
       findingId: result.finding.id,
-      fixItemId: fixItem?.id ?? null,
+      fixItemId,
       status: "open",
     };
   }
@@ -2372,7 +2499,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
   bb.agents.registerTool({
     name: "report_finding",
     description:
-      "Report ONE discrete defect the moment you confirm it during a hunt/audit/review — do not batch findings into a final report. Findings are fingerprint-deduplicated (same file + same defect = same finding across sweeps). A fresh finding auto-creates a ready fix slice that the scheduler staffs immediately, so fixes start while the hunt continues. Open findings block goal completion.",
+      "Report ONE discrete defect the moment you confirm it during a hunt/audit/review — do not batch findings into a final report. Findings are fingerprint-deduplicated (same file + same defect = same finding across sweeps). A same-file finding attaches to the existing fix slice; a new file mints a ready fix slice until the open-finding cap. Open findings block goal completion.",
     experimental_statusLabels: { pending: "Reporting finding", completed: "Reported finding" },
     parameters: z.object({
       title: z.string().min(1).describe("One-sentence statement of the defect."),
@@ -2612,7 +2739,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
               ? `${liveAgents.length} subagent(s) are live. Wait or follow up; do not redo their slices on the root.`
               : "No subagents are live. Keep the plan's ready slices flowing; the scheduler staffs them.",
             `You plan; the scheduler staffs. Express all work as update_plan slices with deps/files/check — the UltraGoal scheduler spawns one fresh worker per ready slice automatically, up to ${view(goal).settings.maxWorkers} concurrent. Do not spawn workers for plan items yourself and never use the native Task tool for slice work (it blocks this thread). spawn_agent is only for ad-hoc helpers outside the plan; give any such helper a humorous display_name related to its work.`,
-            "Hunts stream: workers report_finding per defect and each finding auto-creates a staffed fix slice. Never write catch-all tail items like 'fix whatever the hunt proves'. Open findings block update_goal complete; resolve_finding (with evidence) anything that is not a real defect.",
+            "Hunts stream: workers report_finding per defect. Same-file findings attach to the existing fix slice; a new file mints a staffed slice until the open-finding cap. Never write catch-all tail items like 'fix whatever the hunt proves'. Open findings block update_goal complete; resolve_finding (with evidence) anything that is not a real defect.",
             view(goal).settings.verifyEnabled
               ? `Verification is on. After a worker returns, a ${view(goal).settings.verifyProvider}/${view(goal).settings.verifyModel} verifier is launched automatically. Do not mark that slice complete until VERIFY_PASS. On VERIFY_FAIL, spawn a fix worker.`
               : "Verification is off for this UltraGoal.",
@@ -3111,15 +3238,8 @@ function parseCli(
   return { action: "status", threadId, error: `Unknown goal command: ${action}` };
 }
 
-type CatalogModel = { id: string; displayName: string; description?: string };
-type CatalogProvider = {
-  id: string;
-  displayName: string;
-  available: boolean;
-  models: CatalogModel[];
-};
-
 type ExecutionOptions = Awaited<ReturnType<BbPluginApi["sdk"]["system"]["executionOptions"]>>;
+type ExecutionProvider = NonNullable<ExecutionOptions["providers"]>[number];
 
 async function listExecutionCatalog(
   bb: BbPluginApi,
@@ -3136,12 +3256,28 @@ async function listExecutionCatalog(
   }
 
   const scope = environmentId ? { environmentId } : {};
-  let providers: Array<{ id: string; displayName: string; available?: boolean }> = [];
+  let providers: ExecutionProvider[] = [];
   try {
     const options = await bb.sdk.system.executionOptions(scope);
     providers = options.providers ?? [];
   } catch {
-    providers = await bb.sdk.providers.list(scope).catch(() => []);
+    const listed = await bb.sdk.providers.list(scope).catch(() => []);
+    providers = listed.map((provider) => ({
+      id: provider.id,
+      displayName: provider.displayName,
+      available: provider.available !== false,
+      capabilities: {
+        supportsServiceTier: false,
+        permissionModes: [],
+        supportsFork: false,
+        supportsNativeUserQuestion: false,
+        supportsSessionRewind: false,
+        supportsThreadArchive: false,
+        supportsThreadRename: false,
+      },
+      composerActions: [],
+      logoUrl: null,
+    }));
   }
 
   if (providers.length === 0) {
@@ -3150,7 +3286,17 @@ async function listExecutionCatalog(
         id: DEFAULT_VERIFY_PROVIDER,
         displayName: "Codex",
         available: true,
-        models: [{ id: DEFAULT_VERIFY_MODEL, displayName: "GPT-5.6-Sol" }],
+        supportsServiceTier: true,
+        brandPrefix: BRAND_PREFIX.codex,
+        models: [
+          {
+            id: DEFAULT_VERIFY_MODEL,
+            displayName: "GPT-5.6-Sol",
+            isDefault: true,
+            defaultReasoning: "medium",
+            reasoning: ["medium", "high", "xhigh"],
+          },
+        ],
       },
     ];
   }
@@ -3160,6 +3306,8 @@ async function listExecutionCatalog(
       id: provider.id,
       displayName: provider.displayName,
       available: provider.available !== false,
+      supportsServiceTier: provider.capabilities?.supportsServiceTier === true,
+      ...(BRAND_PREFIX[provider.id] ? { brandPrefix: BRAND_PREFIX[provider.id] } : {}),
       models: await listProviderModels(bb, provider.id, environmentId),
     })),
   );
@@ -3183,27 +3331,5 @@ async function listProviderModels(
 }
 
 function modelsFromOptions(options: ExecutionOptions, providerId: string): CatalogModel[] {
-  const rows = [...(options.models ?? []), ...(options.selectedOnlyModels ?? [])];
-  return uniqueModels(
-    rows
-      .filter((model) => !model.routeProviderId || model.routeProviderId === providerId)
-      .map((model) => ({
-        id: model.model || model.id,
-        displayName: model.displayName,
-        // Spread, not `description: undefined` — the rpc validator rejects
-        // explicit undefined values.
-        ...(model.description ? { description: model.description } : {}),
-      })),
-  );
-}
-
-function uniqueModels(
-  models: CatalogProvider["models"],
-): CatalogProvider["models"] {
-  const seen = new Set<string>();
-  return models.filter((model) => {
-    if (seen.has(model.id)) return false;
-    seen.add(model.id);
-    return true;
-  });
+  return catalogModelsFromOptions(options, providerId);
 }

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.17.7
+
+- Settings uses the composer's multi-provider model picker for verifier and worker: provider icon tabs, brand-stripped model list, reasoning levels, and Fast mode. The saved tuple (provider/model/reasoning/service tier) is what workers and verifiers spawn with.
+- Pi models stay in the list. `routeProviderId` is the nested route (openrouter/anthropic/…), not a filter against the agent provider — the old filter emptied the Pi tab.
+
+## 0.17.6
+
+- Defaults: 5 worker slots, 50 open findings. The 0.17.5 containment still holds; the finding cap is just less tight than the first field fix.
+
+## 0.17.5
+
+Containment after a live openbooks runaway (35-wide crew, 95-finding mill, 41 Now rows, pause left workers running):
+
+- Worker slots count assignment, not just an active provider turn. Idle Codex workers holding an open slice occupy a slot; uncached crew defaults to unknown (not completed) so a 24-row status refresh cannot hide a running fleet.
+- Findings no longer mint unbounded fix slices: same-file reports attach to the existing slice; distinct files stop minting at the open-finding cap (default 50 as of 0.17.6).
+- Pause stops every child (collab rows + parent listing, not the status cache), retires crew claims, and parks in-progress slices back to pending so resume re-staffs from the ready queue within the slot cap.
+- Steering skips archived/stopping/error threads. The progress pulse skips archived roots (errored roots still revive).
+- Concurrent verifiers are capped at the same worker-slot count. Scheduler re-checks goal status before each spawn so an in-flight staff cannot outrun pause.
+
 ## 0.17.4
 
 - Landed work is recorded even while the goal reads blocked. "Blocked" almost always means the ROOT thread died, but slice completion and the ready-queue scheduler both refused to run in that state — so a worker could fix a defect, commit it, and call slice_done while the plugin silently discarded the completion and never merged the branch. Completion, integration, and staffing now proceed for blocked goals; only paused/complete stop the machinery.
