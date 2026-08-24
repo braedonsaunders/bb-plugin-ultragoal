@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.1
+
+- The worker brief names the integration branch precisely: rebase onto the LOCAL default branch (worktrees share the project checkout's refs), never onto origin/* — origin lags the integration branch by design (pushing is the orchestrator's act) and can deliberately diverge from it during a history rewrite. (Field case: "rebase onto the latest default branch" was ambiguous; a worker resolved it as origin/main mid-rewrite-prep, hit unrelated histories, and had to abort — the orchestrator papered over it with a per-goal memory note that is now the contract.)
+
 ## 0.16.0
 
 Owner messages are ingested by the plugin, not by hoping the orchestrator notices:
