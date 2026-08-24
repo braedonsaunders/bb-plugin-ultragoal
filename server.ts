@@ -1376,8 +1376,6 @@ export default function plugin(bb: BbPluginApi) {
   // the orchestrator noticing a message. Provenance filters keep it honest:
   // composer-origin user rows only (no inter-thread sends, no child-outcome
   // system rows, none of the plugin's own [ultragoal]-marked steers).
-  const intakeCursor = new Map<string, string>();
-
   async function maybeIntakeUserMessage(
     rootThreadId: string,
     rows: readonly unknown[],
@@ -1402,9 +1400,12 @@ export default function plugin(bb: BbPluginApi) {
       latest = { id: String(row.id ?? ""), text };
     }
     if (!latest || !latest.id) return;
-    const seen = intakeCursor.get(rootThreadId);
-    intakeCursor.set(rootThreadId, latest.id);
-    if (seen === undefined || seen === latest.id) return;
+    const seen = goal.intakeRowId;
+    if (seen === latest.id) return;
+    store.setIntakeRow(rootThreadId, latest.id);
+    // First-ever sighting for this goal baselines without replaying history;
+    // the cursor is durable, so a plugin reload never skips a message again.
+    if (seen === null) return;
     if (parseSlashGoal(latest.text)) return;
     const result = await collab.spawnWorker({
       parentThreadId: rootThreadId,

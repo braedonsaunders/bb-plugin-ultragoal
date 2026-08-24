@@ -40,6 +40,7 @@ interface GoalRow {
   max_workers: number | null;
   worker_provider: string | null;
   worker_model: string | null;
+  intake_row_id: string | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
@@ -60,6 +61,7 @@ export interface StoredGoal
   maxWorkersOverride: number | null;
   workerProviderOverride: string | null;
   workerModelOverride: string | null;
+  intakeRowId: string | null;
 }
 
 function normalizeStatus(status: string): GoalStatus {
@@ -114,6 +116,7 @@ function rowToGoal(row: GoalRow): StoredGoal {
     maxWorkersOverride: row.max_workers,
     workerProviderOverride: row.worker_provider,
     workerModelOverride: row.worker_model,
+    intakeRowId: row.intake_row_id ?? null,
   };
 }
 
@@ -253,6 +256,9 @@ export function createGoalStore(bb: BbPluginApi) {
     // here; completion reads the durable claim, not output text.
     `ALTER TABLE collab_agents ADD COLUMN report_status TEXT`,
     `ALTER TABLE collab_agents ADD COLUMN report_evidence TEXT`,
+    // Durable intake cursor: an in-memory cursor re-baselined on every plugin
+    // reload and silently skipped the first owner message after each reload.
+    `ALTER TABLE goals ADD COLUMN intake_row_id TEXT`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -268,7 +274,7 @@ export function createGoalStore(bb: BbPluginApi) {
       blocked_streak, last_block_key, turn_count, max_turns, max_minutes,
       verify_enabled, verify_provider, verify_model, auto_continue,
       last_progress_at, progress_update_minutes, max_workers,
-      worker_provider, worker_model
+      worker_provider, worker_model, intake_row_id
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
@@ -276,7 +282,7 @@ export function createGoalStore(bb: BbPluginApi) {
       @blocked_streak, @last_block_key, 0, 40, 180,
       @verify_enabled, @verify_provider, @verify_model, @auto_continue,
       @last_progress_at, @progress_update_minutes, @max_workers,
-      @worker_provider, @worker_model
+      @worker_provider, @worker_model, @intake_row_id
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -301,9 +307,11 @@ export function createGoalStore(bb: BbPluginApi) {
       progress_update_minutes = excluded.progress_update_minutes,
       max_workers = excluded.max_workers,
       worker_provider = excluded.worker_provider,
-      worker_model = excluded.worker_model
+      worker_model = excluded.worker_model,
+      intake_row_id = excluded.intake_row_id
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
+  const writeIntakeRow = db.prepare("UPDATE goals SET intake_row_id = ? WHERE thread_id = ?");
 
   return {
     get(threadId: string): StoredGoal | null {
@@ -344,6 +352,7 @@ export function createGoalStore(bb: BbPluginApi) {
         max_workers: existing?.maxWorkersOverride ?? null,
         worker_provider: existing?.workerProviderOverride ?? null,
         worker_model: existing?.workerModelOverride ?? null,
+        intake_row_id: existing?.intakeRowId ?? null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -377,6 +386,7 @@ export function createGoalStore(bb: BbPluginApi) {
         max_workers: null,
         worker_provider: null,
         worker_model: null,
+        intake_row_id: null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -480,9 +490,14 @@ export function createGoalStore(bb: BbPluginApi) {
           patch.workerModelOverride === undefined
             ? existing.workerModelOverride
             : patch.workerModelOverride,
+        intake_row_id: existing.intakeRowId,
       };
       upsert.run(next);
       return rowToGoal(next);
+    },
+
+    setIntakeRow(threadId: string, rowId: string): void {
+      writeIntakeRow.run(rowId, threadId);
     },
 
     clear(threadId: string): boolean {
