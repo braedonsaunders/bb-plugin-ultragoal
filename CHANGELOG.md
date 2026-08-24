@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.2
+
+- Errored roots revive themselves: a provider turn failure left the orchestrator thread in error state indefinitely — auto-resume (0.16.3) only reconciled the goal once the root ran again, and nothing restarted it. The pulse now revives an errored root with exponential backoff (2m doubling to a 30m cap, reset on a real turn), completing the self-healing set: workers three-strike restaff, wedged root turns get stopped, blocked goals reconcile on recovery, and dead roots restart.
+
 ## 0.17.1
 
 - Decision cards raise for long questions: the interaction title caps at 160 characters and a full-length question was rejected outright — the keeper retried every pulse for ten minutes while the owner saw nothing. Titles now truncate (the card body always renders the full question from the payload), and a failing prompt backs off ten minutes instead of retry-spamming.

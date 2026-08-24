@@ -1683,12 +1683,45 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  // Errored roots revive themselves: thread.failed marks the goal blocked and
+  // the root sits in error state forever unless something sends it a turn.
+  // The pulse restarts it with exponential backoff (2m -> 30m cap), resetting
+  // once a turn actually runs. Paused and complete goals are never revived.
+  const rootReviveState = new Map<string, { attempts: number; nextAt: number }>();
+
+  async function reviveErroredRoot(rootThreadId: string): Promise<void> {
+    const goal = store.get(rootThreadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "blocked" && goal.status !== "budget_limited")) {
+      return;
+    }
+    let status = "";
+    try {
+      status = (await bb.sdk.threads.get({ threadId: rootThreadId })).status ?? "";
+    } catch {
+      return;
+    }
+    if (status !== "error") {
+      if (status === "active") rootReviveState.delete(rootThreadId);
+      return;
+    }
+    const state = rootReviveState.get(rootThreadId) ?? { attempts: 0, nextAt: 0 };
+    const now = Date.now();
+    if (now < state.nextAt) return;
+    const backoff = Math.min(2 * 60_000 * 2 ** state.attempts, 30 * 60_000);
+    rootReviveState.set(rootThreadId, { attempts: state.attempts + 1, nextAt: now + backoff });
+    bb.log.warn(
+      `Root ${rootThreadId} is in error state — reviving (attempt ${state.attempts + 1}, next retry in ${Math.round(backoff / 60000)}m)`,
+    );
+    await resumeGoal(rootThreadId);
+  }
+
   async function pulseStaleProgress(): Promise<void> {
     for (const threadId of store.listActiveThreadIds()) {
       const goal = store.get(threadId);
       if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
       try {
         ensureDecisionPrompts(threadId);
+        await reviveErroredRoot(threadId);
         await watchRootTurn(threadId);
         await requestProgressUpdate(threadId, goal);
         const reconciled = await reconcileFinishedSlices(threadId);
