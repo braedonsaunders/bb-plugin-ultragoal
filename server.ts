@@ -2542,6 +2542,21 @@ Keep the plan current as steps complete or the next best action changes. When a 
     if (store.get(thread.id) || collab.rowOf(thread.id)) {
       void approveInteractions(thread.id);
     }
+    // A blocked/usage-limited goal whose root runs again has recovered: the
+    // block was a turn error or a passed limit, and the contract treats any
+    // resumed run as a fresh blocked audit. Paused stays paused — that is
+    // user intent.
+    const recovering = store.get(thread.id);
+    if (
+      recovering &&
+      (recovering.status === "blocked" || recovering.status === "usage_limited")
+    ) {
+      applyStatus(thread.id, "active", null);
+      markGoalEvent(thread.id);
+      bb.log.info(
+        `Goal auto-resumed on ${thread.id}: root thread active again (was ${recovering.status}: ${recovering.reason ?? "no reason"})`,
+      );
+    }
     void registerNewChild(thread);
     const existing = store.get(thread.id);
     if (existing && (existing.status === "active" || existing.status === "budget_limited")) {

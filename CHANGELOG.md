@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.3
+
+- A blocked or usage-limited goal auto-resumes when its root thread runs again. thread.failed marked the goal blocked on any turn error (including transient infrastructure failures like "Command turn.submit failed"), but nothing flipped it back when the root recovered — the pane read Blocked/Stopped over a healthy, restarted thread. Recovery counts as a wake event; paused goals stay paused (user intent).
+
 ## 0.16.2
 
 - The intake cursor is durable (goals.intake_row_id): the in-memory cursor re-baselined on every plugin reload and silently swallowed the first owner message after each reload — during active plugin development that was most of them. First-ever sighting per goal still baselines without replaying history; after that, no owner message is ever skipped.
