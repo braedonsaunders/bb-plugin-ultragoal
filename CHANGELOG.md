@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.1
+
+- Decision cards raise for long questions: the interaction title caps at 160 characters and a full-length question was rejected outright — the keeper retried every pulse for ten minutes while the owner saw nothing. Titles now truncate (the card body always renders the full question from the payload), and a failing prompt backs off ten minutes instead of retry-spamming.
+
 ## 0.17.0
 
 Completion is a report, not a status label:

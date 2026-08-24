@@ -799,6 +799,8 @@ export default function plugin(bb: BbPluginApi) {
   const decisionKeepers = new Set<string>();
   const decisionDismissed = new Set<string>();
   const decisionAborts = new Map<string, AbortController>();
+  const decisionPromptBackoff = new Map<string, number>();
+  const DECISION_PROMPT_BACKOFF_MS = 10 * 60_000;
 
   async function applyDecisionAnswer(
     rootThreadId: string,
@@ -822,6 +824,8 @@ export default function plugin(bb: BbPluginApi) {
 
   function raiseDecisionPrompt(rootThreadId: string, decisionId: string): void {
     if (decisionKeepers.has(decisionId) || decisionDismissed.has(decisionId)) return;
+    const failedAt = decisionPromptBackoff.get(decisionId);
+    if (failedAt != null && Date.now() - failedAt < DECISION_PROMPT_BACKOFF_MS) return;
     decisionKeepers.add(decisionId);
     void (async () => {
       try {
@@ -832,11 +836,17 @@ export default function plugin(bb: BbPluginApi) {
           decisionAborts.set(decisionId, controller);
           let result: Awaited<ReturnType<typeof bb.ui.requestInput>>;
           try {
+            // The interaction title caps at 160 chars; the card body renders
+            // the full question from the payload.
+            const title =
+              current.question.length > 160
+                ? `${current.question.slice(0, 157)}...`
+                : current.question;
             result = await bb.ui.requestInput(
               {
                 threadId: rootThreadId,
                 rendererId: "owner-decision",
-                title: current.question,
+                title,
                 payload: {
                   decisionId: current.id,
                   question: current.question,
@@ -849,10 +859,11 @@ export default function plugin(bb: BbPluginApi) {
               { signal: controller.signal },
             );
           } catch (error) {
+            decisionPromptBackoff.set(decisionId, Date.now());
             bb.log.warn(
               `Owner-decision prompt failed on ${rootThreadId}: ${
                 error instanceof Error ? error.message : String(error)
-              }`,
+              } (backing off 10m)`,
             );
             return;
           } finally {
