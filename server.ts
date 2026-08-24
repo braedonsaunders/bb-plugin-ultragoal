@@ -647,8 +647,8 @@ export default function plugin(bb: BbPluginApi) {
     }
     lines.push(
       item.check
-        ? `Done-check: \`${item.check}\` must pass. Run it yourself and include its result in your final report.`
-        : "Define a machine-checkable done criterion first (a failing test where applicable), make it pass, and include the command and its output in your final report.",
+        ? `Done-check: \`${item.check}\` must pass. Run it yourself and include its result in your slice_done evidence.`
+        : "Define a machine-checkable done criterion first (a failing test where applicable), make it pass, and include the command and its output in your slice_done evidence.",
     );
     lines.push(
       "Dispatched by the UltraGoal scheduler: this slice's dependencies are complete. Work only this slice.",
@@ -1025,7 +1025,7 @@ export default function plugin(bb: BbPluginApi) {
             input: [
               {
                 type: "text",
-                text: "Your turn ended but your slice is still open and you have not reported. Resume and finish the slice now. When it is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <one-sentence evidence>. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
+                text: "Your turn ended but your slice is still open and you have not reported. Resume and finish the slice now. When it is fully done, call the slice_done tool with evidence (commit SHAs + passing check output) and end your turn. If you cannot finish, call slice_blocked with the specific blocker.",
                 mentions: [],
               },
             ],
@@ -1156,7 +1156,7 @@ export default function plugin(bb: BbPluginApi) {
     rootThreadId: string,
     itemId: string | null,
     report: string | null | undefined,
-    options?: { requirePass?: boolean },
+    options?: { requirePass?: boolean; recordedClaim?: "done" | "blocked" | null },
   ): boolean {
     if (!itemId) return false;
     const goal = store.get(rootThreadId);
@@ -1165,8 +1165,9 @@ export default function plugin(bb: BbPluginApi) {
       if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
     } else {
       if (view(goal).settings.verifyEnabled) return false;
-      // The injected report contract is the only completion signal.
-      const contract = structuredReport(report);
+      // The recorded tool claim decides; the text sentinel remains only as a
+      // transitional fallback for workers briefed before the tools existed.
+      const contract = options?.recordedClaim ?? structuredReport(report);
       if (contract === "blocked") markGoalEvent(rootThreadId);
       if (contract !== "done") return false;
     }
@@ -1209,7 +1210,12 @@ export default function plugin(bb: BbPluginApi) {
       reconciledReports.add(key);
       try {
         const output = (await bb.sdk.threads.output({ threadId: agent.threadId })).output ?? null;
-        if (completeItemFor(rootThreadId, agent.itemId, output)) {
+        const claim = collab.reportOf(agent.threadId);
+        if (
+          completeItemFor(rootThreadId, agent.itemId, claim?.evidence ?? output, {
+            recordedClaim: claim?.status ?? null,
+          })
+        ) {
           queueIntegration(rootThreadId, agent.threadId, agent.itemId);
           changed = true;
         }
@@ -1235,11 +1241,12 @@ export default function plugin(bb: BbPluginApi) {
     } catch {
       return;
     }
+    const claim = collab.reportOf(workerThreadId);
+    if (claim?.evidence) output = (claim.evidence + "\n\n" + output).trim();
     if (!output) return;
     // A verifier judges a completion claim, not every pause: mid-work idles
-    // spawn no auditors. This is what kept minting verifier after verifier
-    // while the stall machinery resumed a worker that was merely being judged.
-    if (structuredReport(output) !== "done") return;
+    // spawn no auditors.
+    if ((claim?.status ?? structuredReport(output)) !== "done") return;
     const digest = hashText(output);
     if (row.last_verify_hash === digest) return;
 
@@ -2081,6 +2088,63 @@ Keep the plan current as steps complete or the next best action changes. When a 
   }
 
   bb.agents.registerTool({
+    name: "slice_done",
+    description:
+      "Formally report your assigned slice complete. Pass evidence: the commit SHA(s) and your check's passing output/summary - a bare claim is rejected. Then END YOUR TURN: the slice closes (or independent verification starts) when your turn ends. This tool call is the only completion signal; prose claims do nothing.",
+    experimental_statusLabels: { pending: "Reporting slice done", completed: "Slice reported done" },
+    parameters: z.object({
+      evidence: z
+        .string()
+        .min(10)
+        .describe("Commit SHA(s) plus the passing check command and its output/summary."),
+    }),
+    async execute({ evidence }, { threadId }) {
+      const row = collab.rowOf(threadId);
+      if (!row || row.role === "verifier" || !row.item_id) {
+        return {
+          content: [{ type: "text", text: "slice_done is for goal workers with an assigned slice" }],
+          isError: true,
+        };
+      }
+      collab.setReport(threadId, "done", evidence);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Done report recorded. End your turn now - the slice closes (or verification starts) on turn end.",
+          },
+        ],
+      };
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "slice_blocked",
+    description:
+      "Formally report your assigned slice blocked. Pass the specific blocker (what you need, from whom). Then END YOUR TURN - the orchestrator is woken to act. This tool call is the only blocked signal; prose claims do nothing.",
+    experimental_statusLabels: { pending: "Reporting slice blocked", completed: "Slice reported blocked" },
+    parameters: z.object({
+      blocker: z.string().min(10).describe("The specific blocker: what is needed and from whom."),
+    }),
+    async execute({ blocker }, { threadId }) {
+      const row = collab.rowOf(threadId);
+      if (!row || row.role === "verifier" || !row.item_id) {
+        return {
+          content: [{ type: "text", text: "slice_blocked is for goal workers with an assigned slice" }],
+          isError: true,
+        };
+      }
+      collab.setReport(threadId, "blocked", blocker);
+      markGoalEvent(row.root_thread_id);
+      return {
+        content: [
+          { type: "text", text: "Blocked report recorded. End your turn - the orchestrator will act." },
+        ],
+      };
+    },
+  });
+
+  bb.agents.registerTool({
     name: "report_finding",
     description:
       "Report ONE discrete defect the moment you confirm it during a hunt/audit/review — do not batch findings into a final report. Findings are fingerprint-deduplicated (same file + same defect = same finding across sweeps). A fresh finding auto-creates a ready fix slice that the scheduler staffs immediately, so fixes start while the hunt continues. Open findings block goal completion.",
@@ -2298,14 +2362,14 @@ Keep the plan current as steps complete or the next best action changes. When a 
               ].join("\n")
             : [
                 `You are an UltraGoal subagent${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
-                "Complete only the slice you were assigned. Report evidence when done: commit SHA(s) and your check's passing output, not bare claims.",
+                "Complete only the slice you were assigned. Signal completion ONLY via the slice_done tool (evidence: commit SHAs + passing check output) or slice_blocked - prose claims do nothing.",
                 "If your slice is a hunt/audit/review, call report_finding per discrete defect the moment you confirm it — fixes are staffed automatically; do not batch findings into your final report.",
                 "Do not call update_goal, do not rewrite the parent plan, and do not take over the whole Goal.",
                 "You may spawn nested helpers for your slice if it splits cleanly.",
               ].join("\n")
           : undefined;
       return {
-        tools: [...COLLAB_TOOL_NAMES, "report_finding", "resolve_finding", "request_decision"],
+        tools: [...COLLAB_TOOL_NAMES, "slice_done", "slice_blocked", "report_finding", "resolve_finding", "request_decision"],
         skills: [],
         instructions: worker,
       };
@@ -2407,7 +2471,12 @@ Keep the plan current as steps complete or the next best action changes. When a 
     }
     if (parentRoot && parentRoot !== thread.id && !pendingInteraction) {
       if (child.role !== "verifier") {
-        if (completeItemFor(parentRoot, child.item_id, lastAssistantText)) {
+        const claim = collab.reportOf(thread.id);
+        if (
+          completeItemFor(parentRoot, child.item_id, claim?.evidence ?? lastAssistantText, {
+            recordedClaim: claim?.status ?? null,
+          })
+        ) {
           queueIntegration(parentRoot, thread.id, child.item_id);
         }
         await maybeVerifyWorker(thread.id);
@@ -2445,7 +2514,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
                     text: [
                       `Your slice failed independent verification (attempt ${fails}/${MAX_VERIFY_FAILS}). The verifier's findings:`,
                       (lastAssistantText ?? "").slice(-1800),
-                      "Address every finding, re-run your check, and end with ULTRAGOAL_DONE: <evidence — commit SHA(s) and the passing check output>.",
+                      "Address every finding, re-run your check, then call slice_done again with fresh evidence (commit SHAs + passing check output).",
                     ].join("\n\n"),
                     mentions: [],
                   },

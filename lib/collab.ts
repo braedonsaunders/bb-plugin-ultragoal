@@ -46,6 +46,8 @@ interface CollabRow {
   verify_fails?: number | null;
   last_nudge_at?: number | null;
   nudge_count?: number | null;
+  report_status?: string | null;
+  report_evidence?: string | null;
 }
 
 function nicknameOf(taskName: string, fallback?: string | null): string {
@@ -137,6 +139,9 @@ export function createCollabStore(
   );
   const resetNudgeStmt = db.prepare(
     "UPDATE collab_agents SET nudge_count = 0 WHERE thread_id = ? AND COALESCE(nudge_count, 0) > 0",
+  );
+  const setReportStmt = db.prepare(
+    "UPDATE collab_agents SET report_status = @status, report_evidence = @evidence WHERE thread_id = @thread_id",
   );
   // Retire, never delete: a deleted row lets discovery resurrect the dead
   // thread and re-claim its slice.
@@ -530,7 +535,7 @@ export function createCollabStore(
     const briefLines: string[] = [];
     if (brief?.files?.length) {
       briefLines.push(
-        `Scope: touch only files within: ${brief.files.join(", ")}. If the slice requires edits outside this scope, stop and report ULTRAGOAL_BLOCKED with the reason instead of expanding scope.`,
+        `Scope: touch only files within: ${brief.files.join(", ")}. If the slice requires edits outside this scope, stop and call slice_blocked with the reason instead of expanding scope.`,
       );
     }
     if (brief?.check) {
@@ -553,7 +558,7 @@ export function createCollabStore(
         : "If your slice is a hunt/audit/review that uncovers discrete defects, call report_finding the moment you confirm each one (one call per defect; do not batch them into your final report) — a fix slice is staffed automatically per finding.",
       role === "verifier"
         ? ""
-        : "When the slice is fully done, end your final message with exactly one line: ULTRAGOAL_DONE: <evidence — commit SHA(s) and your check's passing output/summary>. A bare claim without evidence does not close the slice. If you cannot finish, end with exactly one line: ULTRAGOAL_BLOCKED: <blocker>.",
+        : "When the slice is fully done, call the slice_done tool with your evidence (commit SHAs and the passing check output/summary) and then end your turn — a bare claim without evidence does not close the slice. If you cannot finish, call slice_blocked with the specific blocker and end your turn. These tool calls are the ONLY completion signals; prose claims do nothing.",
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -683,6 +688,20 @@ export function createCollabStore(
      * three nudges and gets wrongly retired. */
     resetNudges(threadId: string): void {
       resetNudgeStmt.run(threadId);
+    },
+
+    /** Durable slice report from the slice_done / slice_blocked tools. */
+    setReport(threadId: string, status: "done" | "blocked", evidence: string): boolean {
+      const row = byThread.get(threadId) as CollabRow | undefined;
+      if (!row) return false;
+      setReportStmt.run({ thread_id: threadId, status, evidence: evidence.trim() });
+      return true;
+    },
+
+    reportOf(threadId: string): { status: "done" | "blocked"; evidence: string } | null {
+      const row = byThread.get(threadId) as CollabRow | undefined;
+      if (!row || (row.report_status !== "done" && row.report_status !== "blocked")) return null;
+      return { status: row.report_status, evidence: row.report_evidence ?? "" };
     },
 
     /** Records a stall nudge; returns the new total. */

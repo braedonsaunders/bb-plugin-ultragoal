@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.0
+
+Slice completion is a formal tool call, not a text sentinel:
+
+- New worker tools slice_done (evidence: commit SHAs + passing check output) and slice_blocked (the specific blocker). The claim is recorded durably at call time; completion, verification, integration, and runtime release trigger off the recorded claim at turn end. The old "end your message with exactly one line ULTRAGOAL_DONE: ..." contract was the last prose protocol in the system — models mangle sentinels, wrap them, or forget the format, and the plugin was regexing the final 2,000 characters to find out what happened.
+- Verifiers receive the recorded evidence ahead of the worker's output; slice_blocked wakes the orchestrator immediately.
+- Sentinel parsing survives only as a transitional fallback for workers briefed before the tools existed, and is removed once current goals finish.
+
 ## 0.14.1
 
 - Integration-failure escalations are rate-limited to one per goal per 30 minutes — a persistently dirty base checkout produced a dozen identical conflict steers in ninety minutes, which reads as noise and buries real signal. The warn log still records every failure.

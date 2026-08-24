@@ -249,6 +249,10 @@ export function createGoalStore(bb: BbPluginApi) {
     `CREATE INDEX IF NOT EXISTS goal_decisions_thread ON goal_decisions(thread_id, status)`,
     `ALTER TABLE goals ADD COLUMN worker_provider TEXT`,
     `ALTER TABLE goals ADD COLUMN worker_model TEXT`,
+    // Formal slice reports: workers signal done/blocked via tool call, recorded
+    // here; completion reads the durable claim, not output text.
+    `ALTER TABLE collab_agents ADD COLUMN report_status TEXT`,
+    `ALTER TABLE collab_agents ADD COLUMN report_evidence TEXT`,
   ]);
   importLegacyGoalDatabase(db);
 
