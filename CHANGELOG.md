@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.4
+
+- Landed work is recorded even while the goal reads blocked. "Blocked" almost always means the ROOT thread died, but slice completion and the ready-queue scheduler both refused to run in that state — so a worker could fix a defect, commit it, and call slice_done while the plugin silently discarded the completion and never merged the branch. Completion, integration, and staffing now proceed for blocked goals; only paused/complete stop the machinery.
+
 ## 0.17.3
 
 - Repeated root deaths trigger context compaction: a root that needs reviving more than once is usually drowning in its own session (turn submission fails under giant-context load — the openbooks root died three times in an hour at 800M+ tokens). The second and later revivals request bb's thread compaction before resuming.

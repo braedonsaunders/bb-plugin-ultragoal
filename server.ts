@@ -659,7 +659,12 @@ export default function plugin(bb: BbPluginApi) {
 
   async function scheduleReady(rootThreadId: string): Promise<void> {
     const goal = store.get(rootThreadId);
-    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    if (
+      !goal ||
+      (goal.status !== "active" && goal.status !== "budget_limited" && goal.status !== "blocked")
+    ) {
+      return;
+    }
     if (scheduling.has(rootThreadId)) return;
     scheduling.add(rootThreadId);
     try {
@@ -1172,7 +1177,15 @@ export default function plugin(bb: BbPluginApi) {
   ): boolean {
     if (!itemId) return false;
     const goal = store.get(rootThreadId);
-    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return false;
+    // A blocked goal still records landed work: "blocked" usually means the
+    // ROOT died, and refusing completion there stranded finished slices
+    // (worker reported done, nothing merged) until a human noticed.
+    if (
+      !goal ||
+      (goal.status !== "active" && goal.status !== "budget_limited" && goal.status !== "blocked")
+    ) {
+      return false;
+    }
     if (options?.requirePass) {
       if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
     } else {
