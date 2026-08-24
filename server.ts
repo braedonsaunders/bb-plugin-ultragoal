@@ -1370,6 +1370,66 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  // Intake: every real owner message to the goal thread is triaged by a
+  // dedicated plugin-spawned agent that files defects (report_finding) and
+  // requests (add_slice) through the formal tools — filing never depends on
+  // the orchestrator noticing a message. Provenance filters keep it honest:
+  // composer-origin user rows only (no inter-thread sends, no child-outcome
+  // system rows, none of the plugin's own [ultragoal]-marked steers).
+  const intakeCursor = new Map<string, string>();
+
+  async function maybeIntakeUserMessage(
+    rootThreadId: string,
+    rows: readonly unknown[],
+  ): Promise<void> {
+    const goal = store.get(rootThreadId);
+    if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
+    let latest: { id: string; text: string } | null = null;
+    for (const raw of rows) {
+      const row = raw as {
+        kind?: string;
+        role?: string;
+        text?: string;
+        id?: string;
+        senderThreadId?: string | null;
+        systemMessageKind?: string;
+      };
+      if (row?.kind !== "conversation" || row.role !== "user") continue;
+      if (row.senderThreadId) continue;
+      if (row.systemMessageKind && row.systemMessageKind !== "unlabeled") continue;
+      const text = row.text?.trim() ?? "";
+      if (!text || text.startsWith("[bb ") || text.startsWith("[ultragoal]")) continue;
+      latest = { id: String(row.id ?? ""), text };
+    }
+    if (!latest || !latest.id) return;
+    const seen = intakeCursor.get(rootThreadId);
+    intakeCursor.set(rootThreadId, latest.id);
+    if (seen === undefined || seen === latest.id) return;
+    if (parseSlashGoal(latest.text)) return;
+    const result = await collab.spawnWorker({
+      parentThreadId: rootThreadId,
+      itemId: null,
+      skipClaim: true,
+      // Fixed name: the slug must start with intake_ so idle cleanup matches.
+      displayName: "Intake Courier",
+      message: [
+        "INTAKE TRIAGE (you are the goal's intake agent; do not implement anything).",
+        "The goal owner just sent the message below to the goal thread. File every actionable item through the formal tools:",
+        "- Each DEFECT they describe: one report_finding call (title = the defect in one sentence; file = the best area path you can determine by reading the repo read-only; evidence = the owner's words plus any quick read-only verification). Duplicates are fingerprint-deduped — file without fear.",
+        "- Each FEATURE/UX request: one add_slice call (step starts 'Owner UX:' or 'Owner request:', self-contained, narrow or empty files).",
+        "- Questions or decisions only the owner can answer are NOT yours to file; skip them.",
+        "If nothing is actionable, do nothing. End your turn when filing is complete — do not call slice_done (you hold no slice), do not implement fixes, do not message anyone.",
+        "OWNER MESSAGE:",
+        latest.text,
+      ].join("\n\n"),
+    });
+    if ("error" in result) {
+      bb.log.warn(`Intake spawn failed on ${rootThreadId}: ${result.error}`);
+    } else {
+      bb.log.info(`Intake ${result.nickname} (${result.threadId}) triaging owner message on ${rootThreadId}`);
+    }
+  }
+
   async function nudgeRoot(rootId: string): Promise<void> {
     const goal = store.get(rootId);
     if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) return;
@@ -1528,7 +1588,7 @@ export default function plugin(bb: BbPluginApi) {
         threadId,
         mode,
         permissionMode: "full",
-        input: [{ type: "text", text, visibility: "agent-only", mentions: [] }],
+        input: [{ type: "text", text: `[ultragoal]\n${text}`, visibility: "agent-only", mentions: [] }],
       });
       return true;
     } catch (error) {
@@ -2088,6 +2148,41 @@ Keep the plan current as steps complete or the next best action changes. When a 
   }
 
   bb.agents.registerTool({
+    name: "add_slice",
+    description:
+      "Add ONE new plan slice to the goal (feature request, follow-up work, or escalation that is not a defect — defects go through report_finding). The scheduler staffs it when its deps complete. Write the step as a self-contained brief; keep files the narrow real touched set or empty.",
+    experimental_statusLabels: { pending: "Adding slice", completed: "Added slice" },
+    parameters: z.object({
+      step: z.string().min(10).describe("Self-contained slice brief: objective + boundaries."),
+      files: z.array(z.string()).optional().describe("Narrow file scope, or omit."),
+      check: z.string().optional().describe("Runnable command proving the slice done."),
+      deps: z.array(z.string()).optional().describe("item_ids this slice must wait for."),
+    }),
+    async execute({ step, files, check, deps }, { threadId }) {
+      const rootThreadId = collab.rootId(threadId);
+      const goal = store.get(rootThreadId);
+      if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) {
+        return {
+          content: [{ type: "text", text: "no active UltraGoal on this thread tree" }],
+          isError: true,
+        };
+      }
+      const item = items.add(rootThreadId, step, "pending", {
+        deps: deps ?? [],
+        files: files ?? [],
+        check: check ?? null,
+      });
+      if (!item) {
+        return { content: [{ type: "text", text: "could not add slice" }], isError: true };
+      }
+      markGoalEvent(rootThreadId);
+      void publishFresh(rootThreadId);
+      void scheduleReady(rootThreadId);
+      return { content: [{ type: "text", text: JSON.stringify({ item_id: item.id }) }] };
+    },
+  });
+
+  bb.agents.registerTool({
     name: "slice_done",
     description:
       "Formally report your assigned slice complete. Pass evidence: the commit SHA(s) and your check's passing output/summary - a bare claim is rejected. Then END YOUR TURN: the slice closes (or independent verification starts) when your turn ends. This tool call is the only completion signal; prose claims do nothing.",
@@ -2457,6 +2552,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     if (usesNativeGoal(thread.providerId)) return;
     const rows = await readTimeline(thread.id);
     await applyUserSlash(thread.id, lastUserText(rows));
+    void maybeIntakeUserMessage(thread.id, rows);
   });
 
   bb.events.on("thread.idle", async ({ thread, lastAssistantText }) => {
@@ -2470,6 +2566,12 @@ Keep the plan current as steps complete or the next best action changes. When a 
       if (approved > 0) return;
     }
     if (parentRoot && parentRoot !== thread.id && !pendingInteraction) {
+      if (child.role !== "verifier" && child.task_name.includes("/intake_")) {
+        void releaseWorkerRuntime(thread.id);
+        collab.forget(thread.id);
+        void publishFresh(parentRoot);
+        return;
+      }
       if (child.role !== "verifier") {
         const claim = collab.reportOf(thread.id);
         if (

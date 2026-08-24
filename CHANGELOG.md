@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.0
+
+Owner messages are ingested by the plugin, not by hoping the orchestrator notices:
+
+- Intake: every real owner message to the goal thread spawns a dedicated triage agent that files each described defect via report_finding and each feature/UX request via the new add_slice tool, then retires (runtime released). Provenance filters keep it honest — composer-origin user rows only: no inter-thread sends (senderThreadId), no child-outcome system rows (systemMessageKind), no slash commands, and none of the plugin's own steers (now marked [ultragoal]).
+- New add_slice tool: workers and intake can add one self-contained plan slice (feature/follow-up work; defects stay report_finding).
+- Orchestrator contract updated: acknowledge and coordinate owner messages; Intake owns the filing. (Field case: the owner playtested and typed three defects into the goal thread; the orchestrator ignored them and a human had to file them by hand — twice.)
+
 ## 0.15.0
 
 Slice completion is a formal tool call, not a text sentinel:

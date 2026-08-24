@@ -495,11 +495,13 @@ export function createCollabStore(
      * The plugin's own staffing uses this: slice briefs are self-contained,
      * and forking a large root session fails at thread.start. */
     fresh?: boolean;
+    /** Do not claim or mint a plan item from the message (intake/triage helpers). */
+    skipClaim?: boolean;
   }): Promise<
     | { threadId: string; taskName: string; nickname: string; itemId: string | null }
     | { error: string }
   > {
-    const { threadId, task_name, display_name, item_id, role, fork_turns, model, fresh } = args;
+    const { threadId, task_name, display_name, item_id, role, fork_turns, model, fresh, skipClaim } = args;
     const trimmed = args.message.trim();
     if (!trimmed) return { error: "Empty message can't be sent to an agent" };
     const parent = await bb.sdk.threads.get({ threadId });
@@ -515,7 +517,7 @@ export function createCollabStore(
     // arbitrary unassigned Next row (that repurposed unrelated slices).
     const requested = item_id?.trim() || null;
     const itemId =
-      role === "verifier"
+      role === "verifier" || skipClaim
         ? requested
         : hooks?.claimItem?.(rootThreadId, {
             itemId: requested,
@@ -796,6 +798,7 @@ export function createCollabStore(
       itemId: string | null;
       displayName?: string;
       message: string;
+      skipClaim?: boolean;
     }): Promise<{ threadId: string; taskName: string; nickname: string } | { error: string }> {
       const result = await spawnAgent({
         threadId: args.parentThreadId,
@@ -806,6 +809,7 @@ export function createCollabStore(
         role: "worker",
         message: args.message,
         fresh: true,
+        skipClaim: args.skipClaim,
       });
       return result;
     },
