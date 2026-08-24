@@ -51,7 +51,7 @@ Do not narrate ordinary orchestration turns. The UltraGoal pane already shows No
 
 ## Completion
 
-Call `update_goal` with status `complete` only when current evidence proves every requirement and no required work remains. If the UltraGoal has a token budget, report the final consumed tokens after that call succeeds.
+Call `update_goal` with status `complete` only when current evidence proves every requirement and no required work remains — and pass `summary`: the delivery report the user sees (what shipped, where it lives — URLs, final HEAD SHA, deploy state — and how it was verified). Completion without a summary is rejected. If the UltraGoal has a token budget, report the final consumed tokens after that call succeeds.
 
 ## Blocked
 

@@ -152,6 +152,7 @@ function snapshotOf(
     ),
     findings,
     decisions,
+    completionSummary: goal.completionSummary,
   };
 }
 
@@ -2034,13 +2035,19 @@ export default function plugin(bb: BbPluginApi) {
       completed: "Updated Goal",
     },
     parameters: z.object({
+      summary: z
+        .string()
+        .optional()
+        .describe(
+          "REQUIRED with status complete: the delivery summary the user sees — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified (gates, tests, checks). Markdown allowed.",
+        ),
       status: z
         .enum(["complete", "blocked"])
         .describe(
           "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit.",
         ),
     }),
-    async execute({ status }, { threadId }) {
+    async execute({ status, summary }, { threadId }) {
       const accounted = (await account(threadId)) ?? store.get(threadId);
       if (!accounted) {
         return {
@@ -2049,6 +2056,17 @@ export default function plugin(bb: BbPluginApi) {
         };
       }
       if (status === "complete") {
+        if (!summary || summary.trim().length < 40) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "cannot mark the goal complete without a delivery summary: pass summary — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified. This renders as the goal's completion report.",
+              },
+            ],
+            isError: true,
+          };
+        }
         const openDecisions = decisions.list(threadId, "open");
         if (openDecisions.length > 0) {
           return {
@@ -2078,6 +2096,9 @@ export default function plugin(bb: BbPluginApi) {
             isError: true,
           };
         }
+      }
+      if (status === "complete" && summary) {
+        store.update(threadId, { completionSummary: summary.trim() });
       }
       const next = applyStatus(threadId, status, null);
       return goalToolResponse(next ? view(next) : null, status === "complete");

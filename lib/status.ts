@@ -18,6 +18,9 @@ export function formatGoalCard(goal: GoalSnapshot): string {
     }`,
   ];
   if (goal.reason) lines.push(`Reason: ${goal.reason}`);
+  if (goal.status === "complete" && goal.completionSummary) {
+    lines.push("", "COMPLETE — delivery summary:", goal.completionSummary, "");
+  }
   if (goal.items.length > 0) {
     const done = goal.items.filter((item) => item.status === "completed").length;
     const completedIds = new Set(

@@ -41,12 +41,13 @@ interface GoalRow {
   worker_provider: string | null;
   worker_model: string | null;
   intake_row_id: string | null;
+  completion_summary: string | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
 // are computed per snapshot in server.ts, never stored.
 export interface StoredGoal
-  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings" | "decisions"> {
+  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings" | "decisions" | "completionSummary"> {
   lastSeenTokens: number | null;
   lastAccountedAt: number | null;
   lastContinueWasAutomatic: boolean;
@@ -62,6 +63,7 @@ export interface StoredGoal
   workerProviderOverride: string | null;
   workerModelOverride: string | null;
   intakeRowId: string | null;
+  completionSummary: string | null;
 }
 
 function normalizeStatus(status: string): GoalStatus {
@@ -117,6 +119,7 @@ function rowToGoal(row: GoalRow): StoredGoal {
     workerProviderOverride: row.worker_provider,
     workerModelOverride: row.worker_model,
     intakeRowId: row.intake_row_id ?? null,
+    completionSummary: row.completion_summary ?? null,
   };
 }
 
@@ -259,6 +262,7 @@ export function createGoalStore(bb: BbPluginApi) {
     // Durable intake cursor: an in-memory cursor re-baselined on every plugin
     // reload and silently skipped the first owner message after each reload.
     `ALTER TABLE goals ADD COLUMN intake_row_id TEXT`,
+    `ALTER TABLE goals ADD COLUMN completion_summary TEXT`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -274,7 +278,7 @@ export function createGoalStore(bb: BbPluginApi) {
       blocked_streak, last_block_key, turn_count, max_turns, max_minutes,
       verify_enabled, verify_provider, verify_model, auto_continue,
       last_progress_at, progress_update_minutes, max_workers,
-      worker_provider, worker_model, intake_row_id
+      worker_provider, worker_model, intake_row_id, completion_summary
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
@@ -282,7 +286,7 @@ export function createGoalStore(bb: BbPluginApi) {
       @blocked_streak, @last_block_key, 0, 40, 180,
       @verify_enabled, @verify_provider, @verify_model, @auto_continue,
       @last_progress_at, @progress_update_minutes, @max_workers,
-      @worker_provider, @worker_model, @intake_row_id
+      @worker_provider, @worker_model, @intake_row_id, @completion_summary
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -308,7 +312,8 @@ export function createGoalStore(bb: BbPluginApi) {
       max_workers = excluded.max_workers,
       worker_provider = excluded.worker_provider,
       worker_model = excluded.worker_model,
-      intake_row_id = excluded.intake_row_id
+      intake_row_id = excluded.intake_row_id,
+      completion_summary = excluded.completion_summary
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
   const writeIntakeRow = db.prepare("UPDATE goals SET intake_row_id = ? WHERE thread_id = ?");
@@ -353,6 +358,7 @@ export function createGoalStore(bb: BbPluginApi) {
         worker_provider: existing?.workerProviderOverride ?? null,
         worker_model: existing?.workerModelOverride ?? null,
         intake_row_id: existing?.intakeRowId ?? null,
+        completion_summary: existing?.completionSummary ?? null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -387,6 +393,7 @@ export function createGoalStore(bb: BbPluginApi) {
         worker_provider: null,
         worker_model: null,
         intake_row_id: null,
+        completion_summary: null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -417,6 +424,7 @@ export function createGoalStore(bb: BbPluginApi) {
         maxWorkersOverride: number | null;
         workerProviderOverride: string | null;
         workerModelOverride: string | null;
+        completionSummary: string | null;
       }>,
     ): StoredGoal | null {
       const existing = this.get(threadId);
@@ -491,6 +499,10 @@ export function createGoalStore(bb: BbPluginApi) {
             ? existing.workerModelOverride
             : patch.workerModelOverride,
         intake_row_id: existing.intakeRowId,
+        completion_summary:
+          patch.completionSummary === undefined
+            ? existing.completionSummary
+            : patch.completionSummary,
       };
       upsert.run(next);
       return rowToGoal(next);

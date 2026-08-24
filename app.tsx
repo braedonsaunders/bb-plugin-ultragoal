@@ -723,7 +723,19 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-        {items.length === 0 && agents.length === 0 ? (
+        {goal.status === "complete" ? (
+          <>
+            <CompletionView goal={goal} />
+            <ItemGroup
+              title="Delivered"
+              items={doneItems}
+              alwaysShow
+              emptyLabel="No recorded slices."
+              collapsed={collapsed.previous}
+              onToggleCollapsed={() => toggleCollapsed("previous")}
+            />
+          </>
+        ) : items.length === 0 && agents.length === 0 ? (
           <div className="px-2 py-8 text-sm leading-relaxed text-muted-foreground">
             No requirements yet. Resume the UltraGoal and the agent will fill this list with
             update_plan.
@@ -1476,6 +1488,65 @@ function NowSection({
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+function fmtGoalDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** The completion report: proof of done, not just a status label. */
+function CompletionView({ goal }: { goal: GoalSnapshot }) {
+  const answered = goal.decisions.filter((decision) => decision.status === "answered").length;
+  const stats: Array<[string, string]> = [
+    ["Slices", String(goal.items.length)],
+    ["Findings fixed", String(goal.findings.fixed + goal.findings.dismissed)],
+    ["Decisions", String(answered)],
+    ["Workers", String(goal.agents.length)],
+    ["Tokens", formatTokens(goal.tokensUsed)],
+    ["Duration", fmtGoalDuration(goal.timeUsedSeconds)],
+  ];
+  return (
+    <section className="px-1 pb-3">
+      <div className="mt-1 rounded-md border border-foreground/30 p-3">
+        <div className="flex items-center gap-2">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-foreground text-background">
+            <span className="text-[11px] leading-none">✓</span>
+          </span>
+          <span className="text-[13px] font-semibold text-foreground">Goal complete</span>
+        </div>
+        <div className="mt-1.5 text-[12px] leading-snug text-muted-foreground">
+          {goal.objective}
+        </div>
+        <div className="mt-2.5 grid grid-cols-3 gap-1.5">
+          {stats.map(([label, value]) => (
+            <div key={label} className="rounded-md border border-border/70 px-2 py-1.5">
+              <div className="text-[9.5px] uppercase tracking-[0.12em] text-muted-foreground">
+                {label}
+              </div>
+              <div className="mt-0.5 text-[13px] tabular-nums text-foreground">{value}</div>
+            </div>
+          ))}
+        </div>
+        {goal.completionSummary ? (
+          <div className="mt-3 border-t border-border/70 pt-2.5">
+            <div className="text-[9.5px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+              Delivery summary
+            </div>
+            <div className="mt-1.5 text-[12.5px] leading-relaxed text-foreground">
+              <Markdown content={goal.completionSummary} />
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 border-t border-border/70 pt-2.5 text-[11.5px] text-muted-foreground">
+            No delivery summary was recorded for this goal.
+          </div>
+        )}
+      </div>
     </section>
   );
 }

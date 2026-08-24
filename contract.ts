@@ -142,6 +142,8 @@ export const goalSnapshotSchema = z.object({
     .default({ open: 0, fixed: 0, dismissed: 0 }),
   /** Open owner decisions — work that waits on the user, surfaced first. */
   decisions: z.array(goalDecisionSchema).default([]),
+  /** The delivery summary recorded when the goal was marked complete. */
+  completionSummary: z.string().nullable().default(null),
 });
 
 export type GoalStatus = z.infer<typeof goalStatusSchema>;

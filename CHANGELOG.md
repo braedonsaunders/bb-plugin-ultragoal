@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.0
+
+Completion is a report, not a status label:
+
+- update_goal complete now REQUIRES a delivery summary — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified. It is stored durably on the goal.
+- The pane renders a completion report when a goal finishes: a check header with the objective, a stats grid (slices delivered, findings fixed, decisions answered, workers, tokens, duration), the delivery summary as Markdown, and the full Delivered list. `bb ultragoal status` prints the summary.
+
 ## 0.16.4
 
 - Root-turn watchdog: an orchestrator that stays "active" while its timeline stops growing for 10 minutes is wedged in a provider turn, with queued steers piling up unprocessed behind it. Workers already had the three-strike retire; the root now gets stopped and auto-continued, which also flushes its message queue. (Field case: a root sat "Working…" for 20 minutes with zero output and a growing steer backlog while its goal showed no open work.)
