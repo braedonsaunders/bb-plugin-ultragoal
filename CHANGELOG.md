@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.3
+
+- Repeated root deaths trigger context compaction: a root that needs reviving more than once is usually drowning in its own session (turn submission fails under giant-context load — the openbooks root died three times in an hour at 800M+ tokens). The second and later revivals request bb's thread compaction before resuming.
+
 ## 0.17.2
 
 - Errored roots revive themselves: a provider turn failure left the orchestrator thread in error state indefinitely — auto-resume (0.16.3) only reconciled the goal once the root ran again, and nothing restarted it. The pulse now revives an errored root with exponential backoff (2m doubling to a 30m cap, reset on a real turn), completing the self-healing set: workers three-strike restaff, wedged root turns get stopped, blocked goals reconcile on recovery, and dead roots restart.

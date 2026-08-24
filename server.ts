@@ -1709,6 +1709,17 @@ export default function plugin(bb: BbPluginApi) {
     if (now < state.nextAt) return;
     const backoff = Math.min(2 * 60_000 * 2 ** state.attempts, 30 * 60_000);
     rootReviveState.set(rootThreadId, { attempts: state.attempts + 1, nextAt: now + backoff });
+    // A root that keeps dying after a plain resume is usually drowning in its
+    // own context (giant sessions fail turn submission under load) — compact
+    // it before the second and later revivals.
+    if (state.attempts >= 1) {
+      try {
+        await bb.sdk.threads.compact({ threadId: rootThreadId });
+        bb.log.warn(`Requested context compaction for repeatedly-dying root ${rootThreadId}`);
+      } catch {
+        // Compaction eligibility varies; the resume below still runs.
+      }
+    }
     bb.log.warn(
       `Root ${rootThreadId} is in error state — reviving (attempt ${state.attempts + 1}, next retry in ${Math.round(backoff / 60000)}m)`,
     );
