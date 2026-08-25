@@ -294,10 +294,10 @@ export const rpcContract = defineRpcContract({
       crews: z.array(
         z.object({
           threadId: z.string(),
-          // Crew rows outlive the goal: worker threads stay hidden in the
-          // sidebar after a clear. Only active crews get the UltraGoal pill.
+          // Crew rows outlive a cleared goal so its workers stay hidden.
+          // `active` means the durable goal record still exists, regardless
+          // of whether it is running, paused, blocked, limited, or complete.
           active: z.boolean(),
-          items: z.array(goalItemSchema),
           agents: z.array(goalAgentSchema),
           workerIds: z.array(z.string()),
         }),

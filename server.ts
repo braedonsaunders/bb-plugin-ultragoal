@@ -44,8 +44,13 @@ import {
   liveVerifierCount,
   occupyingWorkerIds,
   orphanInProgressIds,
+  isTransientTurnFailure,
+  isTurnAlreadyActiveError,
+  threadAcceptsStart,
   threadAcceptsSteer,
+  threadIsSettledForSubmit,
 } from "./lib/scheduler.js";
+import { projectSidebarCrew } from "./lib/sidebar.js";
 
 const SLICE_PREAMBLE =
   /^(you are|parent goal|parent objective|complete only|the new agent's|do not|constraints\b|local main|skip |when done|report |end with|if |head is)/i;
@@ -266,6 +271,7 @@ export default function plugin(bb: BbPluginApi) {
   /** Open native task calls per root, from the last fresh scan. */
   const liveTaskCounts = new Map<string, number>();
   const inflight = new Set<string>();
+  const starting = new Map<string, number>();
   const running = new Map<string, boolean>();
   let publishFresh: (threadId: string) => Promise<void> = async () => {};
   let workersOnItem = (_rootThreadId: string, _itemId: string): string[] => [];
@@ -1631,7 +1637,7 @@ export default function plugin(bb: BbPluginApi) {
     if (latest && options?.start !== false) {
       await refreshRunning(threadId);
       if (!running.get(threadId)) {
-        await continueIfIdle(threadId, latest);
+        await continueIfIdle(threadId, latest, { force: true });
       }
     }
     return store.get(threadId);
@@ -1686,15 +1692,78 @@ export default function plugin(bb: BbPluginApi) {
     return ready;
   }
 
+  async function threadStatus(threadId: string): Promise<string> {
+    return (await bb.sdk.threads.get({ threadId })).status ?? "";
+  }
+
+  async function waitUntilSettled(threadId: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      let status = "";
+      try {
+        status = await threadStatus(threadId);
+      } catch {
+        await delay(400);
+        continue;
+      }
+      if (threadIsSettledForSubmit(status)) return true;
+      await delay(400);
+    }
+    return false;
+  }
+
+  // OpenCode ACP can keep a turn held after BB marks the thread error/stopped.
+  // compact and continue are both turn.submit, so a leftover turn makes every
+  // recovery attempt fail with "A turn is already active".
+  async function settleThreadForSubmit(threadId: string, timeoutMs = 30_000): Promise<boolean> {
+    try {
+      await bb.sdk.threads.stop({ threadId });
+    } catch {
+      // Already stopped or the provider ignored a second stop.
+    }
+    running.set(threadId, false);
+    const settled = await waitUntilSettled(threadId, timeoutMs);
+    if (!settled) {
+      bb.log.warn(`Could not settle ghost turn on ${threadId} before submit`);
+    }
+    return settled;
+  }
+
+  async function submitGoalTurn(
+    threadId: string,
+    text: string,
+    mode: "start" | "auto",
+  ): Promise<void> {
+    await bb.sdk.threads.send({
+      threadId,
+      mode,
+      permissionMode: "full",
+      input: [{ type: "text", text: `[ultragoal]\n${text}`, visibility: "agent-only", mentions: [] }],
+    });
+  }
+
   async function sendSteering(
     threadId: string,
     text: string,
     mode: "start" | "auto",
   ): Promise<boolean> {
     if (inflight.has(threadId)) return false;
+    if (mode === "start" && (starting.get(threadId) ?? 0) > Date.now()) {
+      bb.log.info(`Skipping Goal start on ${threadId}: another start is in flight`);
+      return false;
+    }
     try {
       const thread = await bb.sdk.threads.get({ threadId });
-      if (!threadAcceptsSteer(thread)) {
+      if (mode === "start") {
+        if (thread.status === "error") {
+          await settleThreadForSubmit(threadId);
+        }
+        const next = await bb.sdk.threads.get({ threadId });
+        if (!threadAcceptsStart(next)) {
+          bb.log.info(`Skipping Goal start on ${threadId}: ${next.status ?? "unavailable"}`);
+          return false;
+        }
+      } else if (!threadAcceptsSteer(thread)) {
         bb.log.info(`Skipping Goal steer on ${threadId}: ${thread.status ?? "unavailable"}`);
         return false;
       }
@@ -1703,14 +1772,27 @@ export default function plugin(bb: BbPluginApi) {
     }
     inflight.add(threadId);
     try {
-      await bb.sdk.threads.send({
-        threadId,
-        mode,
-        permissionMode: "full",
-        input: [{ type: "text", text: `[ultragoal]\n${text}`, visibility: "agent-only", mentions: [] }],
-      });
+      await submitGoalTurn(threadId, text, mode);
+      if (mode === "start") starting.set(threadId, Date.now() + 8_000);
       return true;
     } catch (error) {
+      if (mode === "start" && isTurnAlreadyActiveError(error)) {
+        bb.log.warn(`Goal start hit an active turn on ${threadId} — settling and retrying`);
+        if (await settleThreadForSubmit(threadId)) {
+          try {
+            await submitGoalTurn(threadId, text, mode);
+            starting.set(threadId, Date.now() + 8_000);
+            return true;
+          } catch (retryError) {
+            bb.log.warn(
+              `Goal start retry failed on ${threadId}: ${
+                retryError instanceof Error ? retryError.message : String(retryError)
+              }`,
+            );
+            return false;
+          }
+        }
+      }
       bb.log.warn(
         `Goal steering failed on ${threadId}: ${
           error instanceof Error ? error.message : String(error)
@@ -1757,10 +1839,10 @@ export default function plugin(bb: BbPluginApi) {
   const ROOT_WEDGE_MS = 10 * 60_000;
   const rootActivity = new Map<string, { rowId: string; at: number }>();
 
-  async function watchRootTurn(rootThreadId: string): Promise<void> {
+  async function watchRootTurn(rootThreadId: string): Promise<boolean> {
     if (!(await threadIsRunning(bb, rootThreadId))) {
       rootActivity.delete(rootThreadId);
-      return;
+      return false;
     }
     const rows = await readTimeline(rootThreadId);
     const last = rows.at(-1) as { id?: string } | undefined;
@@ -1769,9 +1851,9 @@ export default function plugin(bb: BbPluginApi) {
     const seen = rootActivity.get(rootThreadId);
     if (!seen || seen.rowId !== rowId) {
       rootActivity.set(rootThreadId, { rowId, at: now });
-      return;
+      return false;
     }
-    if (now - seen.at < ROOT_WEDGE_MS) return;
+    if (now - seen.at < ROOT_WEDGE_MS) return false;
     rootActivity.delete(rootThreadId);
     bb.log.warn(
       `Root turn wedged on ${rootThreadId}: active with no timeline growth for ${Math.round((now - seen.at) / 60000)}m — stopping and continuing`,
@@ -1779,14 +1861,19 @@ export default function plugin(bb: BbPluginApi) {
     try {
       await bb.sdk.threads.stop({ threadId: rootThreadId });
     } catch {
-      return;
+      return false;
     }
     markGoalEvent(rootThreadId);
     running.set(rootThreadId, false);
+    // OpenCode still holds the stopped turn for a beat; submitting immediately
+    // is what produced "A turn is already active" on the openbooks root.
+    if (!(await waitUntilSettled(rootThreadId, 30_000))) return false;
     const goal = store.get(rootThreadId);
     if (goal && (goal.status === "active" || goal.status === "budget_limited")) {
       await continueIfIdle(rootThreadId, goal);
+      return true;
     }
+    return false;
   }
 
   // Errored roots revive themselves: thread.failed marks the goal blocked and
@@ -1802,28 +1889,43 @@ export default function plugin(bb: BbPluginApi) {
     }
     let status = "";
     try {
-      status = (await bb.sdk.threads.get({ threadId: rootThreadId })).status ?? "";
+      status = await threadStatus(rootThreadId);
     } catch {
       return;
     }
-    if (status !== "error") {
-      if (status === "active") rootReviveState.delete(rootThreadId);
+    if (status === "active" || status === "starting") {
+      rootReviveState.delete(rootThreadId);
       return;
     }
+    const blockedTransient =
+      goal.status === "blocked" && isTransientTurnFailure(goal.reason);
+    if (status !== "error" && !blockedTransient) return;
+    if (status !== "error" && status !== "idle" && status !== "stopped") return;
     const state = rootReviveState.get(rootThreadId) ?? { attempts: 0, nextAt: 0 };
     const now = Date.now();
     if (now < state.nextAt) return;
     const backoff = Math.min(2 * 60_000 * 2 ** state.attempts, 30 * 60_000);
     rootReviveState.set(rootThreadId, { attempts: state.attempts + 1, nextAt: now + backoff });
+    // A leftover OpenCode turn survives BB error/stop. Clearing it first is
+    // what makes compact and continue actually land.
+    if (status === "error" && !(await settleThreadForSubmit(rootThreadId))) return;
     // A root that keeps dying after a plain resume is usually drowning in its
     // own context (giant sessions fail turn submission under load) — compact
-    // it before the second and later revivals.
+    // it before the second and later revivals, then wait so continue does not
+    // collide with the compact turn.
     if (state.attempts >= 1) {
       try {
         await bb.sdk.threads.compact({ threadId: rootThreadId });
         bb.log.warn(`Requested context compaction for repeatedly-dying root ${rootThreadId}`);
-      } catch {
-        // Compaction eligibility varies; the resume below still runs.
+        if (!(await waitUntilSettled(rootThreadId, 10 * 60_000))) {
+          bb.log.warn(`Compact still running on ${rootThreadId}; deferring resume`);
+          return;
+        }
+      } catch (error) {
+        if (isTurnAlreadyActiveError(error)) {
+          await settleThreadForSubmit(rootThreadId);
+          bb.log.warn(`Compact skipped on ${rootThreadId}: turn still active after settle`);
+        }
       }
     }
     bb.log.warn(
@@ -1835,14 +1937,22 @@ export default function plugin(bb: BbPluginApi) {
   async function pulseStaleProgress(): Promise<void> {
     for (const threadId of store.listActiveThreadIds()) {
       const goal = store.get(threadId);
-      if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) continue;
+      if (!goal) continue;
+      const transientBlock = goal.status === "blocked" && isTransientTurnFailure(goal.reason);
+      if (goal.status !== "active" && goal.status !== "budget_limited" && !transientBlock) continue;
       try {
         const root = await bb.sdk.threads.get({ threadId }).catch(() => null);
         if (!root || root.archivedAt || root.deletedAt) continue;
+        if (transientBlock) {
+          await reviveErroredRoot(threadId);
+          continue;
+        }
         ensureDecisionPrompts(threadId);
         await reviveErroredRoot(threadId);
-        await watchRootTurn(threadId);
-        await requestProgressUpdate(threadId, goal);
+        const restarted = await watchRootTurn(threadId);
+        // A wedge restart already submitted one turn. A second start in the
+        // same pulse (progress check-in) is the "A turn is already active" race.
+        if (!restarted) await requestProgressUpdate(threadId, goal);
         const reconciled = await reconcileFinishedSlices(threadId);
         const accounted = await account(threadId, { busy: goalIsBusy(threadId), scan: true });
         if (accounted || reconciled) {
@@ -1865,15 +1975,20 @@ export default function plugin(bb: BbPluginApi) {
     return Date.now() - lastAt >= minutes * 60_000;
   }
 
-  async function continueIfIdle(threadId: string, goal: StoredGoal): Promise<void> {
+  async function continueIfIdle(
+    threadId: string,
+    goal: StoredGoal,
+    options?: { force?: boolean },
+  ): Promise<void> {
     await ensureCrew(threadId);
     const latestGoal = store.get(threadId) ?? goal;
     const snap = await viewFresh(latestGoal);
     const due = !isBudgetExhausted(snap) && progressIsDue(latestGoal, snap.settings.progressUpdateMinutes);
     // Nothing new since the root's last turn and no heartbeat due: the root
     // has no job — waiting on live workers is the scheduler's business, not a
-    // reason to burn a polling turn every idle.
-    if (!due && latestGoal.lastContinueAt != null) {
+    // reason to burn a polling turn every idle. Resume/revive pass force so a
+    // dead root still gets a new provider session.
+    if (!options?.force && !due && latestGoal.lastContinueAt != null) {
       const lastEvent = lastGoalEvent.get(threadId) ?? 0;
       if (lastEvent <= latestGoal.lastContinueAt) {
         bb.log.info(`Goal continue skipped on ${threadId}: no new events; next turn on event or heartbeat`);
@@ -1904,8 +2019,12 @@ export default function plugin(bb: BbPluginApi) {
       const thread = await bb.sdk.threads.get({ threadId });
       if (thread.status === "active") {
         await sendSteering(threadId, objectiveUpdatedPrompt(view(result)), "auto");
-      } else if (thread.status === "idle" && view(result).settings.autoContinue && result.status === "active") {
-        await continueIfIdle(threadId, result);
+      } else if (
+        threadAcceptsStart(thread) &&
+        view(result).settings.autoContinue &&
+        result.status === "active"
+      ) {
+        await continueIfIdle(threadId, result, { force: true });
       }
     } catch {
       // Store update still stands if we cannot inspect or continue the thread.
@@ -2107,19 +2226,20 @@ export default function plugin(bb: BbPluginApi) {
     async listCrews() {
       // Every root that ever staffed a crew, not just active goals: clearing
       // a goal must not dump its (hidden) worker threads into the sidebar.
-      const roots = new Set<string>([...store.listActiveThreadIds(), ...collab.listRoots()]);
+      // Include every durable goal status so its chip remains until clear.
+      const roots = new Set<string>([...store.listThreadIds(), ...collab.listRoots()]);
       const crews = [];
       for (const threadId of roots) {
         const goal = store.get(threadId);
-        const active = Boolean(goal && (goal.status === "active" || goal.status === "budget_limited"));
         const snap = goal ? view(goal) : null;
-        crews.push({
-          threadId,
-          active,
-          items: snap?.items ?? [],
-          agents: snap?.agents ?? agentCache.get(threadId) ?? [],
-          workerIds: collab.threadIdsForRoot(threadId),
-        });
+        crews.push(
+          projectSidebarCrew(
+            threadId,
+            snap,
+            agentCache.get(threadId) ?? [],
+            collab.threadIdsForRoot(threadId),
+          ),
+        );
       }
       return { crews };
     },
@@ -2967,6 +3087,13 @@ Keep the plan current as steps complete or the next best action changes. When a 
   });
 
   bb.events.on("thread.failed", async ({ thread, error }) => {
+    // A rejected second submit is not a dead root. OpenCode still holds the
+    // first turn; marking blocked here is what made compact/continue pile on
+    // and left the openbooks goal stuck on "Command turn.submit failed".
+    if (isTurnAlreadyActiveError(error) || /no active acp session/i.test(error ?? "")) {
+      bb.log.warn(`Ignoring recoverable submit failure on ${thread.id}: ${error}`);
+      return;
+    }
     running.set(thread.id, false);
     const failedChild = collab.rowOf(thread.id);
     if (failedChild && failedChild.root_thread_id !== thread.id) {
@@ -3180,6 +3307,10 @@ Keep the plan current as steps complete or the next best action changes. When a 
       }
     },
   });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

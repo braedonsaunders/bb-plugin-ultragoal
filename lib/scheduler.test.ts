@@ -7,7 +7,11 @@ import {
   liveVerifierCount,
   occupyingWorkerIds,
   orphanInProgressIds,
+  isTransientTurnFailure,
+  isTurnAlreadyActiveError,
+  threadAcceptsStart,
   threadAcceptsSteer,
+  threadIsSettledForSubmit,
 } from "./scheduler.ts";
 
 describe("occupyingWorkerIds", () => {
@@ -136,6 +140,36 @@ describe("liveVerifierCount / threadAcceptsSteer / orphanInProgressIds", () => {
     assert.equal(threadAcceptsSteer({ status: "idle", archivedAt: 1 }), false);
     assert.equal(threadAcceptsSteer({ status: "idle", deletedAt: 1 }), false);
     assert.equal(threadAcceptsSteer({ status: "stopping" }), false);
+  });
+
+  it("starts a new turn on idle or errored threads, not live ones", () => {
+    assert.equal(threadAcceptsStart({ status: "idle" }), true);
+    assert.equal(threadAcceptsStart({ status: "error" }), true);
+    assert.equal(threadAcceptsStart({ status: "stopped" }), true);
+    assert.equal(threadAcceptsStart({ status: "active" }), false);
+    assert.equal(threadAcceptsStart({ status: "starting" }), false);
+    assert.equal(threadAcceptsStart({ status: "stopping" }), false);
+    assert.equal(threadAcceptsStart({ status: "idle", archivedAt: 1 }), false);
+    assert.equal(threadAcceptsStart({ status: "error", deletedAt: 1 }), false);
+  });
+
+  it("treats only non-running statuses as settled for submit", () => {
+    assert.equal(threadIsSettledForSubmit("idle"), true);
+    assert.equal(threadIsSettledForSubmit("error"), true);
+    assert.equal(threadIsSettledForSubmit("stopped"), true);
+    assert.equal(threadIsSettledForSubmit("active"), false);
+    assert.equal(threadIsSettledForSubmit("starting"), false);
+    assert.equal(threadIsSettledForSubmit("stopping"), false);
+  });
+
+  it("classifies OpenCode ghost-turn submit failures", () => {
+    assert.equal(isTurnAlreadyActiveError("A turn is already active"), true);
+    assert.equal(isTurnAlreadyActiveError(new Error("Command turn.submit failed: A turn is already active")), true);
+    assert.equal(isTurnAlreadyActiveError("HTTP 409: Thread is already active"), false);
+    assert.equal(isTransientTurnFailure("Command turn.submit failed"), true);
+    assert.equal(isTransientTurnFailure("A turn is already active"), true);
+    assert.equal(isTransientTurnFailure("No active ACP session"), true);
+    assert.equal(isTransientTurnFailure("Usage limited"), false);
   });
 
   it("lists in_progress slices nobody holds", () => {

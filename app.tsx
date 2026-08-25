@@ -140,7 +140,7 @@ function injectGoalSidebarMarks(
   extraHideIds?: ReadonlySet<string>,
 ) {
   // Workers of any crew — active or cleared — stay hidden. The pill marks
-  // only threads with a live goal.
+  // every durable goal until it is explicitly cleared.
   const goalIds = new Set(crews.map((crew) => crew.threadId));
   const markIds = new Set(crews.filter((crew) => crew.active !== false).map((crew) => crew.threadId));
   const workerIds = new Set(

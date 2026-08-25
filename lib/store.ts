@@ -291,6 +291,7 @@ export function createGoalStore(bb: BbPluginApi) {
   const selectActive = db.prepare(
     "SELECT thread_id FROM goals WHERE status IN ('active', 'budget_limited', 'paused', 'blocked')",
   );
+  const selectAll = db.prepare("SELECT thread_id FROM goals");
   const upsert = db.prepare(`
     INSERT INTO goals (
       thread_id, objective, status, reason, created_at, updated_at, started_at,
@@ -353,6 +354,10 @@ export function createGoalStore(bb: BbPluginApi) {
 
     listActiveThreadIds(): string[] {
       return (selectActive.all() as Array<{ thread_id: string }>).map((row) => row.thread_id);
+    },
+
+    listThreadIds(): string[] {
+      return (selectAll.all() as Array<{ thread_id: string }>).map((row) => row.thread_id);
     },
 
     set(write: GoalWrite): StoredGoal {

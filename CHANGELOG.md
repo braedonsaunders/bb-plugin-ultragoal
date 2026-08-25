@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.8
+
+OpenCode ghost-turn recovery (field case: openbooks `thr_rdmh8waewz`):
+
+- After a wedged-root stop, compact and continue are both `turn.submit`. OpenCode can still hold the previous turn after BB marks the thread error, so every recovery attempt failed with "A turn is already active" and the goal stayed blocked.
+- Starting a new turn now accepts idle/error/stopped threads. Error roots are stopped and waited out before compact or continue. A leftover-turn error settles and retries once.
+- Compact finishes (or is skipped) before resume, so continue cannot collide with the compact turn.
+- The progress pulse still revives blocked goals whose reason is a transient `turn.submit` / "already active" failure. Previously those sat blocked forever after `thread.failed`.
+- A rejected second submit no longer marks the goal blocked. The first turn is still running; blocking here made compact/continue pile on.
+- "No active ACP session" after a released ghost process is treated as recoverable, not a blocked goal.
+- Resume/revive always start a turn on a dead root (`force`), even when the event-gate would skip.
+- Wedge restart and progress check-in no longer both `turn.submit` in the same pulse. A start lock holds for 8s so only one new turn is in flight.
+- The left-sidebar UltraGoal chip now follows the durable goal record, matching the right pane: it remains for paused, blocked, limited, and completed goals until the goal is cleared. The crew RPC no longer includes legacy plan-item rows that could invalidate the entire chip refresh.
+
 ## 0.17.7
 
 - Settings uses the composer's multi-provider model picker for verifier and worker: provider icon tabs, brand-stripped model list, reasoning levels, and Fast mode. The saved tuple (provider/model/reasoning/service tier) is what workers and verifiers spawn with.

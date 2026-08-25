@@ -93,6 +93,34 @@ export function threadAcceptsSteer(thread: {
   return status !== "error" && status !== "stopping" && status !== "stopped";
 }
 
+/** Start a new turn on an idle, errored, or stopped thread. Active/starting
+ * means a provider turn is still held — settle it first. */
+export function threadAcceptsStart(thread: {
+  status?: string | null;
+  archivedAt?: number | null;
+  deletedAt?: number | null;
+}): boolean {
+  if (thread.archivedAt || thread.deletedAt) return false;
+  const status = thread.status ?? "";
+  return status !== "active" && status !== "starting" && status !== "stopping";
+}
+
+export function threadIsSettledForSubmit(status: string | null | undefined): boolean {
+  const value = status ?? "";
+  return value !== "active" && value !== "starting" && value !== "stopping";
+}
+
+export function isTurnAlreadyActiveError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /a turn is already active|turn is already active/i.test(message);
+}
+
+/** Infrastructure turn failures that should self-heal, not stay blocked. */
+export function isTransientTurnFailure(reason: string | null | undefined): boolean {
+  const text = reason ?? "";
+  return /turn\.submit|turn is already active|already active|no active acp session/i.test(text);
+}
+
 export function orphanInProgressIds(
   items: readonly Pick<GoalItem, "id" | "status">[],
   heldItemIds: ReadonlySet<string>,
