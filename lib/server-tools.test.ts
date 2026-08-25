@@ -2,6 +2,8 @@ import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createFakePluginHost, type FakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server.ts";
+import { createFindingStore } from "./findings.ts";
+import { createItemStore } from "./items.ts";
 
 const hosts: FakePluginHost[] = [];
 
@@ -226,5 +228,47 @@ describe("large-plan agent tool contracts", () => {
     assert.ok(!names.includes("update_goal"));
     assert.equal(configured.skills.length, 1);
     assert.match(configured.instructions ?? "", /canonical ultragoal_\* controls/);
+  });
+
+  it("audits stale finding links on the first startup pulse", async () => {
+    const host = registeredHost();
+    const db = host.bb.storage.database();
+    db.prepare(
+      "UPDATE goals SET thread_id = 'thr_startup', status = 'paused' WHERE thread_id = 'thr_sentinel'",
+    ).run();
+    const items = createItemStore(host.bb);
+    const findings = createFindingStore(host.bb);
+    const item = items.add(
+      "thr_startup",
+      "Repair segment ownership in schema/src/segments.ts",
+      "pending",
+      { files: ["schema/src/segments.ts", "schema/migrations/generated"] },
+    )!;
+    const primary = findings.report("thr_startup", {
+      title: "Segment baseline defect",
+      file: "schema/migrations/generated/0041_baseline.sql:91",
+      evidence: "The generated baseline exposes a source-model defect.",
+      fixFiles: ["schema/migrations/generated"],
+    }).finding;
+    const stale = findings.report("thr_startup", {
+      title: "Unrelated tenant foreign-key defect",
+      file: "schema/migrations/generated",
+      evidence: "A broad migration directory was incorrectly coalesced later.",
+      fixFiles: ["schema/migrations/generated"],
+    }).finding;
+    db.prepare("UPDATE goal_findings SET created_at = ? WHERE id = ?").run(1, primary.id);
+    db.prepare("UPDATE goal_findings SET created_at = ? WHERE id = ?").run(2, stale.id);
+    assert.equal(findings.linkItem("thr_startup", primary.id, item.id), true);
+    assert.equal(findings.linkItem("thr_startup", stale.id, item.id), true);
+
+    const service = host.harness.behavior.runService("progress-pulse");
+    service.controller.abort();
+    await service.done;
+
+    assert.equal(findings.get("thr_startup", primary.id)!.itemId, item.id);
+    const repairedItemId = findings.get("thr_startup", stale.id)!.itemId;
+    assert.ok(repairedItemId);
+    assert.notEqual(repairedItemId, item.id);
+    assert.equal(items.list("thr_startup").length, 2);
   });
 });

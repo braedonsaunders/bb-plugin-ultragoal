@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   coalescingFilesOverlap,
+  findingFilesMatchItem,
   filesOverlap,
   findingAction,
   freeSlots,
@@ -77,8 +78,18 @@ describe("occupyingWorkerIds", () => {
 
 describe("findingAction", () => {
   const openItems = [
-    { id: "itm_search", status: "in_progress" as const, files: ["web/lib/search.ts"] },
-    { id: "itm_pay", status: "pending" as const, files: ["engine/src/payments.ts"] },
+    {
+      id: "itm_search",
+      step: "Repair search behavior in web/lib/search.ts",
+      status: "in_progress" as const,
+      files: ["web/lib/search.ts"],
+    },
+    {
+      id: "itm_pay",
+      step: "Repair payment behavior in engine/src/payments.ts",
+      status: "pending" as const,
+      files: ["engine/src/payments.ts"],
+    },
   ];
 
   it("attaches a same-file finding to the existing slice", () => {
@@ -120,6 +131,7 @@ describe("findingAction", () => {
       openItems: [
         {
           id: "itm_recurring",
+          step: "Repair recurring logic in engine/src/recurring.ts",
           status: "in_progress" as const,
           files: ["engine/src/recurring.ts", "schema/migrations/generated"],
         },
@@ -137,12 +149,75 @@ describe("findingAction", () => {
       openItems: [
         {
           id: "itm_recurring",
+          step: "Repair recurring logic in engine/src/recurring.ts",
           status: "in_progress" as const,
           files: ["engine/src/recurring.ts", "schema/migrations/generated"],
         },
       ],
     });
     assert.deepEqual(result, { action: "attach", attachItemId: "itm_recurring" });
+  });
+});
+
+describe("findingFilesMatchItem", () => {
+  it("matches exact concrete finding and declared repair files", () => {
+    const item = {
+      step: "Repair segment ownership",
+      files: ["schema/src/segments.ts", "schema/migrations/generated"],
+    };
+    assert.equal(findingFilesMatchItem("schema/src/segments.ts:88", [], item), true);
+    assert.equal(
+      findingFilesMatchItem(
+        "schema/migrations/generated/baseline.sql:12",
+        ["schema/src/segments.ts"],
+        item,
+      ),
+      true,
+    );
+  });
+
+  it("uses concrete files named in the item step", () => {
+    assert.equal(
+      findingFilesMatchItem(
+        "schema/src/pricing.ts:41",
+        [],
+        {
+          step: "Correct rate-book generation in schema/src/pricing.ts.",
+          files: ["schema/migrations/generated"],
+        },
+      ),
+      true,
+    );
+  });
+
+  it("rejects broad directories, shared infrastructure, and unrelated files", () => {
+    assert.equal(
+      findingFilesMatchItem(
+        "schema/migrations/generated",
+        ["schema/migrations/generated"],
+        {
+          step: "Regenerate schema/migrations/generated",
+          files: ["schema/src/segments.ts", "schema/migrations/generated"],
+        },
+      ),
+      false,
+    );
+    assert.equal(
+      findingFilesMatchItem(
+        "package.json",
+        ["schema/canonical-baseline.test.ts"],
+        { step: "Update package.json", files: ["package.json"] },
+      ),
+      false,
+    );
+    assert.equal(
+      findingFilesMatchItem(
+        "schema/src/pricing.ts",
+        [],
+        { step: "Repair schema/src/segments.ts", files: ["schema/src/segments.ts"] },
+      ),
+      false,
+    );
   });
 });
 

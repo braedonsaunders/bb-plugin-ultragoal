@@ -321,7 +321,7 @@ export function createGoalStore(bb: BbPluginApi) {
 
   const select = db.prepare("SELECT * FROM goals WHERE thread_id = ?");
   const selectActive = db.prepare(
-    "SELECT thread_id FROM goals WHERE status IN ('active', 'budget_limited', 'paused', 'blocked')",
+    "SELECT thread_id FROM goals WHERE status IN ('active', 'budget_limited', 'usage_limited', 'paused', 'blocked')",
   );
   const selectAll = db.prepare("SELECT thread_id FROM goals");
   const upsert = db.prepare(`

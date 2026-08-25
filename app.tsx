@@ -321,21 +321,35 @@ function ThreadProviderHeader({ threadId }: { threadId: string }) {
 function Metric({
   label,
   value,
-  hint,
+  details,
 }: {
   label: string;
   value: string;
-  hint?: string;
+  details: string;
 }) {
   return (
-    <div className="min-w-0 rounded-lg border border-border/70 bg-muted/35 px-2.5 py-2">
-      <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+    <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0 px-2.5 py-1.5">
+      <span className="text-[9px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+        {label}
+      </span>
+      <span className="font-mono text-[13px] tabular-nums tracking-tight text-foreground">
+        {value}
+      </span>
+      <span className="text-[10px] leading-tight text-muted-foreground">{details}</span>
+    </div>
+  );
+}
+
+function CompactMetric({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div className="min-w-0 px-2 py-1.5 text-center">
+      <div className="text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
         {label}
       </div>
-      <div className="mt-0.5 truncate font-mono text-[15px] tabular-nums tracking-tight text-foreground">
+      <div className="truncate font-mono text-[12px] tabular-nums tracking-tight text-foreground">
         {value}
       </div>
-      {hint ? <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{hint}</div> : null}
+      <div className="truncate text-[9px] leading-tight text-muted-foreground">{hint}</div>
     </div>
   );
 }
@@ -672,11 +686,11 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
           <div className="mt-2 text-[11px] leading-snug text-muted-foreground">{goal.reason}</div>
         ) : null}
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="mt-3 overflow-hidden rounded-lg border border-border/70 bg-muted/35 divide-y divide-border/70">
           <Metric
             label="Work items"
             value={items.length > 0 ? `${done}/${items.length}` : "—"}
-            hint={
+            details={
               items.length > 0
                 ? `${activeWorkItems} active · ${readyWorkItems} ready`
                 : liveAgents.length > 0
@@ -687,37 +701,31 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
           <Metric
             label="Defects"
             value={`${goal.findings.open} open`}
-            hint={`${goal.findings.assignedDefects} linked to work · ${goal.findings.awaitingAssignment} waiting for work · ${goal.findings.fixed} fixed · ${goal.findings.dismissed} dismissed`}
+            details={`${goal.findings.assignedDefects} linked to work · ${goal.findings.awaitingAssignment} waiting for work · ${goal.findings.fixed} fixed · ${goal.findings.dismissed} dismissed · related defects may share one work item, so totals differ`}
           />
-          <Metric
-            label="Tokens"
-            value={formatTokens(goal.tokensUsed)}
-            hint={tokenHint}
-          />
-          <Metric
-            label="Last"
-            value={formatRelative(goal.lastContinueAt, now)}
-            hint={`age ${formatElapsed(Math.max(0, Math.round((now - goal.startedAt) / 1000)))}`}
-          />
-          <Metric
-            label="Pace"
-            value={
-              elapsed >= 30 && goal.tokensUsed > 0
-                ? `${formatTokens(Math.round(goal.tokensUsed / hours))}/h`
-                : "—"
-            }
-            hint={
-              items.length > 0 && elapsed >= 30 && done > 0
-                ? `${(done / hours).toFixed(1)} req/h`
-                : elapsed >= 30 && goal.tokensUsed > 0
-                  ? "token pace"
-                  : "warming up"
-            }
-          />
-        </div>
-
-        <div className="mt-2 text-[11px] leading-snug text-muted-foreground">
-          Related defects may share one work item, so these totals differ.
+          <div className="grid grid-cols-3 divide-x divide-border/70">
+            <CompactMetric label="Tokens" value={formatTokens(goal.tokensUsed)} hint={tokenHint} />
+            <CompactMetric
+              label="Last"
+              value={formatRelative(goal.lastContinueAt, now)}
+              hint={`age ${formatElapsed(Math.max(0, Math.round((now - goal.startedAt) / 1000)))}`}
+            />
+            <CompactMetric
+              label="Pace"
+              value={
+                elapsed >= 30 && goal.tokensUsed > 0
+                  ? `${formatTokens(Math.round(goal.tokensUsed / hours))}/h`
+                  : "—"
+              }
+              hint={
+                items.length > 0 && elapsed >= 30 && done > 0
+                  ? `${(done / hours).toFixed(1)} req/h`
+                  : elapsed >= 30 && goal.tokensUsed > 0
+                    ? "token pace"
+                    : "warming up"
+              }
+            />
+          </div>
         </div>
 
         {items.length > 0 ? (

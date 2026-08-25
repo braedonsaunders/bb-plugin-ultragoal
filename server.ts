@@ -52,7 +52,10 @@ import {
   threadAcceptsSteer,
   threadIsSettledForSubmit,
 } from "./lib/scheduler.js";
-import { reconcileFindingQueue } from "./lib/finding-queue.js";
+import {
+  closeFindingsForCompletedItem,
+  reconcileFindingQueue,
+} from "./lib/finding-queue.js";
 import { createRootTransferStore, executeRootTransfer } from "./lib/root-transfer.js";
 import { projectSidebarCrew } from "./lib/sidebar.js";
 
@@ -1246,6 +1249,25 @@ export default function plugin(bb: BbPluginApi) {
   // Close the loop Codex Goal closes inside the provider: a finished worker
   // finishes its plan item. With verification on, only VERIFY_PASS completes
   // the slice; with it off, the worker's own done report does.
+  function closeItemFindings(rootThreadId: string, itemId: string, note: string): number {
+    const result = closeFindingsForCompletedItem({
+      threadId: rootThreadId,
+      itemId,
+      note,
+      findings,
+      items,
+    });
+    if (result.requeuedInvalid > 0 || result.requeuedMissing > 0) {
+      bb.log.warn(
+        `Completion guard on ${itemId}: detached ${result.requeuedInvalid} invalid and ${result.requeuedMissing} missing-item finding link(s) before closure`,
+      );
+    }
+    if (result.fixed + result.requeuedInvalid + result.requeuedMissing > 0) {
+      reconcileFindingBacklog(rootThreadId);
+    }
+    return result.fixed;
+  }
+
   function completeItemFor(
     rootThreadId: string,
     itemId: string | null,
@@ -1279,14 +1301,9 @@ export default function plugin(bb: BbPluginApi) {
     if (!item) return false;
     items.setStatus(rootThreadId, itemId, "completed");
     markGoalEvent(rootThreadId);
-    const closed = findings.markFixedByItem(
-      rootThreadId,
-      itemId,
-      (report ?? "").trim().slice(-400),
-    );
+    const closed = closeItemFindings(rootThreadId, itemId, (report ?? "").trim().slice(-400));
     if (closed > 0) {
       bb.log.info(`Closed ${closed} finding(s) fixed by slice ${itemId} on ${rootThreadId}`);
-      reconcileFindingBacklog(rootThreadId);
     }
     bb.log.info(`Goal slice ${itemId} completed on ${rootThreadId} from worker report`);
     return true;
@@ -2131,8 +2148,7 @@ export default function plugin(bb: BbPluginApi) {
     async setItemStatus({ threadId, itemId, status }) {
       items.setStatus(threadId, itemId, status);
       if (status === "completed") {
-        findings.markFixedByItem(threadId, itemId, "Marked completed from the pane.");
-        reconcileFindingBacklog(threadId);
+        closeItemFindings(threadId, itemId, "Marked completed from the pane.");
       }
       const goal = store.get(threadId);
       const next = goal ? await viewFresh(goal) : null;
@@ -2381,6 +2397,11 @@ export default function plugin(bb: BbPluginApi) {
       }
       try {
         const patched = items.patch(rootThreadId, plan, removals);
+        for (const item of patched.items) {
+          if (item.status !== "completed") continue;
+          if (beforeById.get(item.id)?.status === "completed") continue;
+          closeItemFindings(rootThreadId, item.id, "Marked completed through ultragoal_patch.");
+        }
         const added = patched.items.filter((item) => !beforeById.has(item.id)).length;
         const updated = patched.items.length - added;
         markGoalEvent(rootThreadId);
@@ -2452,10 +2473,15 @@ export default function plugin(bb: BbPluginApi) {
         items,
         maxStaffed: view(goal).settings.maxOpenFindings,
       });
-      const changed = result.linked + result.minted + result.autoFixed + result.requeuedMissing;
+      const changed =
+        result.linked +
+        result.minted +
+        result.autoFixed +
+        result.requeuedMissing +
+        result.requeuedInvalid;
       if (changed === 0) return;
       bb.log.info(
-        `Finding queue on ${rootThreadId}: ${result.minted} minted, ${result.linked} attached, ${result.autoFixed} recovered fixed, ${result.requeuedMissing} requeued missing; ${result.remediationWorkItems} remediation work item(s), ${result.awaitingAssignment} awaiting assignment`,
+        `Finding queue on ${rootThreadId}: ${result.minted} minted, ${result.linked} attached, ${result.autoFixed} recovered fixed, ${result.requeuedMissing} requeued missing, ${result.requeuedInvalid} requeued invalid; ${result.remediationWorkItems} remediation work item(s), ${result.awaitingAssignment} awaiting assignment`,
       );
       markGoalEvent(rootThreadId);
       void publishFresh(rootThreadId);

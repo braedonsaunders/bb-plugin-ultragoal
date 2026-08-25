@@ -110,7 +110,7 @@ function newId(): string {
 export function createFindingStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   const byThread = db.prepare(
-    "SELECT * FROM goal_findings WHERE thread_id = ? ORDER BY created_at ASC",
+    "SELECT * FROM goal_findings WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
   );
   const byFingerprint = db.prepare(
     "SELECT * FROM goal_findings WHERE thread_id = ? AND fingerprint = ?",
@@ -179,6 +179,19 @@ export function createFindingStore(bb: BbPluginApi) {
       return clearItem.run({ thread_id: threadId, id: findingId, updated_at: Date.now() }).changes > 0;
     },
 
+    unlinkItems(threadId: string, findingIds: readonly string[]): number {
+      const ids = [...new Set(findingIds.map((id) => id.trim()).filter(Boolean))];
+      if (ids.length === 0) return 0;
+      let changed = 0;
+      db.transaction(() => {
+        const updatedAt = Date.now();
+        for (const id of ids) {
+          changed += clearItem.run({ thread_id: threadId, id, updated_at: updatedAt }).changes;
+        }
+      })();
+      return changed;
+    },
+
     get(threadId: string, ref: string): GoalFinding | null {
       const viaId = byId.get(threadId, ref) as FindingRow | undefined;
       if (viaId) return rowToFinding(viaId);
@@ -241,15 +254,18 @@ export function createFindingStore(bb: BbPluginApi) {
       const rows = (byItem.all(threadId, itemId) as FindingRow[]).filter(
         (row) => row.status === "open",
       );
-      for (const row of rows) {
-        setStatus.run({
-          thread_id: threadId,
-          id: row.id,
-          status: "fixed",
-          resolution_note: note.trim().slice(0, 400) || null,
-          updated_at: Date.now(),
-        });
-      }
+      db.transaction(() => {
+        const updatedAt = Date.now();
+        for (const row of rows) {
+          setStatus.run({
+            thread_id: threadId,
+            id: row.id,
+            status: "fixed",
+            resolution_note: note.trim().slice(0, 400) || null,
+            updated_at: updatedAt,
+          });
+        }
+      })();
       return rows.length;
     },
 

@@ -30,11 +30,41 @@ const SHARED_INFRASTRUCTURE_FILES: ReadonlySet<string> = new Set([
   "schema/canonical-baseline.test.ts",
 ]);
 
-function isConcreteCoalescingFile(path: string): boolean {
+export function isConcreteFindingFile(path: string): boolean {
+  path = normalizeFindingFile(path);
   if (!path || /[*?{}[\]]/.test(path)) return false;
   if (SHARED_INFRASTRUCTURE_FILES.has(path)) return false;
   const leaf = path.split("/").at(-1) ?? "";
   return leaf.includes(".");
+}
+
+const STEP_FILE_PATTERN = /(?:^|[\s`"'([{])((?:[A-Za-z0-9_.@+-]+\/)*[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]+(?::\d+(?:[-:]\d+)?)?)(?=$|[\s`"'\])},;.!?])/g;
+
+/** Concrete repository files explicitly named in a work item's brief. */
+export function concreteFilesInStep(step: string): string[] {
+  return [...step.matchAll(STEP_FILE_PATTERN)]
+    .map((match) => normalizeFindingFile(match[1] ?? ""))
+    .filter(isConcreteFindingFile);
+}
+
+/** A durable finding link needs direct file evidence. Directory scopes and
+ * shared infrastructure files serialize work, but cannot prove ownership of
+ * a defect. One of the finding's evidence or declared repair files must
+ * exactly match the item's concrete scope or a concrete file in its brief. */
+export function findingFilesMatchItem(
+  findingFile: string,
+  fixFiles: readonly string[],
+  item: Pick<GoalItem, "files" | "step">,
+): boolean {
+  const evidenceFiles = [findingFile, ...fixFiles]
+    .map(normalizeFindingFile)
+    .filter(isConcreteFindingFile);
+  if (evidenceFiles.length === 0) return false;
+  const ownedFiles = new Set([
+    ...item.files.map(normalizeFindingFile).filter(isConcreteFindingFile),
+    ...concreteFilesInStep(item.step),
+  ]);
+  return evidenceFiles.some((file) => ownedFiles.has(file));
 }
 
 /** Finding coalescing is deliberately stricter than scheduler scope overlap.
@@ -42,11 +72,11 @@ function isConcreteCoalescingFile(path: string): boolean {
  * is not evidence that two defects belong to the same remediation slice. */
 export function coalescingFilesOverlap(a: readonly string[], b: readonly string[]): boolean {
   const concreteA = new Set(
-    a.map(normalizeFindingFile).filter(isConcreteCoalescingFile),
+    a.map(normalizeFindingFile).filter(isConcreteFindingFile),
   );
   return b
     .map(normalizeFindingFile)
-    .filter(isConcreteCoalescingFile)
+    .filter(isConcreteFindingFile)
     .some((path) => concreteA.has(path));
 }
 
@@ -98,15 +128,12 @@ export function findingAction(input: {
   fixFiles?: readonly string[];
   staffedRemediationCount: number;
   maxStaffedRemediations: number;
-  openItems: readonly Pick<GoalItem, "id" | "status" | "files">[];
+  openItems: readonly Pick<GoalItem, "id" | "status" | "files" | "step">[];
 }): FindingAction {
-  const file = normalizeFindingFile(input.file);
-  const proposedFiles = [file, ...(input.fixFiles ?? [])];
   const attach = input.openItems.find(
     (item) =>
       item.status !== "completed" &&
-      item.files.length > 0 &&
-      coalescingFilesOverlap(item.files, proposedFiles),
+      findingFilesMatchItem(input.file, input.fixFiles ?? [], item),
   );
   if (attach) return { action: "attach", attachItemId: attach.id };
   if (input.staffedRemediationCount >= input.maxStaffedRemediations) return { action: "record-only" };

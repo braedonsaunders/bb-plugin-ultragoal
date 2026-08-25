@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.17.13
+
+- Added a durable stale-link audit at startup and on every progress pulse. Each
+  work item's oldest linked defect across all statuses remains its primary
+  creator association, so resolving it cannot promote a later stale link;
+  later coalesced defects stay linked only when their evidence or declared
+  repair files exactly overlap a concrete file owned or named by the work item.
+- Broad directories and shared infrastructure no longer validate later defect
+  links. Missing-item and invalid links detach safely and re-enter the existing
+  oldest-first remediation queue without losing their repair scope or check.
+- Added the same primary-aware guard to every completion path so a completed
+  work item cannot automatically mark unrelated defects fixed. Fixing the
+  validated group is transactional, and detached work backfills immediately.
+- Consolidated the main pane metrics into two compact Work items/Defects rows
+  and one three-column Tokens/Last/Pace strip, preserving the distinction
+  between linked defects and work assignment with substantially less height.
+- Added regressions for exact concrete matches, declared repair scopes,
+  primary evidence/repair mismatches, later broad-directory mislinks, missing
+  work, completion-time repair, oldest-first backfill, and the real first
+  startup pulse.
+
 ## 0.17.12
 
 - UltraGoal now exposes one canonical root-control surface on Codex, OpenCode,

@@ -1,14 +1,84 @@
 import type { FindingStore } from "./findings.js";
 import type { ItemStore } from "./items.js";
-import { findingAction, normalizeFindingFile } from "./scheduler.js";
+import { findingAction, findingFilesMatchItem, normalizeFindingFile } from "./scheduler.js";
 
 export interface FindingQueueResult {
   linked: number;
   minted: number;
   autoFixed: number;
   requeuedMissing: number;
+  requeuedInvalid: number;
   remediationWorkItems: number;
   awaitingAssignment: number;
+}
+
+export interface StaleFindingLinkResult {
+  requeuedMissing: number;
+  requeuedInvalid: number;
+}
+
+/** Detach open links that no longer have direct concrete-file evidence. The
+ * updates are durable and idempotent; the ordinary queue pass decides what
+ * valid work receives the detached findings next. */
+export function detachStaleFindingLinks(input: {
+  threadId: string;
+  findings: FindingStore;
+  items: ItemStore;
+  itemId?: string;
+}): StaleFindingLinkResult {
+  const itemById = new Map(input.items.list(input.threadId).map((item) => [item.id, item]));
+  const queue = input.findings.remediationQueue(input.threadId);
+  const primaryByItem = new Map<string, string>();
+  // Creator identity survives resolution. If the historical primary is fixed
+  // or dismissed, a later open coalesced row must not silently inherit the
+  // primary exception merely because remediationQueue contains open rows only.
+  for (const finding of input.findings.list(input.threadId)) {
+    if (finding.itemId && !primaryByItem.has(finding.itemId)) {
+      primaryByItem.set(finding.itemId, finding.id);
+    }
+  }
+  const missing: string[] = [];
+  const invalid: string[] = [];
+  for (const finding of queue) {
+    if (!finding.itemId) continue;
+    if (input.itemId && finding.itemId !== input.itemId) continue;
+    const item = itemById.get(finding.itemId);
+    if (!item) {
+      missing.push(finding.id);
+      continue;
+    }
+    // The oldest link across every status is the durable creator association.
+    // Historical reports sometimes used a generated migration line as evidence
+    // while their repair work correctly owned a schema source file. Preserve
+    // that primary; later coalesced links must prove concrete-file overlap.
+    if (primaryByItem.get(finding.itemId) === finding.id) continue;
+    if (!findingFilesMatchItem(finding.file, finding.fixFiles, item)) invalid.push(finding.id);
+  }
+  return {
+    requeuedMissing: input.findings.unlinkItems(input.threadId, missing),
+    requeuedInvalid: input.findings.unlinkItems(input.threadId, invalid),
+  };
+}
+
+export interface FindingCompletionResult extends StaleFindingLinkResult {
+  fixed: number;
+}
+
+/** Completion guard: invalid open links are detached before the remaining
+ * exact-file links can be bulk-fixed for a completed work item. */
+export function closeFindingsForCompletedItem(input: {
+  threadId: string;
+  itemId: string;
+  note: string;
+  findings: FindingStore;
+  items: ItemStore;
+}): FindingCompletionResult {
+  const detached = detachStaleFindingLinks({ ...input, itemId: input.itemId });
+  const item = input.items.list(input.threadId).find((entry) => entry.id === input.itemId);
+  const fixed = item?.status === "completed"
+    ? input.findings.markFixedByItem(input.threadId, input.itemId, input.note)
+    : 0;
+  return { ...detached, fixed };
 }
 
 /**
@@ -24,25 +94,29 @@ export function reconcileFindingQueue(input: {
 }): FindingQueueResult {
   const { threadId, findings, items } = input;
   const maxStaffed = Math.max(0, input.maxStaffed);
-  let allItems = items.list(threadId);
-  let itemById = new Map(allItems.map((item) => [item.id, item]));
+  const allItems = items.list(threadId);
+  const itemById = new Map(allItems.map((item) => [item.id, item]));
   let autoFixed = 0;
-  let requeuedMissing = 0;
+  const detached = detachStaleFindingLinks({ threadId, findings, items });
+  const requeuedMissing = detached.requeuedMissing;
+  const requeuedInvalid = detached.requeuedInvalid;
 
-  // Restart repair: a linked completed slice is fixed even if its completion
-  // event was missed; a deleted slice returns its finding to the durable queue.
-  for (const finding of findings.remediationQueue(threadId)) {
-    if (!finding.itemId) continue;
-    const item = itemById.get(finding.itemId);
-    if (item?.status === "completed") {
-      autoFixed += findings.markFixedByItem(
-        threadId,
-        item.id,
-        "Recovered completed remediation during finding-queue reconciliation.",
-      );
-    } else if (!item && findings.unlinkItem(threadId, finding.id)) {
-      requeuedMissing += 1;
-    }
+  // Restart repair: after every stale link is detached, a linked completed
+  // work item can safely close only its concretely owned findings.
+  const completedItemIds = new Set(
+    findings.remediationQueue(threadId).flatMap((finding) => {
+      if (!finding.itemId) return [];
+      return itemById.get(finding.itemId)?.status === "completed" ? [finding.itemId] : [];
+    }),
+  );
+  for (const itemId of completedItemIds) {
+    autoFixed += closeFindingsForCompletedItem({
+      threadId,
+      itemId,
+      note: "Recovered completed remediation during finding-queue reconciliation.",
+      findings,
+      items,
+    }).fixed;
   }
 
   let queue = findings.remediationQueue(threadId);
@@ -56,8 +130,6 @@ export function reconcileFindingQueue(input: {
 
   for (const finding of queue) {
     if (finding.itemId) continue;
-    allItems = items.list(threadId);
-    itemById = new Map(allItems.map((item) => [item.id, item]));
     const disposition = findingAction({
       file: finding.file,
       fixFiles: finding.fixFiles,
@@ -88,6 +160,8 @@ export function reconcileFindingQueue(input: {
       items.remove(threadId, fixItem.id);
       continue;
     }
+    allItems.push(fixItem);
+    itemById.set(fixItem.id, fixItem);
     staffed.add(fixItem.id);
     minted += 1;
   }
@@ -98,6 +172,7 @@ export function reconcileFindingQueue(input: {
     minted,
     autoFixed,
     requeuedMissing,
+    requeuedInvalid,
     remediationWorkItems: new Set(
       queue.flatMap((finding) => (finding.itemId ? [finding.itemId] : [])),
     ).size,
