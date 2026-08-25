@@ -84,18 +84,18 @@ describe("findingAction", () => {
   it("attaches a same-file finding to the existing slice", () => {
     const result = findingAction({
       file: "web/lib/search.ts:88",
-      openFindingCount: 95,
-      maxOpenFindings: 50,
+      staffedRemediationCount: 50,
+      maxStaffedRemediations: 50,
       openItems,
     });
     assert.deepEqual(result, { action: "attach", attachItemId: "itm_search" });
   });
 
-  it("records without minting once the open-finding cap is hit", () => {
+  it("records without minting once remediation work capacity is hit", () => {
     const result = findingAction({
       file: "web/lib/authz.ts",
-      openFindingCount: 50,
-      maxOpenFindings: 50,
+      staffedRemediationCount: 50,
+      maxStaffedRemediations: 50,
       openItems,
     });
     assert.deepEqual(result, { action: "record-only" });
@@ -104,8 +104,8 @@ describe("findingAction", () => {
   it("mints a slice for a new file under the cap", () => {
     const result = findingAction({
       file: "web/lib/authz.ts",
-      openFindingCount: 3,
-      maxOpenFindings: 50,
+      staffedRemediationCount: 3,
+      maxStaffedRemediations: 50,
       openItems,
     });
     assert.deepEqual(result, { action: "mint" });
@@ -115,8 +115,8 @@ describe("findingAction", () => {
     const result = findingAction({
       file: "schema/migrations/generated",
       fixFiles: ["schema/src/documents.ts", "schema/migrations/generated"],
-      openFindingCount: 3,
-      maxOpenFindings: 50,
+      staffedRemediationCount: 3,
+      maxStaffedRemediations: 50,
       openItems: [
         {
           id: "itm_recurring",
@@ -132,8 +132,8 @@ describe("findingAction", () => {
     const result = findingAction({
       file: "schema/migrations/generated",
       fixFiles: ["engine/src/recurring.ts", "schema/migrations/generated"],
-      openFindingCount: 95,
-      maxOpenFindings: 50,
+      staffedRemediationCount: 50,
+      maxStaffedRemediations: 50,
       openItems: [
         {
           id: "itm_recurring",

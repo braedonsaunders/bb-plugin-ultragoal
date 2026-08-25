@@ -91,13 +91,13 @@ export type FindingAction =
   | { action: "attach"; attachItemId: string }
   | { action: "record-only" };
 
-/** Same-file findings join the existing slice. Past the open-finding cap,
+/** Same-file findings join the existing slice. Past the staffed-remediation cap,
  * new distinct files are recorded but do not mint another auto-staffed slice. */
 export function findingAction(input: {
   file: string;
   fixFiles?: readonly string[];
-  openFindingCount: number;
-  maxOpenFindings: number;
+  staffedRemediationCount: number;
+  maxStaffedRemediations: number;
   openItems: readonly Pick<GoalItem, "id" | "status" | "files">[];
 }): FindingAction {
   const file = normalizeFindingFile(input.file);
@@ -109,7 +109,7 @@ export function findingAction(input: {
       coalescingFilesOverlap(item.files, proposedFiles),
   );
   if (attach) return { action: "attach", attachItemId: attach.id };
-  if (input.openFindingCount >= input.maxOpenFindings) return { action: "record-only" };
+  if (input.staffedRemediationCount >= input.maxStaffedRemediations) return { action: "record-only" };
   return { action: "mint" };
 }
 

@@ -1,60 +1,60 @@
 ---
 name: ultragoal
-description: Set a durable Codex-style UltraGoal and keep working until it is done. Use whenever the user types /ultragoal or /goal, asks to follow an UltraGoal, keep going until a target is met, pause/resume/clear an UltraGoal, or wants long-horizon autonomous work on Cursor, OpenCode, Claude Code, or Pi.
+description: Start and run a durable UltraGoal until it is genuinely finished. Use on every provider, including Codex, OpenCode, Claude Code, Cursor, and Pi, whenever the user invokes /ultragoal or /goal, asks to keep going until a target is met, or asks to pause, resume, edit, clear, or inspect an UltraGoal.
 ---
 
 # UltraGoal
 
-The user wants a durable completion contract, not a one-off turn. The text after `/ultragoal` (or `/goal`) is the objective.
+UltraGoal is one provider-neutral completion contract backed by the plugin's durable database, work-item scheduler, defect queue, and pane. Use the canonical `ultragoal_*` tools on every provider.
 
-This skill is for Cursor, OpenCode, Claude Code, and Pi. Codex already has native Goal — do not duplicate it there.
+On Codex, never create or update a native Codex Goal for UltraGoal work. Native `create_goal`, `get_goal`, `update_goal`, and `update_plan` names collide with UltraGoal's former names and operate on different state. Non-Codex providers may temporarily expose those old names as migration aliases, but new work and instructions use only the canonical controls below.
 
-## Default: you plan, the scheduler staffs
+## Canonical controls
 
-The root thread is the orchestrator and PLANNER. It does not implement the UltraGoal itself, and it does not staff plan slices — the UltraGoal scheduler does.
+- `ultragoal_start` — start a durable UltraGoal only when the user or system/developer instructions explicitly request one. Do not infer an UltraGoal from an ordinary task. Set `token_budget` only when explicitly requested. It fails while an unfinished UltraGoal exists.
+- `ultragoal_state` — read status, usage, settings, counts, active workers, open decisions and defects, and a bounded work-item page. It defaults to 40 open work items. Continue with `plan_status`, `plan_cursor`, and `plan_limit` (maximum 100).
+- `ultragoal_patch` — atomically patch the dependency plan. Send only new or changed work items, at most 200 per call; omitted work remains durable. Each row is `{ id?, step, status, deps?, files?, check? }`. Pass an existing `id` from `ultragoal_state` when updating it. Use `remove_item_ids` only for obsolete, unstaffed work; unknown IDs and partial patches are rejected.
+- `ultragoal_finish` — mark an UltraGoal `complete` or genuinely `blocked`. Completion requires a substantive delivery summary and no remaining work, open defects, or owner decisions. It cannot pause, resume, clear, or budget-limit an UltraGoal.
 
-1. Call `update_plan` with the remaining work as a dependency DAG. Every item is a self-contained slice brief: `step` (objective + boundaries), `files` (the disjoint file scope it owns), `check` (a runnable command that proves it done), `deps` (item_ids or `"#N"` list positions it must wait for; `[]` = ready now).
-2. The scheduler spawns one FRESH worker per READY slice automatically — deps complete, file scopes disjoint — up to the goal's worker slots (default 5), and re-staffs slices whose workers die. Do not spawn workers for plan items yourself.
-3. Plan WIDE: many independent, file-disjoint slices beat few coarse ones. Declare `deps` only for genuinely sequential work; never pad fake parallelism onto truly sequential work. When worker slots sit idle, the highest-value move is splitting remaining work into more independent slices via `update_plan`.
-4. Hunts stream. Never write catch-all tail items like "fix whatever the hunt proves": hunt/audit workers call `report_finding` per confirmed defect. Same-file findings attach to the existing fix slice; a fresh file mints a ready fix slice until the open-finding cap. Open findings block completion; `resolve_finding` (with evidence) anything that is not a real defect.
-5. Stay on the root: `list_agents` / `wait_agent`, merge results, `update_plan` as steps complete or the next best action changes. Never use the native Task tool for slice work — it blocks the root thread, and a blocked orchestrator is the slowest possible path.
-6. When verification is on, a second model (default Codex GPT-5.6-Sol) is launched after each worker returns. Do not mark that slice complete until the verifier reports `VERIFY_PASS`. On `VERIFY_FAIL`, add a fix slice.
-7. One agent = one slice, always: retired workers refuse follow-ups; `followup_task` only steers a worker about the slice it already owns. `spawn_agent` remains for ad-hoc helpers outside the plan — give each a humorous `display_name` related to its work (e.g. "Captain Typecheck"), and begin any worker prompt spawned another way with one line `SLICE (item_id=<id>): <one-line task>` so UltraGoal can track it.
+Supporting controls are `report_finding`, `resolve_finding`, `request_decision`, and `resolve_decision`. Collaboration tools are available for ad-hoc helpers and worker steering; scheduled work items are staffed by UltraGoal itself.
 
-Workers complete their assigned slice and signal completion via the slice_done tool (evidence: commit SHAs + their check's passing output) or slice_blocked — formal tool calls, never prose sentinels. Every worker brief carries a generalized engineering quality bar (reuse-first with a named exemplar, complete production-grade slices, clean cutover, green gates without weakening tests, atomic commits that never touch unedited files, report_finding for unrelated bugs) — the repo's own AGENTS.md/CLAUDE.md wins where they conflict. Workers do not call `update_goal`, take over the parent plan, or re-orchestrate the whole UltraGoal.
+## Start and user commands
 
-## Commands
+- `/ultragoal <objective>` or `/goal <objective>` sets or replaces the user-owned objective and begins orchestration.
+- `/ultragoal` reports the current state with `ultragoal_state`.
+- `/ultragoal edit <objective>` changes the contract; reconcile the plan to the new objective.
+- `/ultragoal pause`, `/ultragoal resume`, and `/ultragoal clear` are user or system controls. Do not simulate them with agent tools.
 
-- `/ultragoal <objective>` — set or replace the UltraGoal, then start orchestrating.
-- `/ultragoal` — report the current UltraGoal with `get_goal`.
-- `/ultragoal edit <objective>` — user-edited contract; keep working toward the new objective.
-- `/ultragoal pause` / `/ultragoal resume` / `/ultragoal clear` — user or system controls. Do not implement these with tools.
+If the user explicitly asks for an UltraGoal through normal language instead of a slash command, call `ultragoal_start`. Merely having the skill and tools available does not authorize creating one. With no stored UltraGoal, stay inert until explicit invocation.
 
-## Tools
+## Plan; let the scheduler staff
 
-- `get_goal` — read status, token budget, tokens used, elapsed time, the requirement plan, and live subagents.
-- `create_goal` — only when the user or system explicitly asked to start an UltraGoal, and only when no unfinished UltraGoal exists. Do not infer an UltraGoal from an ordinary task. Set `token_budget` only when the user asked for one.
-- `update_goal` — `complete` or `blocked` only. You cannot pause, resume, clear, or budget-limit an UltraGoal.
-- `update_plan` — the dependency DAG the scheduler executes. Provide `plan` (and optional `explanation`). Each item is `{ id?, step, status, deps?, files?, check? }`. Pass `id` from `get_goal` when updating an existing slice so its Now title changes in place. Keep status `in_progress` for live workers. Next is only work that has not started — do not park a worker's current slice there.
-- `report_finding` / `resolve_finding` — the streaming defect queue. One `report_finding` per confirmed defect, at the moment of confirmation; duplicates are fingerprint-deduped across sweeps; same-file findings attach to the existing slice; a new file mints a fix slice until the open-finding cap. Open findings block `update_goal complete`.
-- `spawn_agent`, `send_message`, `followup_task`, `list_agents`, `wait_agent`, `interrupt_agent` — Codex MultiAgentV2, for ad-hoc helpers and steering. Plan slices are staffed by the scheduler, not by you. `send_message` queues without starting a turn; `followup_task` steers a non-root agent about its own slice only (retired workers refuse it).
+The root thread orchestrates. Implementation belongs to automatically staffed workers by default.
 
-## How to run
+1. Call `ultragoal_patch` with independent work items. Give each item a complete objective and boundaries in `step`, a narrow disjoint `files` scope, a runnable `check`, and only real `deps`. Use `[]` when it is ready now.
+2. The scheduler starts one fresh worker per ready, file-disjoint work item, up to the configured worker limit, and replaces workers that fail. Do not manually spawn workers for plan items.
+3. Plan wide when the work genuinely splits. Prefer independent file scopes over a few coarse items, but never manufacture parallelism for sequential work.
+4. Keep the plan current as evidence changes. Patch only affected rows. A worker's current item stays `in_progress`; do not create a second pending row for work already underway.
+5. Stay on the root to inspect, integrate, verify, wait, and unblock. Do not implement scheduled work on the root and do not use a provider-native Task tool for it.
 
-The UltraGoal persists across turns. Ending a turn does not shrink the objective. If it cannot be finished now, leave workers running or spawn the next slices, keep the UltraGoal active, and do not redefine success around a smaller task.
+Workers close assigned work through `slice_done` with commit and passing-check evidence, or `slice_blocked` when they cannot proceed. One worker owns one work item. Retired workers are not reused. Repository instructions such as `AGENTS.md` or `CLAUDE.md` take precedence over the general worker brief where they conflict.
 
-Work from current evidence in the worktree. Do not treat memory, intent, or a plausible summary as proof of completion.
+## Defects
 
-Do not stop to ask whether you should continue. A later plugin turn will continue the UltraGoal while it is active. Treat that as permission to keep orchestrating, not as a new task.
+Hunt, audit, and review workers call `report_finding` for each confirmed defect as soon as it is proven. Related defects can share one work item, so Defect and Work item totals differ.
 
-Do not narrate ordinary orchestration turns. The UltraGoal pane already shows Now and crew. Write a short visible chat update only when a slice actually completed, a worker failed, you are blocked, or a progress-check-in turn explicitly asks for one. Never post a "still in flight" / "nothing new has shipped" note.
+UltraGoal deduplicates defects, assigns same-file defects to existing repair work where safe, and creates new repair work until remediation capacity is full. Additional defects wait durably and are assigned oldest-first as capacity frees, including after restart. Use `resolve_finding` with evidence only when a defect was fixed outside its assigned work or is not actually a defect. Open defects block completion.
 
-## Completion
+Use `request_decision` only for a choice the user must make. Continue everything that does not depend on an unanswered decision; do not repeatedly ask or silently assume an answer.
 
-Call `update_goal` with status `complete` only when current evidence proves every requirement and no required work remains — and pass `summary`: the delivery report the user sees (what shipped, where it lives — URLs, final HEAD SHA, deploy state — and how it was verified). Completion without a summary is rejected. If the UltraGoal has a token budget, report the final consumed tokens after that call succeeds.
+## Durable operation
 
-## Blocked
+An UltraGoal persists across turns. Ending a turn does not narrow its objective. Work from the current worktree, checks, commits, deployed state, and tool results; a memory or prior summary is context, not proof.
 
-Do not call `update_goal` with status `blocked` the first time a blocker appears. Use `blocked` only when the same blocking condition has repeated for at least three consecutive UltraGoal turns and you cannot make meaningful progress without the user or an external-state change. Never use `blocked` because the work is hard, slow, uncertain, or would benefit from clarification.
+Do not narrate routine orchestration. The pane already shows work and workers. Send a visible update when something lands, a worker fails, a decision is needed, or a progress-check turn requests one.
 
-Do not mark an UltraGoal complete because the budget is nearly exhausted or because you are stopping work.
+## Completion and blocked state
+
+Call `ultragoal_finish` with `status: "complete"` only when current evidence proves every requirement and no required work, open defect, or owner decision remains. Include `summary` with what shipped, where it lives (such as final SHA, URL, or deploy state), and how it was verified. If a token budget exists, report final consumed tokens from the returned state.
+
+Call `ultragoal_finish` with `status: "blocked"` only after the same blocking condition has repeated for at least three consecutive UltraGoal turns and no meaningful work can continue without user input or an external change. Do not use blocked merely because work is difficult, slow, uncertain, incomplete, or would benefit from clarification. Do not finish or block an UltraGoal just because its budget is nearly exhausted.

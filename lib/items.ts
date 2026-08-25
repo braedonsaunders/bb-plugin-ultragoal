@@ -25,6 +25,17 @@ export interface ItemMeta {
   check?: string | null;
 }
 
+export type PlanPatchItem = {
+  id?: string;
+  step: string;
+  status: GoalItemStatus;
+} & ItemMeta;
+
+export interface ItemPatchResult {
+  items: GoalItem[];
+  removed: number;
+}
+
 function parseList(json: string | null): string[] {
   if (!json) return [];
   try {
@@ -77,6 +88,134 @@ export function createItemStore(bb: BbPluginApi) {
   `);
   const removeStmt = db.prepare("DELETE FROM goal_items WHERE id = ? AND thread_id = ?");
   const clearStmt = db.prepare("DELETE FROM goal_items WHERE thread_id = ?");
+
+  const removeRows = (threadId: string, itemIds: readonly string[]): number => {
+    const ids = new Set(itemIds.map((id) => id.trim()).filter(Boolean));
+    if (ids.size === 0) return 0;
+    const existing = listStmt.all(threadId) as ItemRow[];
+    let removed = 0;
+    db.transaction(() => {
+      for (const id of ids) removed += removeStmt.run(id, threadId).changes;
+      // A removed completed dependency must not deadlock every preserved
+      // descendant. Purge deleted ids from the remaining DAG atomically.
+      for (const row of existing) {
+        if (ids.has(row.id)) continue;
+        const deps = parseList(row.deps);
+        const nextDeps = deps.filter((dep) => !ids.has(dep));
+        if (nextDeps.length === deps.length) continue;
+        updateStmt.run({ ...row, deps: JSON.stringify(nextDeps), updated_at: Date.now() });
+      }
+    })();
+    return removed;
+  };
+
+  const applyPatch = (
+    threadId: string,
+    plan: readonly PlanPatchItem[],
+    removeItemIds: readonly string[],
+  ): ItemPatchResult => {
+    const existing = listStmt.all(threadId) as ItemRow[];
+    const byId = new Map(existing.map((row) => [row.id, row]));
+    const removalIds = new Set(removeItemIds.map((id) => id.trim()).filter(Boolean));
+    const unknownRemovals = [...removalIds].filter((id) => !byId.has(id));
+    if (unknownRemovals.length > 0) {
+      throw new Error(`unknown remove_item_ids: ${unknownRemovals.join(", ")}`);
+    }
+    const suppliedIds = plan.flatMap((item) => {
+      const id = item.id?.trim();
+      return id ? [id] : [];
+    });
+    const unknownUpdates = [...new Set(suppliedIds.filter((id) => !byId.has(id)))];
+    if (unknownUpdates.length > 0) {
+      throw new Error(`unknown plan item id(s): ${unknownUpdates.join(", ")}`);
+    }
+    const contradictory = [...new Set(suppliedIds.filter((id) => removalIds.has(id)))];
+    if (contradictory.length > 0) {
+      throw new Error(`cannot patch and remove the same slice(s): ${contradictory.join(", ")}`);
+    }
+
+    const remaining = existing.filter((row) => !removalIds.has(row.id));
+    const remainingById = new Map(remaining.map((row) => [row.id, row]));
+    const byStep = new Map(remaining.map((row) => [normalizedStep(row.step), row]));
+    const claimed = new Set<string>();
+    let nextSortOrder = existing.reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
+    const now = Date.now();
+
+    const slots = plan.map((item) => {
+      const step = currentSliceTitle(item.step);
+      if (!step) throw new Error("plan patch contains an empty step");
+      const requestedId = item.id?.trim();
+      let prior = requestedId ? remainingById.get(requestedId) : undefined;
+      if (prior && claimed.has(prior.id)) {
+        throw new Error(`plan patch contains duplicate item id: ${prior.id}`);
+      }
+      if (!prior && !requestedId) {
+        const viaStep = byStep.get(normalizedStep(step));
+        if (viaStep && !claimed.has(viaStep.id)) prior = viaStep;
+      }
+      if (prior) claimed.add(prior.id);
+      const priorDeps = prior
+        ? parseList(prior.deps).filter((dep) => !removalIds.has(dep))
+        : [];
+      return {
+        item,
+        row: {
+          id: prior?.id ?? newId(),
+          thread_id: threadId,
+          step,
+          status: item.status,
+          sort_order: prior?.sort_order ?? nextSortOrder++,
+          created_at: prior?.created_at ?? now,
+          updated_at: now,
+          origin: prior?.origin ?? null,
+          deps: priorDeps.length > 0 ? JSON.stringify(priorDeps) : null,
+          files: prior?.files ?? null,
+          check_cmd: prior?.check_cmd ?? null,
+        } satisfies ItemRow,
+        prior: Boolean(prior),
+      };
+    });
+
+    const validIds = new Set([...remaining.map((row) => row.id), ...slots.map((slot) => slot.row.id)]);
+    for (const slot of slots) {
+      const { item, row } = slot;
+      if (item.deps !== undefined) {
+        const deps = item.deps
+          .map((ref) => {
+            const trimmed = ref.trim();
+            const positional = /^#(\d+)$/.exec(trimmed);
+            if (positional) return slots[Number.parseInt(positional[1]!, 10) - 1]?.row.id ?? "";
+            return trimmed;
+          })
+          .filter((id) => id && id !== row.id && validIds.has(id));
+        row.deps = deps.length > 0 ? JSON.stringify([...new Set(deps)]) : null;
+      }
+      if (item.files !== undefined) {
+        const files = [...new Set(item.files.map((file) => file.trim()).filter(Boolean))];
+        row.files = files.length > 0 ? JSON.stringify(files) : null;
+      }
+      if (item.check !== undefined) row.check_cmd = item.check?.trim() || null;
+    }
+
+    const patchedIds = new Set(slots.map((slot) => slot.row.id));
+    const repairedRows = remaining.flatMap((row) => {
+      if (patchedIds.has(row.id)) return [];
+      const deps = parseList(row.deps);
+      const nextDeps = deps.filter((dep) => !removalIds.has(dep));
+      if (nextDeps.length === deps.length) return [];
+      return [{ ...row, deps: nextDeps.length > 0 ? JSON.stringify(nextDeps) : null, updated_at: now }];
+    });
+
+    db.transaction(() => {
+      for (const id of removalIds) removeStmt.run(id, threadId);
+      for (const row of repairedRows) updateStmt.run(row);
+      for (const slot of slots) {
+        if (slot.prior) updateStmt.run(slot.row);
+        else insertStmt.run(slot.row);
+      }
+    })();
+    return { items: slots.map((slot) => rowToItem(slot.row)), removed: removalIds.size };
+  };
 
   return {
     list(threadId: string): GoalItem[] {
@@ -191,6 +330,22 @@ export function createItemStore(bb: BbPluginApi) {
       return next.map(rowToItem);
     },
 
+    /**
+     * Patch a bounded batch into the durable plan. Unlike replace(), omitted
+     * rows are preserved, so routine orchestration does not have to resend a
+     * 1,000-item DAG just to close or retitle one slice.
+     */
+    upsert(
+      threadId: string,
+      plan: PlanPatchItem[],
+    ): GoalItem[] {
+      return applyPatch(threadId, plan, []).items;
+    },
+
+    patch(threadId: string, plan: PlanPatchItem[], removeItemIds: readonly string[]): ItemPatchResult {
+      return applyPatch(threadId, plan, removeItemIds);
+    },
+
     updateStep(threadId: string, itemId: string, step: string): GoalItem | null {
       const text = currentSliceTitle(step);
       if (!text) return null;
@@ -237,7 +392,11 @@ export function createItemStore(bb: BbPluginApi) {
     },
 
     remove(threadId: string, itemId: string): boolean {
-      return removeStmt.run(itemId, threadId).changes > 0;
+      return removeRows(threadId, [itemId]) > 0;
+    },
+
+    removeMany(threadId: string, itemIds: readonly string[]): number {
+      return removeRows(threadId, itemIds);
     },
   };
 }

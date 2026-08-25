@@ -46,6 +46,7 @@ interface GoalRow {
   verify_service_tier: string | null;
   intake_row_id: string | null;
   completion_summary: string | null;
+  accounting_thread_ids: string | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
@@ -72,6 +73,18 @@ export interface StoredGoal
   verifyServiceTierOverride: string | null;
   intakeRowId: string | null;
   completionSummary: string | null;
+  /** Prior root sessions that remain part of cumulative goal accounting. */
+  accountingThreadIds: string[];
+}
+
+function parseStringList(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 function normalizeStatus(status: string): GoalStatus {
@@ -137,6 +150,7 @@ function rowToGoal(row: GoalRow): StoredGoal {
     verifyServiceTierOverride: row.verify_service_tier,
     intakeRowId: row.intake_row_id ?? null,
     completionSummary: row.completion_summary ?? null,
+    accountingThreadIds: parseStringList(row.accounting_thread_ids),
   };
 }
 
@@ -284,6 +298,24 @@ export function createGoalStore(bb: BbPluginApi) {
     `ALTER TABLE goals ADD COLUMN worker_service_tier TEXT`,
     `ALTER TABLE goals ADD COLUMN verify_reasoning TEXT`,
     `ALTER TABLE goals ADD COLUMN verify_service_tier TEXT`,
+    // Record-only findings must retain enough information to mint the same
+    // remediation slice later when staffed capacity reopens.
+    `ALTER TABLE goal_findings ADD COLUMN fix_files TEXT`,
+    `ALTER TABLE goal_findings ADD COLUMN check_cmd TEXT`,
+    // Root transfers retain old provider sessions for cumulative accounting.
+    `ALTER TABLE goals ADD COLUMN accounting_thread_ids TEXT`,
+    // Durable cross-system transfer phase. Incomplete rows freeze both roots
+    // until the idempotent admin command repairs and completes the takeover.
+    `CREATE TABLE IF NOT EXISTS goal_root_transfers (
+      source_thread_id TEXT PRIMARY KEY,
+      target_thread_id TEXT NOT NULL UNIQUE,
+      phase TEXT NOT NULL,
+      target_intake_row_id TEXT NOT NULL,
+      wake_marker TEXT NOT NULL,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
   ]);
   importLegacyGoalDatabase(db);
 
@@ -301,7 +333,8 @@ export function createGoalStore(bb: BbPluginApi) {
       verify_enabled, verify_provider, verify_model, auto_continue,
       last_progress_at, progress_update_minutes, max_workers,
       worker_provider, worker_model, worker_reasoning, worker_service_tier,
-      verify_reasoning, verify_service_tier, intake_row_id, completion_summary
+      verify_reasoning, verify_service_tier, intake_row_id, completion_summary,
+      accounting_thread_ids
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
@@ -310,7 +343,8 @@ export function createGoalStore(bb: BbPluginApi) {
       @verify_enabled, @verify_provider, @verify_model, @auto_continue,
       @last_progress_at, @progress_update_minutes, @max_workers,
       @worker_provider, @worker_model, @worker_reasoning, @worker_service_tier,
-      @verify_reasoning, @verify_service_tier, @intake_row_id, @completion_summary
+      @verify_reasoning, @verify_service_tier, @intake_row_id, @completion_summary,
+      @accounting_thread_ids
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -341,7 +375,8 @@ export function createGoalStore(bb: BbPluginApi) {
       verify_reasoning = excluded.verify_reasoning,
       verify_service_tier = excluded.verify_service_tier,
       intake_row_id = excluded.intake_row_id,
-      completion_summary = excluded.completion_summary
+      completion_summary = excluded.completion_summary,
+      accounting_thread_ids = excluded.accounting_thread_ids
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
   const writeIntakeRow = db.prepare("UPDATE goals SET intake_row_id = ? WHERE thread_id = ?");
@@ -395,6 +430,9 @@ export function createGoalStore(bb: BbPluginApi) {
         verify_service_tier: existing?.verifyServiceTierOverride ?? null,
         intake_row_id: existing?.intakeRowId ?? null,
         completion_summary: existing?.completionSummary ?? null,
+        accounting_thread_ids: existing?.accountingThreadIds.length
+          ? JSON.stringify(existing.accountingThreadIds)
+          : null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -434,6 +472,7 @@ export function createGoalStore(bb: BbPluginApi) {
         verify_service_tier: null,
         intake_row_id: null,
         completion_summary: null,
+        accounting_thread_ids: null,
       };
       upsert.run(next);
       return rowToGoal(next);
@@ -469,6 +508,7 @@ export function createGoalStore(bb: BbPluginApi) {
         verifyReasoningOverride: string | null;
         verifyServiceTierOverride: string | null;
         completionSummary: string | null;
+        accountingThreadIds: string[];
       }>,
     ): StoredGoal | null {
       const existing = this.get(threadId);
@@ -563,6 +603,14 @@ export function createGoalStore(bb: BbPluginApi) {
           patch.completionSummary === undefined
             ? existing.completionSummary
             : patch.completionSummary,
+        accounting_thread_ids:
+          patch.accountingThreadIds === undefined
+            ? existing.accountingThreadIds.length
+              ? JSON.stringify(existing.accountingThreadIds)
+              : null
+            : patch.accountingThreadIds.length
+              ? JSON.stringify([...new Set(patch.accountingThreadIds)])
+              : null,
       };
       upsert.run(next);
       return rowToGoal(next);

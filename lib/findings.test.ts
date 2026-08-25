@@ -12,16 +12,16 @@ describe("finding registration reporting", () => {
       finding_id: "fnd_1",
       fix_item_id: "itm_1",
     });
-    assert.match(findingRegistrationCliMessage("fnd_1", "itm_1"), /fix slice itm_1 staffed/);
+    assert.match(findingRegistrationCliMessage("fnd_1", "itm_1"), /fix slice itm_1 assigned/);
   });
 
   it("reports cap-exceeded findings as recorded but unstaffed", () => {
     const outcome = findingRegistrationOutcome("fnd_2", null);
     assert.equal(outcome.status, "recorded_unstaffed");
     assert.equal(outcome.fix_item_id, null);
-    assert.match(outcome.note ?? "", /open-finding cap/);
+    assert.match(outcome.note ?? "", /durably queued/);
     const message = findingRegistrationCliMessage("fnd_2", null);
     assert.doesNotMatch(message, /null staffed/);
-    assert.match(message, /recorded without a fix slice/);
+    assert.match(message, /queued without a fix slice/);
   });
 });

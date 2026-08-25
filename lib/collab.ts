@@ -16,7 +16,7 @@ You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\`
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 This is the default way UltraGoal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
 ONE AGENT = ONE SLICE, ALWAYS. Spawn a fresh agent for every slice and let it die when the slice is done. Never send a finished worker a new slice — retired workers refuse follow-ups, and thread reuse is what breaks the live Now view.
-Give every worker a short humorous display_name RELATED TO ITS SLICE'S WORK (a typecheck fixer might be "Captain Typecheck"; a date-bug hunter "The Timezone Reckoning") and pass item_id from get_goal when that slice is still open and unassigned. If the slice is taken or finished, UltraGoal opens a new Now row from your message. Prefer this over the native Task tool — native Task subagents are tracked in Now automatically but cannot be messaged or verified.
+Give every worker a short humorous display_name RELATED TO ITS WORK ITEM (a typecheck fixer might be "Captain Typecheck"; a date-bug hunter "The Timezone Reckoning") and pass item_id from ultragoal_state when that item is still open and unassigned. If the item is taken or finished, UltraGoal opens a new Now row from your message. Prefer this over the native Task tool — native Task subagents are tracked in Now automatically but cannot be messaged or verified.
 When verification is on, a separate verifier is launched after each worker returns. Do not mark that slice complete until the verifier reports VERIFY_PASS.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
@@ -560,7 +560,7 @@ export function createCollabStore(
       role === "verifier"
         ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes. Fail work that ships stubs/placeholders/TODO behavior, weakens or skips tests to get green, leaves dead or duplicated code behind, or touches files unrelated to its slice."
         : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
-      "Do not call update_goal, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
+      "Do not call ultragoal_finish, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
       role === "verifier" ? "" : workerQualityBrief(),
       role === "verifier"
         ? ""
@@ -790,7 +790,7 @@ export function createCollabStore(
           `The new agent's canonical task name is ${taskName}.`,
           `Your call sign is ${displayName}.`,
           "You are an UltraGoal verifier. Inspect the worktree. Do not implement fixes.",
-          "Do not call update_goal or update_plan.",
+          "Do not call ultragoal_finish or ultragoal_patch.",
         ].join("\n\n"),
         title: displayName,
         visibility: "hidden" as const,
@@ -862,7 +862,7 @@ export function createCollabStore(
           item_id: z
             .string()
             .optional()
-            .describe("UltraGoal plan item id from get_goal. Nests this worker under that Now task."),
+            .describe("UltraGoal work item id from ultragoal_state. Nests this worker under that Now task."),
           role: z
             .enum(["worker", "verifier"])
             .optional()

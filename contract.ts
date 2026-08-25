@@ -85,7 +85,7 @@ export const goalSettingsSchema = z.object({
   progressUpdateMinutes: z.number().int(),
   /** Ready-queue scheduler slot count. 0 disables plugin-side staffing. */
   maxWorkers: z.number().int(),
-  /** Open findings past this cap are recorded but do not mint another fix slice. */
+  /** Distinct remediation work items; excess defects wait durably for capacity. */
   maxOpenFindings: z.number().int(),
   /** Worker execution pin. Empty = inherit the goal thread's provider/model. */
   workerProvider: z.string(),
@@ -156,8 +156,22 @@ export const goalSnapshotSchema = z.object({
   next: z.array(goalItemSchema),
   settings: goalSettingsSchema,
   findings: z
-    .object({ open: z.number().int(), fixed: z.number().int(), dismissed: z.number().int() })
-    .default({ open: 0, fixed: 0, dismissed: 0 }),
+    .object({
+      open: z.number().int(),
+      fixed: z.number().int(),
+      dismissed: z.number().int(),
+      assignedDefects: z.number().int().default(0),
+      awaitingAssignment: z.number().int().default(0),
+      remediationWorkItems: z.number().int().default(0),
+    })
+    .default({
+      open: 0,
+      fixed: 0,
+      dismissed: 0,
+      assignedDefects: 0,
+      awaitingAssignment: 0,
+      remediationWorkItems: 0,
+    }),
   /** Open owner decisions — work that waits on the user, surfaced first. */
   decisions: z.array(goalDecisionSchema).default([]),
   /** The delivery summary recorded when the goal was marked complete. */

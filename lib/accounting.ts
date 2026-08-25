@@ -137,11 +137,21 @@ export async function accountGoalProgress(
   bb: BbPluginApi,
   store: GoalStore,
   threadId: string,
-  options?: { evenIfIdle?: boolean; busy?: boolean; extraThreadIds?: string[]; scan?: boolean },
+  options?: {
+    evenIfIdle?: boolean;
+    busy?: boolean;
+    extraThreadIds?: string[];
+    force?: boolean;
+    scan?: boolean;
+  },
 ): Promise<StoredGoal | null> {
   const existing = store.get(threadId);
   if (!existing) return null;
-  if (existing.status !== "active" && existing.status !== "budget_limited") {
+  if (
+    !options?.force &&
+    existing.status !== "active" &&
+    existing.status !== "budget_limited"
+  ) {
     return existing;
   }
 
@@ -170,8 +180,10 @@ export async function accountGoalProgress(
   let tokensUsed = existing.tokensUsed;
   let lastSeenTokens = existing.lastSeenTokens;
   if (sawTokens) {
-    tokensUsed = currentTokens;
-    lastSeenTokens = currentTokens;
+    // Reloads and root transfers rebuild this in-memory bucket in bounded
+    // scans. A partial reconstruction must never erase the durable total.
+    tokensUsed = Math.max(existing.tokensUsed, currentTokens);
+    lastSeenTokens = Math.max(existing.lastSeenTokens ?? 0, currentTokens);
   }
 
   const now = Date.now();

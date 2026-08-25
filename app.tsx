@@ -436,6 +436,12 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   const items = goal?.items ?? [];
   const agents = goal?.agents ?? [];
   const doneItems = items.filter((item) => item.status === "completed");
+  const completedItemIds = new Set(doneItems.map((item) => item.id));
+  const activeWorkItems = items.filter((item) => item.status === "in_progress").length;
+  const readyWorkItems = items.filter(
+    (item) =>
+      item.status === "pending" && item.deps.every((dependency) => completedItemIds.has(dependency)),
+  ).length;
   const liveAgents = agents.filter((agent) => agent.status === "running" || agent.status === "starting");
   // The pane model is computed server-side (lib/projection.ts) and rendered
   // verbatim; the UI derives nothing.
@@ -668,15 +674,20 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
 
         <div className="mt-3 grid grid-cols-2 gap-2">
           <Metric
-            label="Done"
+            label="Work items"
             value={items.length > 0 ? `${done}/${items.length}` : "—"}
             hint={
               items.length > 0
-                ? `${nowRows.length} now · ${nextItems.length} next`
+                ? `${activeWorkItems} active · ${readyWorkItems} ready`
                 : liveAgents.length > 0
                   ? `${liveAgents.length} live`
                   : "awaiting plan"
             }
+          />
+          <Metric
+            label="Defects"
+            value={`${goal.findings.open} open`}
+            hint={`${goal.findings.assignedDefects} linked to work · ${goal.findings.awaitingAssignment} waiting for work · ${goal.findings.fixed} fixed · ${goal.findings.dismissed} dismissed`}
           />
           <Metric
             label="Tokens"
@@ -705,10 +716,14 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
           />
         </div>
 
+        <div className="mt-2 text-[11px] leading-snug text-muted-foreground">
+          Related defects may share one work item, so these totals differ.
+        </div>
+
         {items.length > 0 ? (
           <div className="mt-3">
             <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-              <span>Progress</span>
+              <span>Work progress</span>
               <span className="font-mono tabular-nums">{requirementPct}%</span>
             </div>
             <div className="h-1 overflow-hidden rounded-full bg-muted">
@@ -726,7 +741,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
             ? ` · update every ${goal.settings.progressUpdateMinutes}m`
             : " · no chat updates"}
           {goal.settings.maxWorkers > 0
-            ? ` · ${goal.settings.maxWorkers} worker slots · ${goal.settings.maxOpenFindings} finding cap`
+            ? ` · ${goal.settings.maxWorkers} worker slots · ${goal.settings.maxOpenFindings} remediation capacity`
             : " · scheduler off"}
         </div>
       </div>
@@ -739,7 +754,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
               title="Delivered"
               items={doneItems}
               alwaysShow
-              emptyLabel="No recorded slices."
+              emptyLabel="No recorded work items."
               collapsed={collapsed.previous}
               onToggleCollapsed={() => toggleCollapsed("previous")}
             />
@@ -1262,7 +1277,7 @@ function GoalSettingsPanel({
               }}
             />
             <span className="mt-1 block text-[11px] text-muted-foreground">
-              Scheduler keeps up to this many workers on ready slices. 0 turns it off. Default 5.
+              Scheduler keeps up to this many workers on ready work items. 0 turns it off. Default 5.
             </span>
           </label>
           <label className="flex items-center justify-between gap-3 text-[13px] text-foreground">
@@ -1610,7 +1625,7 @@ function NowRowView({
           ) : (
             <div className="text-[11px] text-muted-foreground">
               {row.kind === "orchestrator"
-                ? "The orchestrator is working this slice in the root thread."
+                ? "The orchestrator is working this item in the root thread."
                 : row.kind === "task"
                   ? "Native subagent running inside the root thread."
                   : "Started, but nothing is on it right now."}
@@ -1664,8 +1679,8 @@ function fmtGoalDuration(seconds: number): string {
 function CompletionView({ goal }: { goal: GoalSnapshot }) {
   const answered = goal.decisions.filter((decision) => decision.status === "answered").length;
   const stats: Array<[string, string]> = [
-    ["Slices", String(goal.items.length)],
-    ["Findings fixed", String(goal.findings.fixed + goal.findings.dismissed)],
+    ["Work items", String(goal.items.length)],
+    ["Defects addressed", String(goal.findings.fixed + goal.findings.dismissed)],
     ["Decisions", String(answered)],
     ["Workers", String(goal.agents.length)],
     ["Tokens", formatTokens(goal.tokensUsed)],

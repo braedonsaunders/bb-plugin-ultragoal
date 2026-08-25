@@ -1,7 +1,7 @@
 {
   "name": "bb-plugin-ultragoal",
-  "version": "0.17.10",
-  "description": "Codex-style /ultragoal for Cursor, OpenCode, Claude Code, and Pi. Sets a durable objective and keeps the thread working until it is done, blocked, paused, or limited.",
+  "version": "0.17.11",
+  "description": "Provider-neutral durable UltraGoals for Codex, Cursor, OpenCode, Claude Code, and Pi, with scheduled workers, verification, and defect remediation.",
   "license": "MIT",
   "author": "Braedon Saunders",
   "type": "module",
@@ -37,7 +37,7 @@
   },
   "bb": {
     "name": "UltraGoal",
-    "description": "Codex-style /ultragoal for Cursor, OpenCode, Claude Code, and Pi. Sets a durable objective and keeps the thread working until it is done, blocked, paused, or limited.",
+    "description": "Provider-neutral durable UltraGoals for Codex, Cursor, OpenCode, Claude Code, and Pi, with scheduled workers, verification, and defect remediation.",
     "branding": {
       "icon": "./assets/icon.svg"
     },
@@ -51,12 +51,16 @@
     "zod": "^4.3.6"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test lib/scheduler.test.ts lib/execution.test.ts lib/sidebar.test.ts lib/findings.test.ts"
+    "test": "tsx --test lib/*.test.ts"
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.4.8",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "better-sqlite3": "^13.0.3",
+    "cron-parser": "^5.10.0",
+    "hono": "^4.13.4",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.0"
   }
 }

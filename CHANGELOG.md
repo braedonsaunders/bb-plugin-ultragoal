@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.17.11
+
+Large-goal prompt and plan scaling (field case: OpenBooks at 192 work items and
+9.1M characters of repeated UltraGoal turns):
+
+- Automatic continuation and progress prompts use a bounded working set of
+  in-progress, ready, and blocked work items. Completed bodies collapse to counts;
+  the dynamic plan section is hard-capped at 6,000 characters even at 1,000
+  work items.
+- The recurring continuation template is a compact wake-up (about 1.8KB
+  static) instead of replaying the full 9.4KB UltraGoal constitution on every
+  turn.
+- `ultragoal_state` defaults to 40 open work items and exposes status/cursor/limit paging
+  up to 100 rows, plus compact plan and active-agent counts. CLI status is
+  bounded too.
+- `ultragoal_patch` is patch-style: omitted work remains durable, one call
+  changes at most 200 rows, and large imports can be submitted in batches.
+  Every supplied existing/removal ID is preflighted, and removals, dependency
+  repair, and upserts commit or roll back in one SQLite transaction.
+- Canonical provider-neutral controls are now `ultragoal_start`,
+  `ultragoal_state`, `ultragoal_patch`, and `ultragoal_finish` on Codex,
+  OpenCode, Claude Code, Cursor, and Pi. Codex never receives the colliding
+  legacy Goal names; non-Codex providers retain them as migration aliases.
+- Recorded overflow defects now persist repair files/check metadata. Capacity
+  counts distinct assigned repair work rather than every open defect, and an
+  oldest-first reconciler assigns waiting defects whenever capacity frees or
+  after restart without double-minting.
+- The primary pane labels Work items and Defects separately, reports assigned
+  and awaiting-assignment defects accurately, and explains why totals differ.
+- Added restartable `bb ultragoal transfer-root <source> <target> [--dry-run]`:
+  strict preflight, a durable phase journal, one IMMEDIATE transaction for all
+  root-owned plugin state, source archive before live-worker reparent, preserved
+  provider pins/settings/tokens/cursors, and exactly-once target wake.
+- Added 1,000-item regressions for prompt size, completed-body exclusion,
+  paged reads, compact status, and single-row plan patching.
+- Added rollback, unknown-ID, defect backfill/restart, canonical provider-tool,
+  and crash-repair root-transfer regressions.
+
 ## 0.17.10
 
 - Finding coalescing now requires an exact concrete domain file. Broad worker

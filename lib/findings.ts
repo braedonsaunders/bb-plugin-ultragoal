@@ -12,6 +12,8 @@ interface FindingRow {
   status: GoalFindingStatus;
   item_id: string | null;
   resolution_note: string | null;
+  fix_files: string | null;
+  check_cmd: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -23,9 +25,14 @@ export interface FindingRegistrationOutcome {
   note?: string;
 }
 
+export interface RemediationFinding extends GoalFinding {
+  fixFiles: string[];
+  check: string | null;
+}
+
 /**
- * Describe a newly recorded finding without claiming the scheduler staffed a
- * slice when the open-finding cap deliberately kept it record-only.
+ * Describe a newly recorded finding without claiming the scheduler assigned
+ * a work item when remediation capacity deliberately kept it waiting.
  */
 export function findingRegistrationOutcome(
   findingId: string,
@@ -38,7 +45,7 @@ export function findingRegistrationOutcome(
     status: "recorded_unstaffed",
     finding_id: findingId,
     fix_item_id: null,
-    note: "Finding was recorded but no fix slice was created because the open-finding cap was reached; the orchestrator must attach or mint remediation work explicitly.",
+    note: "Finding is durably queued without a fix slice because remediation capacity is full; UltraGoal assigns it automatically when capacity opens.",
   };
 }
 
@@ -47,9 +54,9 @@ export function findingRegistrationCliMessage(
   fixItemId: string | null,
 ): string {
   if (fixItemId) {
-    return `Finding ${findingId} registered; fix slice ${fixItemId} staffed by the scheduler.`;
+    return `Finding ${findingId} registered; fix slice ${fixItemId} assigned by the scheduler.`;
   }
-  return `Finding ${findingId} recorded without a fix slice: the open-finding cap was reached; the orchestrator must attach or mint remediation work explicitly.`;
+  return `Finding ${findingId} queued without a fix slice: remediation capacity is full; UltraGoal will assign it automatically.`;
 }
 
 // The seen-set key: same file + same defect statement is the same finding,
@@ -74,6 +81,28 @@ function rowToFinding(row: FindingRow): GoalFinding {
   };
 }
 
+function parseList(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const value = JSON.parse(json);
+    return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function rowToRemediation(row: FindingRow): RemediationFinding {
+  const finding = rowToFinding(row);
+  const fixFiles = parseList(row.fix_files);
+  return {
+    ...finding,
+    fixFiles: fixFiles.length > 0
+      ? fixFiles
+      : [row.file.trim().replace(/[:#]\d+([-:]\d+)?$/, "")].filter(Boolean),
+    check: row.check_cmd?.trim() || null,
+  };
+}
+
 function newId(): string {
   return `fnd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -91,10 +120,10 @@ export function createFindingStore(bb: BbPluginApi) {
   const insert = db.prepare(`
     INSERT INTO goal_findings (
       id, thread_id, fingerprint, title, file, evidence, status, item_id,
-      resolution_note, created_at, updated_at
+      resolution_note, fix_files, check_cmd, created_at, updated_at
     ) VALUES (
       @id, @thread_id, @fingerprint, @title, @file, @evidence, @status, @item_id,
-      @resolution_note, @created_at, @updated_at
+      @resolution_note, @fix_files, @check_cmd, @created_at, @updated_at
     )
   `);
   const setStatus = db.prepare(`
@@ -103,7 +132,10 @@ export function createFindingStore(bb: BbPluginApi) {
     WHERE thread_id = @thread_id AND id = @id
   `);
   const setItem = db.prepare(
-    "UPDATE goal_findings SET item_id = @item_id, updated_at = @updated_at WHERE thread_id = @thread_id AND id = @id",
+    "UPDATE goal_findings SET item_id = @item_id, updated_at = @updated_at WHERE thread_id = @thread_id AND id = @id AND status = 'open' AND item_id IS NULL",
+  );
+  const clearItem = db.prepare(
+    "UPDATE goal_findings SET item_id = NULL, updated_at = @updated_at WHERE thread_id = @thread_id AND id = @id AND status = 'open'",
   );
   const clearStmt = db.prepare("DELETE FROM goal_findings WHERE thread_id = ?");
 
@@ -111,7 +143,7 @@ export function createFindingStore(bb: BbPluginApi) {
     /** Records a finding; a repeat fingerprint returns the existing one instead. */
     report(
       threadId: string,
-      input: { title: string; file: string; evidence: string },
+      input: { title: string; file: string; evidence: string; fixFiles?: string[]; check?: string | null },
     ): { created: boolean; finding: GoalFinding } {
       const fingerprint = fingerprintOf(input.file, input.title);
       const existing = byFingerprint.get(threadId, fingerprint) as FindingRow | undefined;
@@ -127,6 +159,11 @@ export function createFindingStore(bb: BbPluginApi) {
         status: "open",
         item_id: null,
         resolution_note: null,
+        fix_files:
+          input.fixFiles && input.fixFiles.length > 0
+            ? JSON.stringify([...new Set(input.fixFiles.map((file) => file.trim()).filter(Boolean))])
+            : null,
+        check_cmd: input.check?.trim() || null,
         created_at: now,
         updated_at: now,
       };
@@ -134,8 +171,12 @@ export function createFindingStore(bb: BbPluginApi) {
       return { created: true, finding: rowToFinding(row) };
     },
 
-    linkItem(threadId: string, findingId: string, itemId: string): void {
-      setItem.run({ thread_id: threadId, id: findingId, item_id: itemId, updated_at: Date.now() });
+    linkItem(threadId: string, findingId: string, itemId: string): boolean {
+      return setItem.run({ thread_id: threadId, id: findingId, item_id: itemId, updated_at: Date.now() }).changes > 0;
+    },
+
+    unlinkItem(threadId: string, findingId: string): boolean {
+      return clearItem.run({ thread_id: threadId, id: findingId, updated_at: Date.now() }).changes > 0;
     },
 
     get(threadId: string, ref: string): GoalFinding | null {
@@ -150,12 +191,30 @@ export function createFindingStore(bb: BbPluginApi) {
       return status ? rows.filter((finding) => finding.status === status) : rows;
     },
 
-    counts(threadId: string): { open: number; fixed: number; dismissed: number } {
+    remediationQueue(threadId: string): RemediationFinding[] {
+      return (byThread.all(threadId) as FindingRow[])
+        .filter((row) => row.status === "open")
+        .map(rowToRemediation);
+    },
+
+    counts(threadId: string): {
+      open: number;
+      fixed: number;
+      dismissed: number;
+      assignedDefects: number;
+      awaitingAssignment: number;
+      remediationWorkItems: number;
+    } {
       const rows = byThread.all(threadId) as FindingRow[];
+      const open = rows.filter((row) => row.status === "open");
+      const assigned = open.filter((row) => row.item_id);
       return {
-        open: rows.filter((row) => row.status === "open").length,
+        open: open.length,
         fixed: rows.filter((row) => row.status === "fixed").length,
         dismissed: rows.filter((row) => row.status === "dismissed").length,
+        assignedDefects: assigned.length,
+        awaitingAssignment: open.length - assigned.length,
+        remediationWorkItems: new Set(assigned.map((row) => row.item_id!)).size,
       };
     },
 
