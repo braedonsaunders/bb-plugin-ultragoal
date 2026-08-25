@@ -89,12 +89,18 @@ describe("large-plan agent tool contracts", () => {
       ? (result as { isError?: boolean }).isError === true
       : false;
 
-  it("gives every provider the canonical UltraGoal skill and controls without Codex collisions", async () => {
+  it("gives every provider only the canonical UltraGoal skill and root controls", async () => {
     const host = registeredHost();
     const canonical = ["ultragoal_start", "ultragoal_state", "ultragoal_patch", "ultragoal_finish"];
-    const legacy = ["create_goal", "get_goal", "update_plan", "update_goal"];
+    const removed = ["create_goal", "get_goal", "update_plan", "update_goal"];
+    const registered = new Set(
+      host.harness.inspection.registrations.agentTools.map((tool) => tool.name),
+    );
+    for (const name of canonical) assert.ok(registered.has(name), `tool registry missing ${name}`);
+    for (const name of removed) assert.ok(!registered.has(name), `tool registry still contains ${name}`);
     const providers = [
       ["codex", "thr_codex"],
+      ["cursor", "thr_cursor"],
       ["acp-opencode", "thr_opencode"],
       ["claude-code", "thr_claude"],
       ["pi", "thr_pi"],
@@ -108,9 +114,8 @@ describe("large-plan agent tool contracts", () => {
       const names = result.tools.map((tool) => tool.name);
       for (const name of canonical) assert.ok(names.includes(name), `${providerId} missing ${name}`);
       assert.equal(result.skills.length, 1, `${providerId} missing the unified UltraGoal skill`);
-      for (const name of legacy) {
-        if (providerId === "codex") assert.ok(!names.includes(name), `Codex must not receive ${name}`);
-        else assert.ok(names.includes(name), `${providerId} migration alias missing ${name}`);
+      for (const name of removed) {
+        assert.ok(!names.includes(name), `${providerId} must not receive removed control ${name}`);
       }
     }
     const codex = configured.get("codex")!;

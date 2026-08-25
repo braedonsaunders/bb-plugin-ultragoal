@@ -762,7 +762,7 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
         ) : items.length === 0 && agents.length === 0 ? (
           <div className="px-2 py-8 text-sm leading-relaxed text-muted-foreground">
             No requirements yet. Resume the UltraGoal and the agent will fill this list with
-            update_plan.
+            ultragoal_patch.
           </div>
         ) : (
           <>
@@ -1935,7 +1935,7 @@ export default definePluginApp((app) => {
         description: "Keep working toward one durable objective",
         run: ({ composer }) => {
           const current = composer.text.trim();
-          if (/^\/(?:ultra)?goal\b/i.test(current)) {
+          if (/^\/ultragoal\b/i.test(current)) {
             composer.focus();
             return;
           }

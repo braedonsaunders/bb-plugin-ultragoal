@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.12
+
+- UltraGoal now exposes one canonical root-control surface on Codex, OpenCode,
+  Claude Code, Cursor, and Pi: `ultragoal_start`, `ultragoal_state`,
+  `ultragoal_patch`, and `ultragoal_finish`.
+- Retired the short slash command. `/ultragoal` is now the sole invocation and
+  lifecycle command on every provider.
+- Removed the former Goal-named root controls from registration, provider
+  configuration, prompts, the installed skill, and documentation. Provider-native
+  goal state remains separate and untouched.
+- Added fake-host coverage proving every provider receives the same canonical
+  skill/tool surface and none of the removed controls, plus parser coverage for
+  the canonical slash command.
+
 ## 0.17.11
 
 Large-goal prompt and plan scaling (field case: OpenBooks at 192 work items and
@@ -19,10 +33,8 @@ Large-goal prompt and plan scaling (field case: OpenBooks at 192 work items and
   changes at most 200 rows, and large imports can be submitted in batches.
   Every supplied existing/removal ID is preflighted, and removals, dependency
   repair, and upserts commit or roll back in one SQLite transaction.
-- Canonical provider-neutral controls are now `ultragoal_start`,
-  `ultragoal_state`, `ultragoal_patch`, and `ultragoal_finish` on Codex,
-  OpenCode, Claude Code, Cursor, and Pi. Codex never receives the colliding
-  legacy Goal names; non-Codex providers retain them as migration aliases.
+- Introduced provider-neutral `ultragoal_*` root controls for the one-time root
+  transfer and the canonical-only follow-up.
 - Recorded overflow defects now persist repair files/check metadata. Capacity
   counts distinct assigned repair work rather than every open defect, and an
   oldest-first reconciler assigns waiting defects whenever capacity frees or
@@ -104,7 +116,7 @@ Containment after a live openbooks runaway (35-wide crew, 95-finding mill, 41 No
 
 Completion is a report, not a status label:
 
-- update_goal complete now REQUIRES a delivery summary — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified. It is stored durably on the goal.
+- Completion now REQUIRES a delivery summary — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified. It is stored durably on the goal.
 - The pane renders a completion report when a goal finishes: a check header with the objective, a stats grid (slices delivered, findings fixed, decisions answered, workers, tokens, duration), the delivery summary as Markdown, and the full Delivered list. `bb ultragoal status` prints the summary.
 
 ## 0.16.4
@@ -200,16 +212,16 @@ Owner decisions moved from a sidebar card to the native center-pane question sur
 
 - request_decision now raises a real pending interaction in the user's thread (bb.ui.requestInput + a plugin pending-interaction renderer): question, consequences, clickable option buttons, a custom-answer field, and "Dismiss for now". Clicking an answer resolves the durable decision and wakes the orchestrator with it.
 - Interactions cap at one hour, so a keeper re-raises the card until the decision is answered (dismissal stops the nagging for the session; the decision stays open and answerable via bb ultragoal decide, which also aborts any live card). Cards survive plugin/server restarts via the pulse sweep.
-- The right-pane "Needs you" section is deleted — the status card and get_goal keep reporting open decisions.
+- The right-pane "Needs you" section is deleted — the status card and state response keep reporting open decisions.
 
 ## 0.10.0
 
 Owner decisions are first-class ("Needs you"). A parked decision was one sentence inside one progress note, then buried under poll turns — invisible to the person it waited on:
 
 - New request_decision / resolve_decision tools: anything only the owner can decide (irreversible actions, spend, scope, preference calls) becomes a durable decision record — deduplicated by question, never re-asked, never assumed.
-- The pane opens with a "Needs you" section: question, context, options, and the exact answer command. `bb ultragoal status` prints NEEDS YOU lines; get_goal returns openDecisions.
+- The pane opens with a "Needs you" section: question, context, options, and the exact answer command. `bb ultragoal status` prints NEEDS YOU lines; the state response returns openDecisions.
 - `bb ultragoal decide <decision_id> <answer>` records the answer, wakes the orchestrator with it (event-gated continuation counts it as an event), and steers it to act.
-- Open decisions block update_goal complete, like open findings. The orchestrator keeps working everything that does not depend on the answer.
+- Open decisions block completion, like open findings. The orchestrator keeps working everything that does not depend on the answer.
 - Templates: orchestrators route owner calls through request_decision with one visible chat note; workers escalate owner-only questions instead of guessing.
 
 ## 0.9.0
@@ -252,7 +264,7 @@ Live cutover of the running goal surfaced four defects; all fixed structurally:
 Clean cut: the DAG contract is the only path. Every compatibility shim is deleted, not deprecated:
 
 - The `managed` opt-in distinction is gone — every plan item is scheduler-managed. Pending slices staff the moment their deps are complete; abandoned in_progress slices restaff after the stale window, whatever their origin. The legacy STAFFING nudge that told the model to spawn workers itself is deleted.
-- The native-todo plan mirror (turn/plan/updated projection) is deleted. update_plan is the single plan source on every provider; a model using its native todo tool gets an empty pane and a nudge that demands the real contract. Native Task calls still render in Now as live work — observability stays; state authority does not.
+- The native-todo plan mirror (turn/plan/updated projection) is deleted. UltraGoal is the single plan source on every provider; a model using its native todo tool gets an empty pane and a nudge that demands the real contract. Native Task calls still render in Now as live work — observability stays; state authority does not.
 - Prose report parsing is deleted (done/blocked signal regexes, the harvest of native session reports by title match). A slice completes on ULTRAGOAL_DONE (or VERIFY_PASS when verification is on) — full stop.
 - Output-seeding shims are deleted (seeding an empty plan from previous output prose, hydrating completed items from output text; lib/plan-seed.ts removed).
 
@@ -294,9 +306,9 @@ Provenance over heuristics — structural facts replace string classifiers:
 
 The model plans, deterministic code schedules. Research synthesis across Anthropic's multi-agent guidance, shipped industry systems (Codex cloud, Gas Town/beads, MultiDevin), and the academic scheduling literature (LLMCompiler, ADaPT, MAST) is in docs/architecture-research.md; this release implements it:
 
-- **Dependency-DAG plan.** update_plan items now carry `deps` (item_ids or `"#N"` list positions; `[]` = ready now), `files` (the disjoint file scope the slice owns), and `check` (a runnable done-gate). Omitted fields keep the item's existing metadata; deps pointing outside the plan are dropped so a typo cannot deadlock a slice. Items with no metadata stay on the legacy nudge-staffing path, so live pre-0.5 goals migrate on their next full plan update.
+- **Dependency-DAG plan.** Work items now carry `deps` (item_ids or `"#N"` list positions; `[]` = ready now), `files` (the disjoint file scope the slice owns), and `check` (a runnable done-gate). Omitted fields keep the item's existing metadata; deps pointing outside the plan are dropped so a typo cannot deadlock a slice. Items with no metadata stay on the compatibility nudge-staffing path, so live pre-0.5 goals migrate on their next full plan update.
 - **Ready-queue scheduler.** The plugin staffs one fresh worker per ready slice — deps complete, file scopes disjoint from in-flight work — up to the goal's worker slots (setting + per-goal override, default 5), and re-staffs managed slices whose workers died (husk detection distinguishes dead workers from idle ones awaiting close). Dispatch is event-driven: a finishing worker immediately unblocks and staffs its dependents. Under-parallelization stops being a model-memory problem: the orchestrator's job is to plan wide (the WIDTH nudge demands further decomposition while slots sit idle, and never padding fake parallelism onto sequential work); staffing is no longer its job at all.
-- **Streaming findings queue.** Hunt/audit workers call the new report_finding tool per confirmed defect — fingerprint-deduplicated across sweeps (same file + same defect = same finding) — and each fresh finding auto-creates a ready, file-scoped fix slice that the scheduler staffs while the hunt continues. This kills the serial "fix whatever the hunt proves" tail. Open findings hard-block update_goal complete; resolve_finding (with evidence) handles non-defects, and a completed fix slice closes its findings automatically.
+- **Streaming findings queue.** Hunt/audit workers call the new report_finding tool per confirmed defect — fingerprint-deduplicated across sweeps (same file + same defect = same finding) — and each fresh finding auto-creates a ready, file-scoped fix slice that the scheduler staffs while the hunt continues. This kills the serial "fix whatever the hunt proves" tail. Open findings hard-block completion; resolve_finding (with evidence) handles non-defects, and completed repair work closes its findings automatically.
 - **Attestation-grade reports.** Worker briefs demand evidence — commit SHAs and the slice's check output — and inject the slice's scope and done-check into the spawn prompt. ULTRAGOAL_DONE without evidence is a claim, not a completion.
 - **Work-related humorous names.** Plugin-spawned workers derive their display names from the slice's own text ("Captain Suites", "The Idempotency Reckoning") instead of a generic pool, and the orchestrator guidance asks for the same.
 - Pane: Up next shows a "blocked" chip for slices with unmet deps; Settings gains a Worker slots input; the header shows the slot count; `bb ultragoal pane` includes findings counts.
@@ -490,7 +502,7 @@ Architecture consolidation: rows are projected liveness, semantics are structure
 
 ## 0.1.0
 
-- Durable `/goal` for Cursor, OpenCode, Claude Code, and Pi (Codex uses native Goal).
+- Durable objective orchestration for Cursor, OpenCode, Claude Code, and Pi.
 - Orchestrator root with named hidden workers and plan items; sidebar stays a single Goal row.
 - Optional second-model verification after each worker returns.
 - Per-goal Settings: verify, verifier model, progress chat, auto-continue, token budget.

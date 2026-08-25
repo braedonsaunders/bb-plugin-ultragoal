@@ -131,7 +131,7 @@ Observed on goal `thr_cj88rjtsfu` (11h, 44 items):
 
 ```
         ┌────────────────────────── root orchestrator (LLM) ──────────────────────────┐
-        │  plans/replans only: update_plan emits slices {step, deps, files, check}     │
+        │  plans/replans only: ultragoal_patch emits {step, deps, files, check}       │
         │  integrates results, resolves conflicts, decides done                        │
         └──────────────▲───────────────────────────────────────────────▲──────────────┘
             replan nudge (queue empty / plan width < slots            harvest of worker
@@ -158,7 +158,8 @@ stops doing what it is bad at (remembering to staff, waiting without blocking, h
 
 **Phase 1 — DAG schema + ready-queue scheduler** (`contract.ts`, `server.ts`, `lib/collab.ts`)
 - `goalItemSchema` += `deps: string[]` (item ids), `files: string[]` (scope globs, optional),
-  `check: string` (runnable done-criterion, optional). `update_plan`/`add_item` accept them.
+  `check: string` (runnable done-criterion, optional). `ultragoal_patch` and the
+  internal item store accept them.
 - Scheduler in `server.ts`: on plan update, worker completion, or heartbeat tick — compute the
   ready set, spawn workers through the existing shared spawn path up to `maxWorkers`
   (goal setting, default 5). This replaces staffing-by-nudge; the STAFFING prompt becomes a

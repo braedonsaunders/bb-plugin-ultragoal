@@ -379,16 +379,6 @@ export default function plugin(bb: BbPluginApi) {
     return rootTransfers.isLocked(threadId) || rootTransfers.isLocked(rootThreadId);
   }
 
-  /** Canonical provider-neutral names; legacy aliases are non-Codex only. */
-  function rootControlPrompt(threadId: string, prompt: string): string {
-    void threadId;
-    return prompt
-      .replaceAll("create_goal", "ultragoal_start")
-      .replaceAll("get_goal", "ultragoal_state")
-      .replaceAll("update_plan", "ultragoal_patch")
-      .replaceAll("update_goal", "ultragoal_finish");
-  }
-
   function publish(threadId: string, goal: GoalSnapshot | null): void {
     bb.realtime.publish("ultragoal", { threadId, goal });
   }
@@ -675,7 +665,7 @@ export default function plugin(bb: BbPluginApi) {
   //     stays with the orchestrator (the continuation prompt demands it).
   // ---------------------------------------------------------------------------
   // Ready-queue scheduler (LLMCompiler-style split, docs/architecture-research.md):
-  // the model PLANS — update_plan emits slices with deps/files/check — and this
+  // the model PLANS — ultragoal_patch emits work with deps/files/check — and this
   // deterministic code SCHEDULES: every pending slice whose deps are complete
   // and whose file scope is disjoint from in-flight work gets a fresh worker,
   // up to maxWorkers, the moment a slot frees. Items without DAG metadata
@@ -1850,7 +1840,7 @@ export default function plugin(bb: BbPluginApi) {
     const runningNow = await threadIsRunning(bb, threadId);
     const sent = await sendSteering(
       threadId,
-      rootControlPrompt(threadId, progressPrompt(snap)),
+      progressPrompt(snap),
       runningNow ? "auto" : "start",
     );
     if (!sent) return false;
@@ -2030,11 +2020,11 @@ export default function plugin(bb: BbPluginApi) {
         return;
       }
     }
-    const text = rootControlPrompt(threadId, isBudgetExhausted(snap)
+    const text = isBudgetExhausted(snap)
       ? budgetLimitPrompt(snap)
       : due
         ? progressPrompt(snap)
-        : continuationPrompt(snap));
+        : continuationPrompt(snap);
     const sent = await sendSteering(threadId, text, "start");
     if (!sent) return;
     store.update(threadId, {
@@ -2055,7 +2045,7 @@ export default function plugin(bb: BbPluginApi) {
       if (thread.status === "active") {
         await sendSteering(
           threadId,
-          rootControlPrompt(threadId, objectiveUpdatedPrompt(view(result))),
+          objectiveUpdatedPrompt(view(result)),
           "auto",
         );
       } else if (
@@ -2292,286 +2282,7 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.registerTool({
-    name: "get_goal",
-    description:
-      "Get the current goal, compact plan counts, active agents, and one page of plan items. Defaults to the first 40 open slices; page with plan_status/plan_cursor/plan_limit instead of loading a large goal all at once.",
-    experimental_statusLabels: {
-      pending: "Checking Goal",
-      completed: "Checked Goal",
-    },
-    parameters: z
-      .object({
-        plan_status: z
-          .enum(["open", "pending", "in_progress", "completed", "all"])
-          .optional()
-          .describe("Plan page filter. Defaults to open (pending + in_progress)."),
-        plan_cursor: z
-          .number()
-          .int()
-          .nonnegative()
-          .optional()
-          .describe("Zero-based cursor returned by the previous get_goal page."),
-        plan_limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(100)
-          .optional()
-          .describe("Plan rows to return, 1-100. Defaults to 40."),
-      })
-      .strict(),
-    async execute({ plan_status, plan_cursor, plan_limit }, { threadId }) {
-      const rootThreadId = collab.rootId(threadId);
-      await refreshRunning(rootThreadId);
-      const accounted = await account(rootThreadId);
-      const goal = accounted ?? store.get(rootThreadId);
-      return goalToolResponse(
-        goal ? await viewFresh(goal) : null,
-        false,
-        findings.list(rootThreadId, "open"),
-        { planStatus: plan_status, planCursor: plan_cursor, planLimit: plan_limit },
-      );
-    },
-  });
-
-  bb.agents.registerTool({
-    name: "create_goal",
-    description:
-      "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Set token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; use update_goal only for status.",
-    experimental_statusLabels: {
-      pending: "Creating Goal",
-      completed: "Created Goal",
-    },
-    parameters: z.object({
-      objective: z
-        .string()
-        .min(1)
-        .describe(
-          "Required. The concrete objective to start pursuing. This starts a new active goal when no goal exists or replaces the current goal when it is complete.",
-        ),
-      token_budget: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Positive token budget for the new goal. Omit unless explicitly requested."),
-    }),
-    async execute({ objective, token_budget }, { threadId }) {
-      const existing = store.get(threadId);
-      if (existing && isUnfinished(existing.status)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "cannot create a new goal because this thread has an unfinished goal; complete the existing goal first",
-            },
-          ],
-          isError: true,
-        };
-      }
-      const result = await userSetGoal(threadId, objective, token_budget ?? null);
-      if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
-      }
-      return goalToolResponse(view(result));
-    },
-  });
-
-  bb.agents.registerTool({
-    name: "update_goal",
-    description:
-      "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to `complete` only when the objective has actually been achieved and no required work remains. Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again. Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`. Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work. You cannot use this tool to pause, resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system. When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
-    experimental_statusLabels: {
-      pending: "Updating Goal",
-      completed: "Updated Goal",
-    },
-    parameters: z.object({
-      summary: z
-        .string()
-        .optional()
-        .describe(
-          "REQUIRED with status complete: the delivery summary the user sees — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified (gates, tests, checks). Markdown allowed.",
-        ),
-      status: z
-        .enum(["complete", "blocked"])
-        .describe(
-          "Required. Set to `complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked goal is resumed, the resumed run starts a fresh blocked audit.",
-        ),
-    }),
-    async execute({ status, summary }, { threadId }) {
-      const accounted = (await account(threadId)) ?? store.get(threadId);
-      if (!accounted) {
-        return {
-          content: [{ type: "text", text: "cannot update goal because this thread has no goal" }],
-          isError: true,
-        };
-      }
-      if (status === "complete") {
-        if (!summary || summary.trim().length < 40) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "cannot mark the goal complete without a delivery summary: pass summary — what shipped, where it lives (URLs, final HEAD SHA, deploy state), and how it was verified. This renders as the goal's completion report.",
-              },
-            ],
-            isError: true,
-          };
-        }
-        const openWork = items.list(threadId).filter((item) => item.status !== "completed");
-        if (openWork.length > 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cannot mark the UltraGoal complete: ${openWork.length} work item(s) remain open`,
-              },
-            ],
-            isError: true,
-          };
-        }
-        const openDecisions = decisions.list(threadId, "open");
-        if (openDecisions.length > 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cannot mark the goal complete: ${openDecisions.length} owner decision(s) await the user: ${openDecisions
-                  .map((decision) => `${decision.id} ${decision.question}`)
-                  .join("; ")}. The user answers via bb ultragoal decide <id> <answer>; use resolve_decision only for their verbatim answer or a genuinely moot question.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-        const open = findings.list(threadId, "open");
-        if (open.length > 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cannot mark the goal complete: ${open.length} open finding(s) remain. Fix them (their fix slices close them automatically) or call resolve_finding with evidence for any that are not real defects. Open: ${open
-                  .slice(0, 10)
-                  .map((finding) => `${finding.id} ${finding.title} [${finding.file}]`)
-                  .join("; ")}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
-      if (status === "complete" && summary) {
-        store.update(threadId, { completionSummary: summary.trim() });
-      }
-      const next = applyStatus(threadId, status, null);
-      return goalToolResponse(next ? view(next) : null, status === "complete");
-    },
-  });
-
-  bb.agents.registerTool({
-    name: "update_plan",
-    description: `Updates the task plan — the dependency DAG the UltraGoal scheduler executes.
-This is a PATCH operation: provide only new or changed items; every omitted item is preserved. Patch at most 200 items per call and use additional calls for larger imports. Each item is a self-contained slice brief: step (objective + boundaries), files (the disjoint file paths/globs this slice owns), check (a runnable command that proves it done), and deps (item_ids or "#N" 1-based positions in this patch batch it must wait for; empty = ready now). Use remove_item_ids only for obsolete, unstaffed slices.
-The scheduler staffs one fresh worker per READY slice automatically, up to the goal's max concurrent workers — do not spawn workers for plan items yourself. Plan WIDE: prefer many independent file-disjoint slices over few coarse ones; declare deps only for genuinely sequential work; never write catch-all tail items like "fix whatever the hunt proves" (hunt workers report_finding per defect and fixes are staffed as they stream in).
-Keep the plan current as steps complete or the next best action changes. When a live worker moves to a new slice, pass that item's id and the new step text and keep status in_progress. Do not add a pending Next row for work a worker is already doing. Append only genuinely unstarted work. Do not treat a plan update as a substitute for doing the work.
-`,
-    experimental_statusLabels: {
-      pending: "Updating plan",
-      completed: "Plan updated",
-    },
-    parameters: z.object({
-      explanation: z.string().optional().describe("Optional explanation for this plan update."),
-      remove_item_ids: z
-        .array(z.string().min(1))
-        .max(200)
-        .optional()
-        .describe("Obsolete, unstaffed item_ids to remove. Omit normally; active slices are refused."),
-      plan: z
-        .array(
-          z.object({
-            id: z
-              .string()
-              .optional()
-              .describe(
-                "Existing item_id from get_goal. Pass this when updating a slice so the Now title changes in place instead of creating a new Next row.",
-              ),
-            step: z.string().min(1).describe("Task step text. Update this when the worker's current slice changes."),
-            status: z.enum(["pending", "in_progress", "completed"]).describe("Step status."),
-            deps: z
-              .array(z.string())
-              .optional()
-              .describe(
-                'Item ids (or "#N" = 1-based position in this list) this slice must wait for. Pass [] for slices that are ready now. Omit to keep the item\'s existing deps.',
-              ),
-            files: z
-              .array(z.string())
-              .optional()
-              .describe(
-                "File paths/globs this slice owns — the NARROW set it will actually touch. Scope gates concurrency: overlapping scopes serialize (deliberately, for slices sharing files); a whole-app scope serializes the entire goal. Prefer [] over a broad guess. Omit to keep existing.",
-              ),
-            check: z
-              .string()
-              .nullable()
-              .optional()
-              .describe(
-                "Runnable command that proves this slice done (its verification gate). Omit to keep existing; null to clear.",
-              ),
-          }),
-        )
-        .max(200)
-        .default([])
-        .describe("Up to 200 new or changed slices. Omitted durable slices are preserved."),
-    }),
-    async execute({ plan, remove_item_ids }, { threadId }) {
-      const rootThreadId = collab.rootId(threadId);
-      const goal = store.get(rootThreadId);
-      if (!goal || !isUnfinished(goal.status)) {
-        return {
-          content: [{ type: "text", text: "cannot update plan because this thread tree has no unfinished goal" }],
-          isError: true,
-        };
-      }
-      const before = items.list(rootThreadId);
-      const beforeById = new Map(before.map((item) => [item.id, item]));
-      const removals = [...new Set((remove_item_ids ?? []).map((id) => id.trim()).filter(Boolean))];
-      const activeRemovals = removals.filter((id) => {
-        const item = beforeById.get(id);
-        return item?.status === "in_progress" || workersOnItem(rootThreadId, id).length > 0;
-      });
-      if (activeRemovals.length > 0) {
-        return {
-          content: [{ type: "text", text: `cannot remove active/staffed slice(s): ${activeRemovals.join(", ")}` }],
-          isError: true,
-        };
-      }
-      let patched;
-      try {
-        patched = items.patch(rootThreadId, plan, removals);
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          isError: true,
-        };
-      }
-      const { items: changed, removed } = patched;
-      const added = changed.filter((item) => !beforeById.has(item.id)).length;
-      const updated = changed.length - added;
-      bb.log.info(
-        `update_plan patch on ${rootThreadId}: ${added} added, ${updated} updated, ${removed} removed`,
-      );
-      markGoalEvent(rootThreadId);
-      const next = goal ? await viewFresh(goal) : null;
-      if (next) publish(rootThreadId, next);
-      void ensureCrew(rootThreadId);
-      void scheduleReady(rootThreadId);
-      return JSON.stringify({ added, updated, removed, total: next?.items.length ?? before.length });
-    },
-  });
-
-  // Provider-neutral UltraGoal controls. These are the canonical surface on
-  // every provider; legacy Goal-named aliases remain available only where
-  // they cannot collide with a provider's native tools.
+  // Canonical provider-neutral UltraGoal controls on every provider.
   bb.agents.registerTool({
     name: "ultragoal_start",
     description:
@@ -3132,9 +2843,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
             "Stay on the root to plan, wait, verify, and unblock.",
             "Call ultragoal_finish with status complete only when current evidence proves every requirement.",
             "Call ultragoal_finish with status blocked only after the same blocker repeats for three consecutive goal turns.",
-            context.provider.id === "codex"
-              ? "Never call Codex's native create_goal/get_goal/update_goal/update_plan tools for an UltraGoal; the canonical ultragoal_* controls keep the durable pane, scheduler, and workers authoritative."
-              : "Use the canonical ultragoal_* controls; legacy Goal-named aliases exist only for migration.",
+            "Use only the canonical ultragoal_* controls. Provider-native goal state is unrelated to this UltraGoal.",
             "Do not pause, resume, clear, or budget-limit the goal; those are user or system controls.",
           ].join("\n")
         : undefined;
@@ -3144,9 +2853,6 @@ Keep the plan current as steps complete or the next best action changes. When a 
         "ultragoal_state",
         "ultragoal_patch",
         "ultragoal_finish",
-        ...(context.provider.id === "codex"
-          ? []
-          : ["get_goal", "create_goal", "update_goal", "update_plan"]),
         "report_finding",
         "resolve_finding",
         "request_decision",
@@ -3349,7 +3055,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
       if (!latest.lastContinueWasAutomatic) {
         const sent = await sendSteering(
           thread.id,
-          rootControlPrompt(thread.id, budgetLimitPrompt(view(latest))),
+          budgetLimitPrompt(view(latest)),
           "start",
         );
         if (sent) store.update(thread.id, { lastContinueWasAutomatic: true, lastContinueAt: Date.now() });
@@ -3452,7 +3158,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
                 [
                   marker,
                   "CONTROLLED ROOT TAKEOVER COMPLETE. You are now the UltraGoal orchestrator. Existing remediation state, work items, counters, and provider-pinned workers were transferred durably. Continue from this bounded handoff; do not replay the old startup prompt.",
-                  rootControlPrompt(id, continuationPrompt(snap)),
+                  continuationPrompt(snap),
                 ].join("\n\n"),
                 "start",
               );
@@ -3538,7 +3244,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
         try {
           await sendSteering(
             threadId,
-            rootControlPrompt(threadId, continuationPrompt(view(result))),
+            continuationPrompt(view(result)),
             "start",
           );
         } catch (error) {

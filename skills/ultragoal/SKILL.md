@@ -1,13 +1,13 @@
 ---
 name: ultragoal
-description: Start and run a durable UltraGoal until it is genuinely finished. Use on every provider, including Codex, OpenCode, Claude Code, Cursor, and Pi, whenever the user invokes /ultragoal or /goal, asks to keep going until a target is met, or asks to pause, resume, edit, clear, or inspect an UltraGoal.
+description: Start and run a durable UltraGoal until it is genuinely finished. Use on every provider, including Codex, OpenCode, Claude Code, Cursor, and Pi, whenever the user invokes /ultragoal, asks to keep going until a target is met, or asks to pause, resume, edit, clear, or inspect an UltraGoal.
 ---
 
 # UltraGoal
 
 UltraGoal is one provider-neutral completion contract backed by the plugin's durable database, work-item scheduler, defect queue, and pane. Use the canonical `ultragoal_*` tools on every provider.
 
-On Codex, never create or update a native Codex Goal for UltraGoal work. Native `create_goal`, `get_goal`, `update_goal`, and `update_plan` names collide with UltraGoal's former names and operate on different state. Non-Codex providers may temporarily expose those old names as migration aliases, but new work and instructions use only the canonical controls below.
+Do not create or update provider-native goal state for UltraGoal work. It is unrelated to the plugin's durable state. Every provider uses only the canonical controls below.
 
 ## Canonical controls
 
@@ -20,7 +20,7 @@ Supporting controls are `report_finding`, `resolve_finding`, `request_decision`,
 
 ## Start and user commands
 
-- `/ultragoal <objective>` or `/goal <objective>` sets or replaces the user-owned objective and begins orchestration.
+- `/ultragoal <objective>` sets or replaces the user-owned objective and begins orchestration.
 - `/ultragoal` reports the current state with `ultragoal_state`.
 - `/ultragoal edit <objective>` changes the contract; reconcile the plan to the new objective.
 - `/ultragoal pause`, `/ultragoal resume`, and `/ultragoal clear` are user or system controls. Do not simulate them with agent tools.

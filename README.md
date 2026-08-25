@@ -15,7 +15,7 @@ bb plugin install ultragoal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.17.8'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.17.12'
 ```
 
 Or from a local checkout:
@@ -58,7 +58,7 @@ bb ultragoal clear
 
 The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked work gets a chip), and **Previous**. Its headline metrics distinguish **Work items** from **Defects** because related defects can share one repair item. The plan is read-only in the pane; the agent updates it. Settings control verification, verifier and worker models, progress-chat interval, worker slots, auto-continue, remediation capacity, and the token budget.
 
-The canonical agent controls are `ultragoal_start`, `ultragoal_state`, `ultragoal_patch`, and `ultragoal_finish` on every provider. Codex never receives the legacy Goal-named controls because those names collide with native Codex tools and mutate unrelated state. Non-Codex providers temporarily retain `create_goal`, `get_goal`, `update_plan`, and `update_goal` as migration aliases.
+The only root agent controls are `ultragoal_start`, `ultragoal_state`, `ultragoal_patch`, and `ultragoal_finish` on every provider. They operate on UltraGoal's durable plugin state; provider-native goal state is unrelated.
 
 ## How it runs
 

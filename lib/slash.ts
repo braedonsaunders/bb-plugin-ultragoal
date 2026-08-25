@@ -7,7 +7,7 @@ const LIFECYCLE = /^(pause|resume|continue|clear|status|edit)\b/i;
 export function parseSlashGoal(text: string | null | undefined): SlashGoal | null {
   if (!text) return null;
   const trimmed = text.trim();
-  const match = trimmed.match(/^\/(?:ultra)?goal(?:\s+([\s\S]*))?$/i);
+  const match = trimmed.match(/^\/ultragoal(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
   const rest = (match[1] ?? "").trim();
   if (!rest) return { kind: "status" };
