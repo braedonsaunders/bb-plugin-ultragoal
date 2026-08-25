@@ -2479,6 +2479,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
     const maxOpenFindings = goal ? view(goal).settings.maxOpenFindings : DEFAULT_MAX_OPEN_FINDINGS;
     const disposition = findingAction({
       file: input.file,
+      fixFiles: input.fixFiles,
       openFindingCount: findings.counts(rootThreadId).open - 1,
       maxOpenFindings,
       openItems: items.list(rootThreadId),

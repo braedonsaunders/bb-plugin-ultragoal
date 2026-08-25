@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  coalescingFilesOverlap,
   filesOverlap,
   findingAction,
   freeSlots,
@@ -109,6 +110,40 @@ describe("findingAction", () => {
     });
     assert.deepEqual(result, { action: "mint" });
   });
+
+  it("does not attach unrelated findings through a shared migration directory", () => {
+    const result = findingAction({
+      file: "schema/migrations/generated",
+      fixFiles: ["schema/src/documents.ts", "schema/migrations/generated"],
+      openFindingCount: 3,
+      maxOpenFindings: 50,
+      openItems: [
+        {
+          id: "itm_recurring",
+          status: "in_progress" as const,
+          files: ["engine/src/recurring.ts", "schema/migrations/generated"],
+        },
+      ],
+    });
+    assert.deepEqual(result, { action: "mint" });
+  });
+
+  it("attaches when fix scope shares a concrete domain file", () => {
+    const result = findingAction({
+      file: "schema/migrations/generated",
+      fixFiles: ["engine/src/recurring.ts", "schema/migrations/generated"],
+      openFindingCount: 95,
+      maxOpenFindings: 50,
+      openItems: [
+        {
+          id: "itm_recurring",
+          status: "in_progress" as const,
+          files: ["engine/src/recurring.ts", "schema/migrations/generated"],
+        },
+      ],
+    });
+    assert.deepEqual(result, { action: "attach", attachItemId: "itm_recurring" });
+  });
 });
 
 describe("filesOverlap", () => {
@@ -118,6 +153,24 @@ describe("filesOverlap", () => {
 
   it("does not overlap sibling files", () => {
     assert.equal(filesOverlap(["web/lib/search.ts"], ["web/lib/authz.ts"]), false);
+  });
+});
+
+describe("coalescingFilesOverlap", () => {
+  it("requires an exact concrete file instead of directory ancestry", () => {
+    assert.equal(coalescingFilesOverlap(["web/lib"], ["web/lib/search.ts"]), false);
+    assert.equal(coalescingFilesOverlap(["web/lib/search.ts"], ["web/lib/search.ts:42"]), true);
+  });
+
+  it("does not use shared infrastructure files as semantic ownership", () => {
+    assert.equal(coalescingFilesOverlap(["package.json"], ["package.json"]), false);
+    assert.equal(
+      coalescingFilesOverlap(
+        ["schema/canonical-baseline.test.ts"],
+        ["schema/canonical-baseline.test.ts"],
+      ),
+      false,
+    );
   });
 });
 

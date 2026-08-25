@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.17.10
+
+- Finding coalescing now requires an exact concrete domain file. Broad worker
+  scopes such as `schema/migrations/generated` still serialize potentially
+  conflicting edits, but no longer assign unrelated defects to the same fix
+  slice. Shared package manifests, lockfiles, and the canonical schema test are
+  likewise non-authoritative for semantic ownership.
+
 ## 0.17.9
 
 - Report cap-exceeded findings as recorded but unstaffed instead of falsely

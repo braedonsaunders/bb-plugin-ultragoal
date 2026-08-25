@@ -22,6 +22,34 @@ export function normalizeFindingFile(file: string): string {
   return file.trim().replace(/[:#]\d+([-:]\d+)?$/, "");
 }
 
+const SHARED_INFRASTRUCTURE_FILES: ReadonlySet<string> = new Set([
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "schema/canonical-baseline.test.ts",
+]);
+
+function isConcreteCoalescingFile(path: string): boolean {
+  if (!path || /[*?{}[\]]/.test(path)) return false;
+  if (SHARED_INFRASTRUCTURE_FILES.has(path)) return false;
+  const leaf = path.split("/").at(-1) ?? "";
+  return leaf.includes(".");
+}
+
+/** Finding coalescing is deliberately stricter than scheduler scope overlap.
+ * A directory scope must serialize workers that could edit descendants, but it
+ * is not evidence that two defects belong to the same remediation slice. */
+export function coalescingFilesOverlap(a: readonly string[], b: readonly string[]): boolean {
+  const concreteA = new Set(
+    a.map(normalizeFindingFile).filter(isConcreteCoalescingFile),
+  );
+  return b
+    .map(normalizeFindingFile)
+    .filter(isConcreteCoalescingFile)
+    .some((path) => concreteA.has(path));
+}
+
 const LIVE: ReadonlySet<string> = new Set(["running", "starting"]);
 const DEAD: ReadonlySet<string> = new Set(["error", "stopped"]);
 
@@ -67,16 +95,18 @@ export type FindingAction =
  * new distinct files are recorded but do not mint another auto-staffed slice. */
 export function findingAction(input: {
   file: string;
+  fixFiles?: readonly string[];
   openFindingCount: number;
   maxOpenFindings: number;
   openItems: readonly Pick<GoalItem, "id" | "status" | "files">[];
 }): FindingAction {
   const file = normalizeFindingFile(input.file);
+  const proposedFiles = [file, ...(input.fixFiles ?? [])];
   const attach = input.openItems.find(
     (item) =>
       item.status !== "completed" &&
       item.files.length > 0 &&
-      filesOverlap(item.files, [file]),
+      coalescingFilesOverlap(item.files, proposedFiles),
   );
   if (attach) return { action: "attach", attachItemId: attach.id };
   if (input.openFindingCount >= input.maxOpenFindings) return { action: "record-only" };
