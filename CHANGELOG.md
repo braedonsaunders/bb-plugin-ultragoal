@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.17.9
+
+- Report cap-exceeded findings as recorded but unstaffed instead of falsely
+  claiming that a `null` fix slice was staffed by the scheduler.
+
 ## 0.17.8
 
 OpenCode ghost-turn recovery (field case: openbooks `thr_rdmh8waewz`):

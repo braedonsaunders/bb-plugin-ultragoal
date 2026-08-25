@@ -26,7 +26,11 @@ import { lastUserText, parseSlashGoal } from "./lib/slash.js";
 import { formatGoalCard, goalToolResponse, isUnfinished } from "./lib/status.js";
 import { COLLAB_TOOL_NAMES, createCollabStore } from "./lib/collab.js";
 import { createDecisionStore } from "./lib/decisions.js";
-import { createFindingStore } from "./lib/findings.js";
+import {
+  createFindingStore,
+  findingRegistrationCliMessage,
+  findingRegistrationOutcome,
+} from "./lib/findings.js";
 import { workRelatedName } from "./lib/names.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
 import {
@@ -2678,11 +2682,9 @@ Keep the plan current as steps complete or the next best action changes. When a 
         content: [
           {
             type: "text",
-            text: JSON.stringify({
-              status: "new",
-              finding_id: registered.findingId,
-              fix_item_id: registered.fixItemId,
-            }),
+            text: JSON.stringify(
+              findingRegistrationOutcome(registered.findingId, registered.fixItemId),
+            ),
           },
         ],
       };
@@ -3229,7 +3231,7 @@ Keep the plan current as steps complete or the next best action changes. When a 
         return {
           exitCode: 0,
           stdout: registered.created
-            ? `Finding ${registered.findingId} registered; fix slice ${registered.fixItemId} staffed by the scheduler.`
+            ? findingRegistrationCliMessage(registered.findingId, registered.fixItemId)
             : `Duplicate of ${registered.findingId} (${registered.status}).`,
         };
       }

@@ -16,6 +16,42 @@ interface FindingRow {
   updated_at: number;
 }
 
+export interface FindingRegistrationOutcome {
+  status: "new" | "recorded_unstaffed";
+  finding_id: string;
+  fix_item_id: string | null;
+  note?: string;
+}
+
+/**
+ * Describe a newly recorded finding without claiming the scheduler staffed a
+ * slice when the open-finding cap deliberately kept it record-only.
+ */
+export function findingRegistrationOutcome(
+  findingId: string,
+  fixItemId: string | null,
+): FindingRegistrationOutcome {
+  if (fixItemId) {
+    return { status: "new", finding_id: findingId, fix_item_id: fixItemId };
+  }
+  return {
+    status: "recorded_unstaffed",
+    finding_id: findingId,
+    fix_item_id: null,
+    note: "Finding was recorded but no fix slice was created because the open-finding cap was reached; the orchestrator must attach or mint remediation work explicitly.",
+  };
+}
+
+export function findingRegistrationCliMessage(
+  findingId: string,
+  fixItemId: string | null,
+): string {
+  if (fixItemId) {
+    return `Finding ${findingId} registered; fix slice ${fixItemId} staffed by the scheduler.`;
+  }
+  return `Finding ${findingId} recorded without a fix slice: the open-finding cap was reached; the orchestrator must attach or mint remediation work explicitly.`;
+}
+
 // The seen-set key: same file + same defect statement is the same finding,
 // however a re-sweep phrases the details. Line numbers shift between sweeps,
 // so they are stripped from the file part.
