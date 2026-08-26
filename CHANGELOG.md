@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.21.0
+
+- A slice minted by `--own-slice` now describes its own contract. The step was
+  title, file and finding id and nothing else, while the reproduction and the
+  done-check sat in the finding's evidence. Workers do see that evidence
+  through the linked-defect brief, but anyone reading the PLAN saw an
+  empty-looking row — an orchestrator reported one as "check:(none) and a
+  one-line step" and could not tell it from an unbriefed item. The step now
+  points at the evidence as the contract, and says plainly when no check
+  command was filed, because a slice without one can be closed with nothing
+  verifying it.
+- `bb ultragoal finding` says the same thing at filing time, and names the
+  command to attach a check afterwards. The filer is the only person who knows
+  what would have proved the defect gone.
+
 ## 0.20.5
 
 - `worktree-gc.sh` treats an environment as in use when ANY live thread

@@ -25,3 +25,23 @@ describe("finding registration reporting", () => {
     assert.match(message, /queued without a fix slice/);
   });
 });
+
+describe("filing warns when a slice has no gate", () => {
+  it("says nothing extra when a check was supplied", () => {
+    const msg = findingRegistrationCliMessage("fnd_1", "itm_1", true);
+    assert.match(msg, /fix slice itm_1 assigned/);
+    assert.doesNotMatch(msg, /nothing gates/);
+  });
+
+  it("tells the filer their slice can close unverified, and how to fix it", () => {
+    // A minted slice with no check can be closed with nothing proving the
+    // defect gone, and the filer is the only one who knows the command.
+    const msg = findingRegistrationCliMessage("fnd_1", "itm_1", false);
+    assert.match(msg, /nothing gates its completion/);
+    assert.match(msg, /bb ultragoal item itm_1 --check/);
+  });
+
+  it("stays quiet about checks when no slice was minted at all", () => {
+    assert.match(findingRegistrationCliMessage("fnd_1", null, false), /without a fix slice/);
+  });
+});

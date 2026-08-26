@@ -2965,9 +2965,24 @@ export default function plugin(bb: BbPluginApi) {
       // defeating the same guard the default exists to preserve.
       const evidenceFile = normalizeFindingFile(result.finding.file);
       const scope = ownSliceScope(result.finding.file, input.fixFiles);
+      // The minted step used to be title + file + finding id and nothing else,
+      // while the reproduction and done-check sat in the finding's evidence.
+      // Workers see that evidence through the linked-defect brief, but anyone
+      // reading the PLAN sees an empty-looking slice — an orchestrator reported
+      // one of these as "check:(none) and a one-line step" and could not tell
+      // it from an unbriefed item. Point at the contract, and when no check was
+      // supplied say so, because nothing then gates the slice's completion.
       const dedicated = items.add(
         rootThreadId,
-        `Fix: ${result.finding.title} [${evidenceFile}] CONTEXT (audit findings: ${result.finding.id})`,
+        [
+          `Fix: ${result.finding.title} [${evidenceFile}] CONTEXT (audit findings: ${result.finding.id}).`,
+          `The reproduction and the done-check are in that finding's evidence — read it before you start; this step is a label, not the contract.`,
+          input.check
+            ? ""
+            : `NO CHECK COMMAND was filed with this defect, so nothing automatically gates completion: state in your report exactly how you verified the fix, and name the command you ran.`,
+        ]
+          .filter(Boolean)
+          .join(" "),
         "pending",
         { deps: [], files: scope, check: input.check ?? null },
       );
@@ -3968,7 +3983,7 @@ export default function plugin(bb: BbPluginApi) {
         return {
           exitCode: 0,
           stdout: registered.created
-            ? findingRegistrationCliMessage(registered.findingId, registered.fixItemId)
+            ? findingRegistrationCliMessage(registered.findingId, registered.fixItemId, Boolean(check))
             : `Duplicate of ${registered.findingId} (${registered.status}).`,
         };
       }

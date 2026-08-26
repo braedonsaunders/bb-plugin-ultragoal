@@ -52,9 +52,17 @@ export function findingRegistrationOutcome(
 export function findingRegistrationCliMessage(
   findingId: string,
   fixItemId: string | null,
+  /** Whether the filer supplied a command that can gate the slice's closure. */
+  hasCheck = true,
 ): string {
   if (fixItemId) {
-    return `Finding ${findingId} registered; fix slice ${fixItemId} assigned by the scheduler.`;
+    // Say it at filing time. A slice minted without a check can be closed with
+    // nothing verifying it, and the filer is the only one who knows what
+    // command would have proved the defect gone.
+    const gate = hasCheck
+      ? ""
+      : ` No --check was supplied, so nothing gates its completion; re-file the command with 'bb ultragoal item ${fixItemId} --check "<cmd>"' if one exists.`;
+    return `Finding ${findingId} registered; fix slice ${fixItemId} assigned by the scheduler.${gate}`;
   }
   return `Finding ${findingId} queued without a fix slice: remediation capacity is full; UltraGoal will assign it automatically.`;
 }
