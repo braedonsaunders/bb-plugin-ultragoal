@@ -216,6 +216,43 @@ describe("durable finding remediation queue", () => {
     assert.equal(restartedItems.list("thr_root").length, 1);
   });
 
+  it("does not preserve a later defect merely because it shares a generated baseline file", () => {
+    const state = stores();
+    const item = state.items.add(
+      "thr_root",
+      "Repair tax-rate persistence exposed by the generated baseline",
+      "pending",
+      { files: ["schema/migrations/generated/0001_baseline.sql"] },
+    )!;
+    const primary = state.findings.report("thr_root", {
+      title: "Tax-rate baseline defect",
+      file: "schema/migrations/generated/0001_baseline.sql:1200",
+      evidence: "The primary creator may retain its historical baseline evidence.",
+      fixFiles: ["schema/migrations/generated/0001_baseline.sql"],
+    }).finding;
+    const unrelated = state.findings.report("thr_root", {
+      title: "Tenant foreign-key graph defect",
+      file: "schema/migrations/generated/0001_baseline.sql:30655",
+      evidence: "A different line in a monolithic artifact is not shared domain ownership.",
+      fixFiles: ["schema/migrations/generated/0001_baseline.sql"],
+    }).finding;
+    state.db.prepare("UPDATE goal_findings SET created_at = ? WHERE id = ?").run(1, primary.id);
+    state.db.prepare("UPDATE goal_findings SET created_at = ? WHERE id = ?").run(2, unrelated.id);
+    assert.equal(state.findings.linkItem("thr_root", primary.id, item.id), true);
+    assert.equal(state.findings.linkItem("thr_root", unrelated.id, item.id), true);
+
+    const repaired = reconcileFindingQueue({
+      threadId: "thr_root",
+      findings: createFindingStore(state.host.bb),
+      items: createItemStore(state.host.bb),
+      maxStaffed: 1,
+    });
+    assert.equal(repaired.requeuedInvalid, 1);
+    assert.equal(state.findings.get("thr_root", primary.id)!.itemId, item.id);
+    assert.equal(state.findings.get("thr_root", unrelated.id)!.itemId, null);
+    assert.equal(repaired.awaitingAssignment, 1);
+  });
+
   it("detaches invalid later links before completion, then backfills them oldest-first", () => {
     const state = stores();
     const item = state.items.add(
@@ -313,6 +350,64 @@ describe("durable finding remediation queue", () => {
     assert.equal(restartedFindings.get("thr_root", primary.id)!.status, "fixed");
     assert.equal(restartedFindings.get("thr_root", stale.id)!.status, "open");
     assert.equal(restartedFindings.get("thr_root", stale.id)!.itemId, null);
+  });
+
+  it("requeues open findings on completed work when no structured proof survives", () => {
+    const state = stores();
+    const item = state.items.add(
+      "thr_root",
+      "Repair the completed domain work",
+      "completed",
+      { files: ["src/domain.ts"] },
+    )!;
+    const finding = state.findings.report("thr_root", {
+      title: "Domain defect still needs proof",
+      file: "src/domain.ts:10",
+      evidence: "The open row survived a restart after item completion.",
+      fixFiles: ["src/domain.ts"],
+    }).finding;
+    assert.equal(state.findings.linkItem("thr_root", finding.id, item.id), true);
+
+    const repaired = reconcileFindingQueue({
+      threadId: "thr_root",
+      findings: state.findings,
+      items: state.items,
+      maxStaffed: 1,
+    });
+    assert.equal(repaired.autoFixed, 0);
+    assert.equal(repaired.requeuedCompleted, 1);
+    assert.equal(state.findings.get("thr_root", finding.id)!.status, "open");
+    assert.notEqual(state.findings.get("thr_root", finding.id)!.itemId, item.id);
+  });
+
+  it("recovers closure only from persisted exact per-defect affirmative proof", () => {
+    const state = stores();
+    const item = state.items.add(
+      "thr_root",
+      "Repair the proven completed domain work",
+      "completed",
+      { files: ["src/proven.ts"] },
+    )!;
+    const finding = state.findings.report("thr_root", {
+      title: "Proven defect",
+      file: "src/proven.ts:20",
+      evidence: "The implementation and regression test already landed.",
+      fixFiles: ["src/proven.ts"],
+    }).finding;
+    assert.equal(state.findings.linkItem("thr_root", finding.id, item.id), true);
+
+    const repaired = reconcileFindingQueue({
+      threadId: "thr_root",
+      findings: state.findings,
+      items: state.items,
+      maxStaffed: 1,
+      completionEvidence: () => [
+        { findingId: finding.id, proof: "commit abc123; npm test -- proven passed" },
+      ],
+    });
+    assert.equal(repaired.autoFixed, 1);
+    assert.equal(repaired.requeuedCompleted, 0);
+    assert.equal(state.findings.get("thr_root", finding.id)!.status, "fixed");
   });
 
   it("preserves later links named by #42+#43 and #57+#58 CONTEXT clauses", () => {

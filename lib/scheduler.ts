@@ -29,6 +29,7 @@ const SHARED_INFRASTRUCTURE_FILES: ReadonlySet<string> = new Set([
   "yarn.lock",
   "schema/canonical-baseline.test.ts",
 ]);
+const GENERATED_MIGRATION_ARTIFACT = /(?:^|\/)migrations\/generated(?:\/|$)/;
 
 export function isConcreteFindingFile(path: string): boolean {
   path = normalizeFindingFile(path);
@@ -37,6 +38,10 @@ export function isConcreteFindingFile(path: string): boolean {
   // actual wildcard syntax remains non-concrete.
   if (!path || /[*?{}]/.test(path)) return false;
   if (SHARED_INFRASTRUCTURE_FILES.has(path)) return false;
+  // Generated migration output is a shared build artifact, not a semantic
+  // domain owner. Exact line-stripped equality on a monolithic baseline would
+  // otherwise merge unrelated defects from tens of thousands of SQL lines.
+  if (GENERATED_MIGRATION_ARTIFACT.test(path)) return false;
   const leaf = path.split("/").at(-1) ?? "";
   return leaf.includes(".");
 }

@@ -146,6 +146,26 @@ describe("findingAction", () => {
     assert.deepEqual(result, { action: "mint" });
   });
 
+  it("does not coalesce distinct lines in a monolithic generated baseline", () => {
+    const result = findingAction({
+      findingId: "fnd_tenant_fk",
+      file: "schema/migrations/generated/0001_baseline.sql:30655",
+      fixFiles: ["schema/migrations/generated/0001_baseline.sql"],
+      staffedRemediationCount: 3,
+      maxStaffedRemediations: 50,
+      openItems: [
+        {
+          id: "itm_tax_rate",
+          step:
+            "Repair tax-rate persistence [schema/migrations/generated/0001_baseline.sql:1200]",
+          status: "in_progress" as const,
+          files: ["schema/migrations/generated/0001_baseline.sql"],
+        },
+      ],
+    });
+    assert.deepEqual(result, { action: "mint" });
+  });
+
   it("attaches when fix scope shares a concrete domain file", () => {
     const result = findingAction({
       findingId: "fnd_recurring",
@@ -276,6 +296,17 @@ describe("findingFilesMatchItem", () => {
         "schema/src/pricing.ts",
         [],
         { step: "Repair schema/src/segments.ts", files: ["schema/src/segments.ts"] },
+      ),
+      false,
+    );
+    assert.equal(
+      findingFilesMatchItem(
+        "schema/migrations/generated/0001_baseline.sql:29912",
+        ["schema/migrations/generated/0001_baseline.sql"],
+        {
+          step: "Repair another baseline line in schema/migrations/generated/0001_baseline.sql",
+          files: ["schema/migrations/generated/0001_baseline.sql"],
+        },
       ),
       false,
     );

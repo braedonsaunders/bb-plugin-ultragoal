@@ -1,6 +1,10 @@
 import type { FindingStore } from "./findings.js";
 import { currentSliceTitle, type ItemStore } from "./items.js";
 import { findingAction, findingMatchesItem, normalizeFindingFile } from "./scheduler.js";
+import {
+  missingLinkedDefectEvidenceIds,
+  type FindingAffirmativeEvidence,
+} from "./finding-brief.js";
 
 export interface FindingQueueResult {
   linked: number;
@@ -8,6 +12,7 @@ export interface FindingQueueResult {
   autoFixed: number;
   requeuedMissing: number;
   requeuedInvalid: number;
+  requeuedCompleted: number;
   healedDuplicates: number;
   remediationWorkItems: number;
   awaitingAssignment: number;
@@ -169,6 +174,9 @@ export function reconcileFindingQueue(input: {
   findings: FindingStore;
   items: ItemStore;
   maxStaffed: number;
+  /** Persisted worker/verifier proof from a prior completion. Legacy prose is
+   * deliberately represented as no evidence. */
+  completionEvidence?: (itemId: string) => readonly FindingAffirmativeEvidence[];
 }): FindingQueueResult {
   const { threadId, findings, items } = input;
   const maxStaffed = Math.max(0, input.maxStaffed);
@@ -181,23 +189,33 @@ export function reconcileFindingQueue(input: {
   const detached = detachStaleFindingLinks({ threadId, findings, items });
   const requeuedMissing = detached.requeuedMissing;
   const requeuedInvalid = detached.requeuedInvalid;
+  let requeuedCompleted = 0;
 
-  // Restart repair: after every stale link is detached, a linked completed
-  // work item can safely close only its concretely owned findings.
-  const completedItemIds = new Set(
-    findings.remediationQueue(threadId).flatMap((finding) => {
-      if (!finding.itemId) return [];
-      return itemById.get(finding.itemId)?.status === "completed" ? [finding.itemId] : [];
-    }),
-  );
-  for (const itemId of completedItemIds) {
-    autoFixed += closeFindingsForCompletedItem({
-      threadId,
-      itemId,
-      note: "Recovered completed remediation during finding-queue reconciliation.",
-      findings,
-      items,
-    }).fixed;
+  // Restart repair never manufactures a generic success note. A completed
+  // item may close surviving open links only from a persisted structured
+  // claim that affirmatively proves every currently linked finding. Otherwise
+  // those findings return to the oldest-first queue for real remediation.
+  const completedGroups = new Map<string, ReturnType<FindingStore["remediationQueue"]>>();
+  for (const finding of findings.remediationQueue(threadId)) {
+    if (!finding.itemId || itemById.get(finding.itemId)?.status !== "completed") continue;
+    const group = completedGroups.get(finding.itemId) ?? [];
+    group.push(finding);
+    completedGroups.set(finding.itemId, group);
+  }
+  for (const [itemId, group] of completedGroups) {
+    const evidence = input.completionEvidence?.(itemId) ?? [];
+    if (missingLinkedDefectEvidenceIds(evidence, group).length === 0) {
+      autoFixed += findings.markFixedByItem(
+        threadId,
+        itemId,
+        "Recovered from persisted structured per-defect completion evidence.",
+      );
+    } else {
+      requeuedCompleted += findings.unlinkItems(
+        threadId,
+        group.map((finding) => finding.id),
+      );
+    }
   }
 
   let queue = findings.remediationQueue(threadId);
@@ -258,6 +276,7 @@ export function reconcileFindingQueue(input: {
     autoFixed,
     requeuedMissing,
     requeuedInvalid,
+    requeuedCompleted,
     healedDuplicates,
     remediationWorkItems: new Set(
       queue.flatMap((finding) => (finding.itemId ? [finding.itemId] : [])),

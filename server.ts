@@ -29,7 +29,15 @@ import {
   createFindingStore,
   findingRegistrationCliMessage,
   findingRegistrationOutcome,
+  type RemediationFinding,
 } from "./lib/findings.js";
+import {
+  formatLinkedDefectBrief,
+  missingLinkedDefectEvidenceIds,
+  parseVerifierFindingEvidence,
+  parseVerifierVerdict,
+  type FindingAffirmativeEvidence,
+} from "./lib/finding-brief.js";
 import { workRelatedName } from "./lib/names.js";
 import { createItemStore, type ItemStore } from "./lib/items.js";
 import {
@@ -54,6 +62,7 @@ import {
 } from "./lib/scheduler.js";
 import {
   closeFindingsForCompletedItem,
+  detachStaleFindingLinks,
   reconcileFindingQueue,
 } from "./lib/finding-queue.js";
 import { createRootTransferStore, executeRootTransfer } from "./lib/root-transfer.js";
@@ -283,6 +292,13 @@ export default function plugin(bb: BbPluginApi) {
   const running = new Map<string, boolean>();
   let publishFresh: (threadId: string) => Promise<void> = async () => {};
   let workersOnItem = (_rootThreadId: string, _itemId: string): string[] => [];
+  let itemClaimants = (_rootThreadId: string, _itemId: string): string[] => [];
+  const linkedOpenFindings = (rootThreadId: string, itemId: string): RemediationFinding[] =>
+    findings
+      .remediationQueue(rootThreadId)
+      .filter((finding) => finding.itemId === itemId);
+  const linkedDefectBrief = (rootThreadId: string, itemId: string): string =>
+    formatLinkedDefectBrief(linkedOpenFindings(rootThreadId, itemId));
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
       void publishFresh(rootThreadId);
@@ -303,7 +319,7 @@ export default function plugin(bb: BbPluginApi) {
         ? items.list(rootThreadId).find((item) => item.id === itemId)
         : undefined;
       if (preferred && preferred.status !== "completed") {
-        const occupants = workersOnItem(rootThreadId, preferred.id);
+        const occupants = itemClaimants(rootThreadId, preferred.id);
         const free =
           occupants.length === 0 ||
           (Boolean(workerThreadId) && occupants.every((id) => id === workerThreadId));
@@ -343,7 +359,7 @@ export default function plugin(bb: BbPluginApi) {
             item.step.toLowerCase().replace(/\s+/g, " ").trim() === normalized &&
             (source === "prompt"
               ? !liveHolders.has(item.id)
-              : workersOnItem(rootThreadId, item.id).length === 0),
+              : itemClaimants(rootThreadId, item.id).length === 0),
         );
       if (match) {
         items.setStatus(rootThreadId, match.id, "in_progress");
@@ -372,10 +388,28 @@ export default function plugin(bb: BbPluginApi) {
     itemBrief(rootThreadId, itemId) {
       const item = items.list(rootThreadId).find((entry) => entry.id === itemId);
       if (!item) return null;
-      return { files: item.files, check: item.check };
+      return {
+        files: item.files,
+        check: item.check,
+        linkedDefects: linkedDefectBrief(rootThreadId, itemId),
+      };
+    },
+    onRejectedChild(rootThreadId, childThreadId, itemId) {
+      if (itemId) {
+        const otherClaimants = itemClaimants(rootThreadId, itemId).filter(
+          (claimant) => claimant !== childThreadId,
+        );
+        const item = items.list(rootThreadId).find((entry) => entry.id === itemId);
+        if (otherClaimants.length === 0 && item?.status === "in_progress") {
+          items.setStatus(rootThreadId, itemId, "pending");
+        }
+      }
+      markGoalEvent(rootThreadId);
+      void publishFresh(rootThreadId);
     },
   });
   workersOnItem = (rootThreadId, itemId) => collab.workersOnItem(rootThreadId, itemId);
+  itemClaimants = (rootThreadId, itemId) => collab.claimantsOnItem(rootThreadId, itemId);
 
   function transferLocked(threadId: string): boolean {
     const rootThreadId = collab.rowOf(threadId)?.root_thread_id ?? threadId;
@@ -700,6 +734,32 @@ export default function plugin(bb: BbPluginApi) {
     return lines.join("\n\n");
   }
 
+  /** A plugin reload starts with an empty in-memory cache while durable
+   * collaboration rows and their BB threads remain alive. Scheduling must
+   * rebuild that ownership view before it calculates slots or decides an
+   * in-progress item was abandoned. */
+  async function hydrateSchedulerOwnership(rootThreadId: string): Promise<boolean> {
+    if (agentCache.has(rootThreadId)) return true;
+    try {
+      const listed = await collab.listForRoot(rootThreadId, {
+        discover: true,
+        refreshLimit: 24,
+        refreshHolders: true,
+      });
+      const assigned = assignLiveAgents(rootThreadId, listed);
+      applyDeclaredWorkers(rootThreadId, assigned);
+      agentCache.set(rootThreadId, assigned);
+      return true;
+    } catch (error) {
+      bb.log.warn(
+        `Scheduler ownership hydration failed on ${rootThreadId}; staffing held closed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+  }
+
   async function scheduleReady(rootThreadId: string): Promise<void> {
     if (transferLocked(rootThreadId)) return;
     const goal = store.get(rootThreadId);
@@ -713,6 +773,8 @@ export default function plugin(bb: BbPluginApi) {
     scheduling.add(rootThreadId);
     try {
       const maxWorkers = view(goal).settings.maxWorkers;
+      if (!collab.setWorkerCap(rootThreadId, maxWorkers)) return;
+      if (!(await hydrateSchedulerOwnership(rootThreadId))) return;
       if (maxWorkers <= 0) return;
       const agents = agentCache.get(rootThreadId) ?? [];
       const list = items.list(rootThreadId);
@@ -758,21 +820,23 @@ export default function plugin(bb: BbPluginApi) {
         const holders = agents.filter(
           (agent) => agent.role !== "verifier" && agent.itemId === item.id,
         );
+        const durableHolderIds = collab.workersOnItem(rootThreadId, item.id);
         let restaffed = false;
         if (item.status === "pending") {
           // Any prior worker row means this slice was staffed before; its
           // completion/reconcile path owns it, not fresh staffing.
-          if (holders.length > 0 || collab.workersOnItem(rootThreadId, item.id).length > 0) {
+          if (holders.length > 0 || durableHolderIds.length > 0) {
             continue;
           }
         } else {
-          // in_progress with no live holder. An idle/completed holder likely
-          // reported (harvest/reconcile closes it) or is being stall-nudged;
-          // only husks (error/stopped/unknown) or no holder at all mean the
-          // worker is truly gone.
-          if (holders.some((agent) => agent.status === "idle" || agent.status === "completed")) {
+          // Only a holder observed explicitly error/stopped is dead. Unknown
+          // after a transient host lookup, idle, and completed-but-unharvested
+          // are all ownership states that must survive a plugin reload.
+          if (holders.some((agent) => agent.status !== "error" && agent.status !== "stopped")) {
             continue;
           }
+          const observedHolderIds = new Set(holders.map((holder) => holder.threadId));
+          if (durableHolderIds.some((threadId) => !observedHolderIds.has(threadId))) continue;
           // A step that declares a live thread ("— thr_x running") IS held —
           // the declared owner just claimed a different item id from its
           // spawn prompt. Never double-staff a declared live owner.
@@ -802,6 +866,7 @@ export default function plugin(bb: BbPluginApi) {
           result = await collab.spawnWorker({
             parentThreadId: rootThreadId,
             itemId: item.id,
+            maxWorkers,
             displayName: workRelatedName(
               item.step,
               agents.map((agent) => agent.nickname),
@@ -820,6 +885,18 @@ export default function plugin(bb: BbPluginApi) {
             items.setStatus(rootThreadId, item.id, "pending");
           }
         } else {
+          const spawnedRow = collab.rowOf(result.threadId);
+          if (result.itemId !== item.id || spawnedRow?.item_id !== item.id) {
+            collab.forget(result.threadId);
+            void releaseWorkerRuntime(result.threadId);
+            bb.log.warn(
+              `Scheduler rejected worker ${result.threadId}: intended ${item.id}, returned ${
+                result.itemId ?? "no item"
+              }, persisted ${spawnedRow?.item_id ?? "no item"}`,
+            );
+            if (item.status === "pending") items.setStatus(rootThreadId, item.id, "pending");
+            continue;
+          }
           slots -= 1;
           staffed = true;
           markGoalEvent(rootThreadId);
@@ -1100,6 +1177,9 @@ export default function plugin(bb: BbPluginApi) {
         }
         collab.bumpNudge(agent.threadId);
         try {
+          const defectBrief = agent.itemId
+            ? linkedDefectBrief(rootThreadId, agent.itemId)
+            : "";
           await bb.sdk.threads.send({
             threadId: agent.threadId,
             mode: "auto",
@@ -1107,7 +1187,10 @@ export default function plugin(bb: BbPluginApi) {
             input: [
               {
                 type: "text",
-                text: "Your turn ended but your slice is still open and you have not reported. Resume and finish the slice now. When it is fully done, call the slice_done tool with evidence (commit SHAs + passing check output) and end your turn. If you cannot finish, call slice_blocked with the specific blocker.",
+                text: [
+                  "Your turn ended but your slice is still open and you have not reported. Resume and finish the slice now. When it is fully done, call the slice_done tool with evidence (commit SHAs + passing check output) and end your turn. If you cannot finish, call slice_blocked with the specific blocker.",
+                  defectBrief,
+                ].filter(Boolean).join("\n\n"),
                 mentions: [],
               },
             ],
@@ -1226,7 +1309,10 @@ export default function plugin(bb: BbPluginApi) {
     try {
       const snap = await viewFresh(store.get(threadId) ?? goal);
       for (const agent of snap.agents.filter((row) => row.role === "worker")) {
-        if (agent.status !== "error" && agent.status !== "unknown") continue;
+        // Unknown is not proof of death: immediately after reload a transient
+        // threads.get failure used to retire active durable owners and open a
+        // duplicate scheduler slot. Only explicit terminal host states retire.
+        if (agent.status !== "error" && agent.status !== "stopped") continue;
         collab.forget(agent.threadId);
         bb.log.info(`Dropped errored Goal worker ${agent.nickname} (${agent.threadId}) on ${threadId}`);
         try {
@@ -1268,11 +1354,42 @@ export default function plugin(bb: BbPluginApi) {
     return result.fixed;
   }
 
+  /** Apply the same stale-link rule as startup before checking a completion
+   * report, then require explicit evidence coverage for every valid linked
+   * defect. This makes a coalesced work item an honest implementation unit,
+   * not a way to hide later findings behind its title. */
+  function missingCompletionFindingIds(
+    rootThreadId: string,
+    itemId: string,
+    findingEvidence: readonly FindingAffirmativeEvidence[] | null | undefined,
+  ): string[] {
+    const detached = detachStaleFindingLinks({
+      threadId: rootThreadId,
+      itemId,
+      findings,
+      items,
+    });
+    if (detached.requeuedInvalid > 0 || detached.requeuedMissing > 0) {
+      bb.log.warn(
+        `Evidence guard on ${itemId}: detached ${detached.requeuedInvalid} invalid and ${detached.requeuedMissing} missing-item defect link(s)`,
+      );
+      reconcileFindingBacklog(rootThreadId);
+    }
+    return missingLinkedDefectEvidenceIds(
+      findingEvidence,
+      linkedOpenFindings(rootThreadId, itemId),
+    );
+  }
+
   function completeItemFor(
     rootThreadId: string,
     itemId: string | null,
     report: string | null | undefined,
-    options?: { requirePass?: boolean; recordedClaim?: "done" | "blocked" | null },
+    options?: {
+      requirePass?: boolean;
+      recordedClaim?: "done" | "blocked" | null;
+      findingEvidence?: readonly FindingAffirmativeEvidence[];
+    },
   ): boolean {
     if (!itemId) return false;
     const goal = store.get(rootThreadId);
@@ -1286,7 +1403,7 @@ export default function plugin(bb: BbPluginApi) {
       return false;
     }
     if (options?.requirePass) {
-      if (!/\bVERIFY_PASS\b/i.test(report ?? "")) return false;
+      if (parseVerifierVerdict(report) !== "pass") return false;
     } else {
       if (view(goal).settings.verifyEnabled) return false;
       // The recorded tool claim decides; the text sentinel remains only as a
@@ -1299,6 +1416,20 @@ export default function plugin(bb: BbPluginApi) {
       .list(rootThreadId)
       .find((row) => row.id === itemId && row.status === "in_progress");
     if (!item) return false;
+    const findingEvidence = options?.requirePass
+      ? parseVerifierFindingEvidence(report)
+      : options?.findingEvidence ?? [];
+    const missingFindingIds = missingCompletionFindingIds(
+      rootThreadId,
+      itemId,
+      findingEvidence,
+    );
+    if (missingFindingIds.length > 0) {
+      bb.log.warn(
+        `Rejected completion of ${itemId} on ${rootThreadId}: report omitted linked defect evidence for ${missingFindingIds.join(", ")}`,
+      );
+      return false;
+    }
     items.setStatus(rootThreadId, itemId, "completed");
     markGoalEvent(rootThreadId);
     const closed = closeItemFindings(rootThreadId, itemId, (report ?? "").trim().slice(-400));
@@ -1334,6 +1465,7 @@ export default function plugin(bb: BbPluginApi) {
         if (
           completeItemFor(rootThreadId, agent.itemId, claim?.evidence ?? output, {
             recordedClaim: claim?.status ?? null,
+            findingEvidence: claim?.findingEvidence ?? [],
           })
         ) {
           queueIntegration(rootThreadId, agent.threadId, agent.itemId);
@@ -1386,6 +1518,7 @@ export default function plugin(bb: BbPluginApi) {
       const item = row.item_id
         ? items.list(row.root_thread_id).find((entry) => entry.id === row.item_id)
         : null;
+      const defectBrief = row.item_id ? linkedDefectBrief(row.root_thread_id, row.item_id) : "";
       const spawned = await collab.spawnVerifier({
         rootThreadId: row.root_thread_id,
         sourceThreadId: workerThreadId,
@@ -1400,8 +1533,12 @@ export default function plugin(bb: BbPluginApi) {
           `Parent objective: ${goal.objective}`,
           item ? `Assigned slice: ${item.step}` : "Assigned slice: (not linked to a plan item)",
           `Worker call sign: ${row.display_name || row.task_name}`,
+          defectBrief,
           "The worker's report follows. Do not trust it. Inspect the current worktree.",
           output.slice(0, 8000),
+          defectBrief
+            ? 'Before the verdict, emit one exact JSON line per linked defect: DEFECT_COVERAGE: {"finding_id":"fnd_...","status":"pass","proof":"what you checked"}. Prose mentions, missing IDs, empty proof, and non-pass status cannot pass.'
+            : "",
           "End with exactly one line: VERIFY_PASS: <sentence> or VERIFY_FAIL: <what is still wrong>.",
         ].join("\n\n"),
       });
@@ -1536,6 +1673,7 @@ export default function plugin(bb: BbPluginApi) {
     const result = await collab.spawnWorker({
       parentThreadId: rootThreadId,
       itemId: null,
+      maxWorkers: view(goal).settings.maxWorkers,
       skipClaim: true,
       // Fixed name: the slug must start with intake_ so idle cleanup matches.
       displayName: "Intake Courier",
@@ -2146,6 +2284,16 @@ export default function plugin(bb: BbPluginApi) {
       return { goal: goal ? view(goal) : null };
     },
     async setItemStatus({ threadId, itemId, status }) {
+      if (
+        status === "completed" &&
+        missingCompletionFindingIds(threadId, itemId, []).length > 0
+      ) {
+        bb.log.warn(
+          `Pane completion of remediation item ${itemId} was rejected: linked defects require per-id evidence from slice_done or verification.`,
+        );
+        const goal = store.get(threadId);
+        return { goal: goal ? await viewFresh(goal) : null };
+      }
       items.setStatus(threadId, itemId, status);
       if (status === "completed") {
         closeItemFindings(threadId, itemId, "Marked completed from the pane.");
@@ -2388,12 +2536,50 @@ export default function plugin(bb: BbPluginApi) {
       const before = items.list(rootThreadId);
       const beforeById = new Map(before.map((item) => [item.id, item]));
       const removals = [...new Set((remove_item_ids ?? []).map((id) => id.trim()).filter(Boolean))];
+      const suppliedIds = plan.flatMap((patch) => patch.id?.trim() ? [patch.id.trim()] : []);
+      const unknownIds = [...new Set([...removals, ...suppliedIds].filter((id) => !beforeById.has(id)))];
+      if (unknownIds.length > 0) {
+        return {
+          content: [{ type: "text", text: `unknown work item id(s): ${unknownIds.join(", ")}` }],
+          isError: true,
+        };
+      }
       const active = removals.filter((id) => {
         const item = beforeById.get(id);
         return item?.status === "in_progress" || workersOnItem(rootThreadId, id).length > 0;
       });
       if (active.length > 0) {
         return { content: [{ type: "text", text: `cannot remove active work item(s): ${active.join(", ")}` }], isError: true };
+      }
+      // Repair stale legacy coalescing before deciding whether a completion
+      // lacks evidence. Otherwise an invalid generated-migration attachment
+      // can permanently block the very patch that should close its item.
+      let repairedLinks = 0;
+      for (const patch of plan) {
+        if (!patch.id || patch.status !== "completed") continue;
+        if (beforeById.get(patch.id)?.status === "completed") continue;
+        const detached = detachStaleFindingLinks({
+          threadId: rootThreadId,
+          itemId: patch.id,
+          findings,
+          items,
+        });
+        repairedLinks += detached.requeuedInvalid + detached.requeuedMissing;
+      }
+      if (repairedLinks > 0) reconcileFindingBacklog(rootThreadId);
+      const uncoveredRemediation = plan.flatMap((patch) => {
+        if (!patch.id || patch.status !== "completed") return [];
+        if (beforeById.get(patch.id)?.status === "completed") return [];
+        return linkedOpenFindings(rootThreadId, patch.id).map((finding) => finding.id);
+      });
+      if (uncoveredRemediation.length > 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `cannot mark remediation work complete through ultragoal_patch without per-defect evidence: ${uncoveredRemediation.join(", ")}. Use slice_done/verification or resolve each defect with evidence.`,
+          }],
+          isError: true,
+        };
       }
       try {
         const patched = items.patch(rootThreadId, plan, removals);
@@ -2472,6 +2658,9 @@ export default function plugin(bb: BbPluginApi) {
         findings,
         items,
         maxStaffed: view(goal).settings.maxOpenFindings,
+        completionEvidence: (itemId) => collab.findingEvidenceForItem(rootThreadId, itemId, {
+          verifierOnly: view(goal).settings.verifyEnabled,
+        }),
       });
       const changed =
         result.linked +
@@ -2479,10 +2668,11 @@ export default function plugin(bb: BbPluginApi) {
         result.autoFixed +
         result.healedDuplicates +
         result.requeuedMissing +
-        result.requeuedInvalid;
+        result.requeuedInvalid +
+        result.requeuedCompleted;
       if (changed === 0) return;
       bb.log.info(
-        `Finding queue on ${rootThreadId}: ${result.minted} minted, ${result.linked} attached, ${result.healedDuplicates} duplicate singleton(s) healed, ${result.autoFixed} recovered fixed, ${result.requeuedMissing} requeued missing, ${result.requeuedInvalid} requeued invalid; ${result.remediationWorkItems} remediation work item(s), ${result.awaitingAssignment} awaiting assignment`,
+        `Finding queue on ${rootThreadId}: ${result.minted} minted, ${result.linked} attached, ${result.healedDuplicates} duplicate singleton(s) healed, ${result.autoFixed} recovered from structured evidence, ${result.requeuedMissing} requeued missing, ${result.requeuedInvalid} requeued invalid, ${result.requeuedCompleted} requeued from unproven completed work; ${result.remediationWorkItems} remediation work item(s), ${result.awaitingAssignment} awaiting assignment`,
       );
       markGoalEvent(rootThreadId);
       void publishFresh(rootThreadId);
@@ -2569,15 +2759,21 @@ export default function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "slice_done",
     description:
-      "Formally report your assigned slice complete. Pass evidence: the commit SHA(s) and your check's passing output/summary - a bare claim is rejected. Then END YOUR TURN: the slice closes (or independent verification starts) when your turn ends. This tool call is the only completion signal; prose claims do nothing.",
+      "Formally report your assigned slice complete. Pass general evidence plus one structured finding_evidence entry (exact finding_id and nonempty affirmative proof) for every linked defect. Prose mentions never count. Then END YOUR TURN: the slice closes or verification starts when your turn ends.",
     experimental_statusLabels: { pending: "Reporting slice done", completed: "Slice reported done" },
     parameters: z.object({
       evidence: z
         .string()
         .min(10)
         .describe("Commit SHA(s) plus the passing check command and its output/summary."),
-    }),
-    async execute({ evidence }, { threadId }) {
+      finding_evidence: z.array(z.object({
+        finding_id: z.string().regex(/^fnd_[a-z0-9_]+$/i),
+        proof: z.string().trim().min(1),
+      }).strict()).max(5_000).default([]).describe(
+        "One affirmative proof record per linked defect. Exact IDs only; omissions, prefix matches, and prose mentions are rejected.",
+      ),
+    }).strict(),
+    async execute({ evidence, finding_evidence }, { threadId }) {
       const row = collab.rowOf(threadId);
       if (!row || row.role === "verifier" || !row.item_id) {
         return {
@@ -2585,7 +2781,33 @@ export default function plugin(bb: BbPluginApi) {
           isError: true,
         };
       }
-      collab.setReport(threadId, "done", evidence);
+      const structuredEvidence = finding_evidence.map((entry) => ({
+        findingId: entry.finding_id,
+        proof: entry.proof,
+      }));
+      const missingFindingIds = missingCompletionFindingIds(
+        row.root_thread_id,
+        row.item_id,
+        structuredEvidence,
+      );
+      if (missingFindingIds.length > 0) {
+        const remainingBrief = formatLinkedDefectBrief(
+          linkedOpenFindings(row.root_thread_id, row.item_id).filter((finding) =>
+            missingFindingIds.includes(finding.id),
+          ),
+        );
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `slice_done rejected: finding_evidence must contain exact affirmative proof for every linked defect. Missing: ${missingFindingIds.join(", ")}`,
+              remainingBrief,
+            ].filter(Boolean).join("\n\n"),
+          }],
+          isError: true,
+        };
+      }
+      collab.setReport(threadId, "done", evidence, structuredEvidence);
       return {
         content: [
           {
@@ -2832,12 +3054,12 @@ export default function plugin(bb: BbPluginApi) {
             ? [
                 `You are an UltraGoal verifier${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
                 "Inspect the current worktree. Do not trust the worker report.",
-                "End with VERIFY_PASS or VERIFY_FAIL. Do not implement fixes.",
+                'For every linked defect, emit DEFECT_COVERAGE: {"finding_id":"fnd_...","status":"pass","proof":"what you checked"}; prose mentions never count. End with VERIFY_PASS or VERIFY_FAIL. Do not implement fixes.',
                 "Do not call ultragoal_finish, do not rewrite the parent plan, and do not take over the whole UltraGoal.",
               ].join("\n")
             : [
                 `You are an UltraGoal subagent${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
-                "Complete only the slice you were assigned. Signal completion ONLY via the slice_done tool (evidence: commit SHAs + passing check output) or slice_blocked - prose claims do nothing.",
+                "Complete only the slice you were assigned. Signal completion ONLY via slice_done with general evidence plus one structured finding_evidence {finding_id, proof} entry per linked defect, or slice_blocked. Prose claims and ID mentions do nothing.",
                 "If your slice is a hunt/audit/review, call report_finding per discrete defect the moment you confirm it — fixes are staffed automatically; do not batch findings into your final report.",
                 "Do not call ultragoal_finish, do not rewrite the parent plan, and do not take over the whole UltraGoal.",
                 "You may spawn nested helpers for your slice if it splits cleanly.",
@@ -2938,7 +3160,7 @@ export default function plugin(bb: BbPluginApi) {
         `Goal auto-resumed on ${thread.id}: root thread active again (was ${recovering.status}: ${recovering.reason ?? "no reason"})`,
       );
     }
-    void registerNewChild(thread);
+    await registerNewChild(thread);
     const existing = store.get(thread.id);
     if (existing && (existing.status === "active" || existing.status === "budget_limited")) {
       const next = store.update(thread.id, { lastAccountedAt: Date.now() });
@@ -2977,6 +3199,7 @@ export default function plugin(bb: BbPluginApi) {
         if (
           completeItemFor(parentRoot, child.item_id, claim?.evidence ?? lastAssistantText, {
             recordedClaim: claim?.status ?? null,
+            findingEvidence: claim?.findingEvidence ?? [],
           })
         ) {
           queueIntegration(parentRoot, thread.id, child.item_id);
@@ -2986,6 +3209,93 @@ export default function plugin(bb: BbPluginApi) {
         const sourceItemId = child.source_thread_id
           ? (collab.rowOf(child.source_thread_id)?.item_id ?? child.item_id)
           : child.item_id;
+        const verifierEvidence = parseVerifierFindingEvidence(lastAssistantText);
+        const verdict = parseVerifierVerdict(lastAssistantText);
+        const passClaim = verdict === "pass";
+        const missingVerifierCoverage =
+          passClaim && sourceItemId
+            ? missingCompletionFindingIds(parentRoot, sourceItemId, verifierEvidence)
+            : [];
+        const protocolFailure = verdict === null
+          ? {
+              reason:
+                "Your verifier output was rejected because its final verdict was missing, malformed, or ambiguous.",
+              brief: sourceItemId
+                ? formatLinkedDefectBrief(linkedOpenFindings(parentRoot, sourceItemId))
+                : "",
+              instruction:
+                'Reinspect the work. Emit one exact JSON line per linked defect: DEFECT_COVERAGE: {"finding_id":"fnd_...","status":"pass","proof":"what you checked"}. End with exactly one nonempty final line: VERIFY_PASS: <sentence> or VERIFY_FAIL: <what is still wrong>.',
+              log: "an invalid verdict",
+            }
+          : passClaim && missingVerifierCoverage.length > 0
+            ? {
+                reason: `Your VERIFY_PASS was rejected because it omitted structured affirmative coverage for: ${missingVerifierCoverage.join(", ")}.`,
+                brief: sourceItemId
+                  ? formatLinkedDefectBrief(
+                      linkedOpenFindings(parentRoot, sourceItemId).filter((finding) =>
+                        missingVerifierCoverage.includes(finding.id),
+                      ),
+                    )
+                  : "",
+                instruction:
+                  'Reinspect every missing defect. Emit one exact JSON line per defect: DEFECT_COVERAGE: {"finding_id":"fnd_...","status":"pass","proof":"what you checked"}. Then end with VERIFY_PASS or VERIFY_FAIL.',
+                log: `missing coverage for ${missingVerifierCoverage.join(", ")}`,
+              }
+            : null;
+        if (protocolFailure) {
+          // Protocol failures consume the same durable budget as a real failed
+          // verification. Otherwise a provider that never follows the output
+          // contract can retry forever across plugin reloads.
+          const sourceThreadId = child.source_thread_id;
+          if (sourceThreadId) collab.setVerifyHash(sourceThreadId, null);
+          const failures = sourceThreadId
+            ? collab.bumpVerifyFails(sourceThreadId)
+            : MAX_VERIFY_FAILS;
+          if (!sourceThreadId || failures >= MAX_VERIFY_FAILS) {
+            collab.forget(thread.id);
+            void releaseWorkerRuntime(thread.id);
+            markGoalEvent(parentRoot);
+            bb.log.warn(
+              `Verifier ${thread.id} exhausted ${failures}/${MAX_VERIFY_FAILS} attempts on ${parentRoot} after ${protocolFailure.log}; leaving the open slice to the orchestrator`,
+            );
+            void publishFresh(parentRoot);
+            void nudgeRoot(parentRoot);
+            return;
+          }
+          try {
+            await bb.sdk.threads.send({
+              threadId: thread.id,
+              mode: "auto",
+              permissionMode: "full",
+              input: [{
+                type: "text",
+                text: [
+                  `${protocolFailure.reason} (attempt ${failures}/${MAX_VERIFY_FAILS})`,
+                  protocolFailure.brief,
+                  protocolFailure.instruction,
+                ].filter(Boolean).join("\n\n"),
+                mentions: [],
+              }],
+            });
+            bb.log.warn(
+              `Retried verifier ${thread.id} ${failures}/${MAX_VERIFY_FAILS} on ${parentRoot} after ${protocolFailure.log}`,
+            );
+          } catch (error) {
+            collab.forget(thread.id);
+            void releaseWorkerRuntime(thread.id);
+            await maybeVerifyWorker(sourceThreadId);
+            bb.log.warn(
+              `Could not retry verifier ${thread.id}; released it for replacement: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          void publishFresh(parentRoot);
+          return;
+        }
+        if (passClaim) {
+          collab.setReport(thread.id, "done", lastAssistantText ?? "", verifierEvidence);
+        }
         const passed = completeItemFor(parentRoot, sourceItemId, lastAssistantText, {
           requirePass: true,
         });
@@ -3001,7 +3311,7 @@ export default function plugin(bb: BbPluginApi) {
         if (
           !passed &&
           child.source_thread_id &&
-          /\bVERIFY_FAIL\b/i.test(lastAssistantText ?? "")
+          verdict === "fail"
         ) {
           const fails = collab.bumpVerifyFails(child.source_thread_id);
           if (fails < MAX_VERIFY_FAILS) {

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-ultragoal",
-  "version": "0.17.14",
+  "version": "0.17.15",
   "description": "Provider-neutral durable UltraGoals for Codex, Cursor, OpenCode, Claude Code, and Pi, with scheduled workers, verification, and defect remediation.",
   "license": "MIT",
   "author": "Braedon Saunders",
@@ -55,6 +55,7 @@
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.4.8",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "better-sqlite3": "^13.0.3",

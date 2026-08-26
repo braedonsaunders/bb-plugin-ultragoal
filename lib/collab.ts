@@ -5,6 +5,8 @@ import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
 import { auditorNameFor, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
 import { workerQualityBrief } from "./prompts.js";
 import { isReasoningLevel, type ReasoningLevel, type ServiceTier } from "./execution.js";
+import { createItemReservationStore } from "./item-reservations.js";
+import type { FindingAffirmativeEvidence } from "./finding-brief.js";
 
 const MIN_WAIT_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -49,6 +51,46 @@ interface CollabRow {
   nudge_count?: number | null;
   report_status?: string | null;
   report_evidence?: string | null;
+  report_item_id?: string | null;
+}
+
+interface CollabReport {
+  status: "done" | "blocked";
+  evidence: string;
+  findingEvidence: FindingAffirmativeEvidence[];
+}
+
+function encodeReport(evidence: string, findingEvidence: readonly FindingAffirmativeEvidence[]): string {
+  return JSON.stringify({
+    version: 1,
+    evidence: evidence.trim(),
+    finding_evidence: findingEvidence.map((entry) => ({
+      finding_id: entry.findingId,
+      proof: entry.proof.trim(),
+    })),
+  });
+}
+
+function decodeReport(row: Pick<CollabRow, "report_status" | "report_evidence">): CollabReport | null {
+  if (row.report_status !== "done" && row.report_status !== "blocked") return null;
+  const stored = row.report_evidence ?? "";
+  try {
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    if (parsed.version !== 1 || typeof parsed.evidence !== "string") throw new Error("legacy");
+    const findingEvidence = Array.isArray(parsed.finding_evidence)
+      ? parsed.finding_evidence.flatMap((raw) => {
+          if (!raw || typeof raw !== "object") return [];
+          const entry = raw as Record<string, unknown>;
+          if (typeof entry.finding_id !== "string" || typeof entry.proof !== "string") return [];
+          return [{ findingId: entry.finding_id, proof: entry.proof }];
+        })
+      : [];
+    return { status: row.report_status, evidence: parsed.evidence, findingEvidence };
+  } catch {
+    // Pre-v0.17.15 claims remain readable but intentionally carry no
+    // structured per-finding proof, so they cannot close linked defects.
+    return { status: row.report_status, evidence: stored, findingEvidence: [] };
+  }
 }
 
 function nicknameOf(taskName: string, fallback?: string | null): string {
@@ -101,10 +143,17 @@ export function createCollabStore(
     itemBrief?: (
       rootThreadId: string,
       itemId: string,
-    ) => { files: string[]; check: string | null } | null;
+    ) => { files: string[]; check: string | null; linkedDefects?: string } | null;
+    /** A discovered BB child could not obtain a durable root worker slot. */
+    onRejectedChild?: (
+      rootThreadId: string,
+      childThreadId: string,
+      itemId: string | null,
+    ) => void;
   },
 ) {
   const db = bb.storage.database();
+  const reservations = createItemReservationStore(db);
   const insert = db.prepare(`
     INSERT INTO collab_agents (
       thread_id, root_thread_id, parent_thread_id, task_name, created_at, display_name, item_id,
@@ -121,6 +170,15 @@ export function createCollabStore(
         item_id = COALESCE(@item_id, item_id)
     WHERE thread_id = @thread_id
   `);
+  const tombstoneDiscovered = db.prepare(`
+    INSERT OR IGNORE INTO collab_agents (
+      thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+      display_name, item_id, role, source_thread_id, last_verify_hash, retired_at
+    ) VALUES (
+      @thread_id, @root_thread_id, @parent_thread_id, @task_name, @created_at,
+      NULL, NULL, 'worker', NULL, NULL, @retired_at
+    )
+  `);
   const byThread = db.prepare(
     "SELECT * FROM collab_agents WHERE thread_id = ? AND retired_at IS NULL",
   );
@@ -134,6 +192,12 @@ export function createCollabStore(
   const bySource = db.prepare(
     "SELECT * FROM collab_agents WHERE source_thread_id = ? AND role = 'verifier' AND retired_at IS NULL",
   );
+  const reportsByItem = db.prepare(`
+    SELECT report_status, report_evidence, role FROM collab_agents
+    WHERE root_thread_id = ? AND COALESCE(report_item_id, item_id) = ?
+      AND report_status = 'done'
+    ORDER BY created_at DESC, thread_id DESC
+  `);
   const setHash = db.prepare(
     "UPDATE collab_agents SET last_verify_hash = @last_verify_hash WHERE thread_id = @thread_id",
   );
@@ -147,19 +211,31 @@ export function createCollabStore(
     "UPDATE collab_agents SET nudge_count = 0 WHERE thread_id = ? AND COALESCE(nudge_count, 0) > 0",
   );
   const setReportStmt = db.prepare(
-    "UPDATE collab_agents SET report_status = @status, report_evidence = @evidence WHERE thread_id = @thread_id",
+    `UPDATE collab_agents
+     SET report_status = @status, report_evidence = @evidence,
+         report_item_id = COALESCE(report_item_id, item_id)
+     WHERE thread_id = @thread_id`,
   );
   // Retire, never delete: a deleted row lets discovery resurrect the dead
   // thread and re-claim its slice.
   const removeRow = db.prepare(
-    "UPDATE collab_agents SET retired_at = @retired_at, item_id = NULL WHERE thread_id = @thread_id",
+    `UPDATE collab_agents
+     SET retired_at = @retired_at,
+         report_item_id = CASE
+           WHEN report_status IS NOT NULL THEN COALESCE(report_item_id, item_id)
+           ELSE report_item_id
+         END,
+         item_id = NULL
+     WHERE thread_id = @thread_id`,
   );
 
-  function itemHasWorker(rootThreadId: string, itemId: string | null): boolean {
+  function itemHasWorker(
+    rootThreadId: string,
+    itemId: string | null,
+    exceptReservation?: string,
+  ): boolean {
     if (!itemId) return false;
-    return (byRoot.all(rootThreadId) as CollabRow[]).some(
-      (row) => row.role !== "verifier" && row.item_id === itemId,
-    );
+    return reservations.isHeld(rootThreadId, itemId, exceptReservation);
   }
 
   function rowOf(threadId: string): CollabRow | null {
@@ -360,7 +436,6 @@ export function createCollabStore(
             source_thread_id: null,
             last_verify_hash: null,
           };
-          extras.push(extra);
           try {
             insert.run({
               thread_id: extra.thread_id,
@@ -374,8 +449,43 @@ export function createCollabStore(
               source_thread_id: extra.source_thread_id,
               last_verify_hash: extra.last_verify_hash,
             });
-          } catch {
-            // Row may already exist from a concurrent spawn.
+            extras.push(extra);
+          } catch (error) {
+            // A concurrent owner may have persisted the same child between
+            // the snapshot and insert. Adopt that row instead of stopping it.
+            const persisted = byThread.get(child.id) as CollabRow | undefined;
+            if (persisted) {
+              extras.push(persisted);
+              continue;
+            }
+            // A capacity-rejected legacy spawn has already created a BB
+            // process but owns no durable row. Tombstone first so repeated
+            // discovery cannot resurrect it, then stop it and release its
+            // optimistic item claim.
+            const retired = tombstoneDiscovered.run({
+              thread_id: extra.thread_id,
+              root_thread_id: extra.root_thread_id,
+              parent_thread_id: extra.parent_thread_id,
+              task_name: extra.task_name,
+              created_at: extra.created_at,
+              retired_at: Date.now(),
+            });
+            if (retired.changes === 0) {
+              const raced = byThread.get(child.id) as CollabRow | undefined;
+              if (raced) extras.push(raced);
+              continue;
+            }
+            const prompt = await spawnPromptOf(child.id);
+            const requested = /\bitem_id=([A-Za-z0-9_]+)/.exec(prompt ?? "")?.[1] ?? null;
+            try {
+              await bb.sdk.threads.stop({ threadId: child.id });
+            } catch {
+              // The tombstone still prevents scheduler accounting/adoption.
+            }
+            hooks?.onRejectedChild?.(root, child.id, requested);
+            bb.log.warn(
+              `Stopped unowned child ${child.id} on ${root}: durable capacity admission failed (${error instanceof Error ? error.message : String(error)})`,
+            );
           }
         }
       } catch {
@@ -504,11 +614,29 @@ export function createCollabStore(
     fresh?: boolean;
     /** Do not claim or mint a plan item from the message (intake/triage helpers). */
     skipClaim?: boolean;
+    /** Scheduler-only contract: the requested durable item must be claimed
+     * exactly as supplied. Never fall through to the user-facing behavior
+     * that mints a new item when a requested one is already occupied. */
+    strictItemClaim?: boolean;
+    /** Root-wide durable worker cap for scheduler-only strict spawns. */
+    schedulerMaxWorkers?: number;
   }): Promise<
     | { threadId: string; taskName: string; nickname: string; itemId: string | null }
     | { error: string }
   > {
-    const { threadId, task_name, display_name, item_id, role, fork_turns, model, fresh, skipClaim } = args;
+    const {
+      threadId,
+      task_name,
+      display_name,
+      item_id,
+      role,
+      fork_turns,
+      model,
+      fresh,
+      skipClaim,
+      strictItemClaim,
+      schedulerMaxWorkers,
+    } = args;
     const trimmed = args.message.trim();
     if (!trimmed) return { error: "Empty message can't be sent to an agent" };
     const parent = await bb.sdk.threads.get({ threadId });
@@ -523,28 +651,57 @@ export function createCollabStore(
     // Explicit item_id, exact text match, or a fresh item — never an
     // arbitrary unassigned Next row (that repurposed unrelated slices).
     const requested = item_id?.trim() || null;
-    const itemId =
-      role === "verifier" || skipClaim
-        ? requested
-        : hooks?.claimItem?.(rootThreadId, {
-            itemId: requested,
-            message: trimmed,
-            source: "tool",
-          }) ?? requested;
-    if (itemId && itemHasWorker(rootThreadId, itemId) && role !== "verifier") {
-      return {
-        error: `Slice ${itemId} already has a worker. Spawn again so UltraGoal can open a new Now row.`,
-      };
+    if (
+      strictItemClaim &&
+      requested &&
+      role !== "verifier" &&
+      (!Number.isInteger(schedulerMaxWorkers) || (schedulerMaxWorkers ?? 0) <= 0)
+    ) {
+      return { error: "Scheduler spawn requires a positive root worker limit." };
     }
-    if (byName.get(rootId(threadId), taskName)) {
-      return { error: `An agent named ${taskName} already exists.` };
+    const reservationToken =
+      strictItemClaim && requested && role !== "verifier"
+        ? reservations.acquire(rootThreadId, requested, schedulerMaxWorkers!)
+        : null;
+    if (strictItemClaim && requested && role !== "verifier" && !reservationToken) {
+      return { error: `Scheduler item ${requested} already has a durable worker/reservation or the root worker capacity is full; refusing spawn.` };
     }
-    const brief =
-      role !== "verifier" && itemId ? hooks?.itemBrief?.(rootThreadId, itemId) ?? null : null;
+    let reservationCommitted = false;
+    try {
+      const itemId =
+        role === "verifier" || skipClaim
+          ? requested
+          : hooks?.claimItem?.(rootThreadId, {
+              itemId: requested,
+              message: trimmed,
+              workerThreadId: reservationToken ?? undefined,
+              createIfMissing: strictItemClaim ? false : undefined,
+              source: "tool",
+            }) ?? null;
+      if (strictItemClaim && requested && itemId !== requested) {
+        return {
+          error: `Scheduler requested ${requested}, but the claim resolved to ${itemId ?? "no item"}; refusing spawn.`,
+        };
+      }
+      if (
+        itemId &&
+        itemHasWorker(rootThreadId, itemId, reservationToken ?? undefined) &&
+        role !== "verifier"
+      ) {
+        return {
+          error: `Slice ${itemId} already has a worker. Spawn again so UltraGoal can open a new Now row.`,
+        };
+      }
+      if (byName.get(rootId(threadId), taskName)) {
+        return { error: `An agent named ${taskName} already exists.` };
+      }
+      const brief = itemId ? hooks?.itemBrief?.(rootThreadId, itemId) ?? null : null;
     const briefLines: string[] = [];
     if (brief?.files?.length) {
       briefLines.push(
-        `Scope: touch only files within: ${brief.files.join(", ")}. If the slice requires edits outside this scope, stop and call slice_blocked with the reason instead of expanding scope.`,
+        role === "verifier"
+          ? `Verification scope: inspect the work item and these owned files: ${brief.files.join(", ")}.`
+          : `Scope: touch only files within: ${brief.files.join(", ")}. If the slice requires edits outside this scope, stop and call slice_blocked with the reason instead of expanding scope.`,
       );
     }
     if (brief?.check) {
@@ -552,13 +709,14 @@ export function createCollabStore(
         `Done-check: \`${brief.check}\` must pass. Run it yourself and include its result in your final report.`,
       );
     }
+    if (brief?.linkedDefects) briefLines.push(brief.linkedDefects);
     const prompt = [
       trimmed,
       ...briefLines,
       `The new agent's canonical task name is ${taskName}.`,
       `Your call sign is ${displayName}.`,
       role === "verifier"
-        ? "You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. Do not implement fixes. Fail work that ships stubs/placeholders/TODO behavior, weakens or skips tests to get green, leaves dead or duplicated code behind, or touches files unrelated to its slice."
+        ? 'You are an UltraGoal verifier. Inspect the worktree and report VERIFY_PASS or VERIFY_FAIL. For every linked defect emit one exact line: DEFECT_COVERAGE: {"finding_id":"fnd_...","status":"pass","proof":"what you checked"}. Prose mentions do not count. Do not implement fixes. Fail work that ships stubs/placeholders/TODO behavior, weakens or skips tests to get green, leaves dead or duplicated code behind, or touches files unrelated to its slice.'
         : "You are an UltraGoal subagent for this assigned slice only. Do the work and report evidence.",
       "Do not call ultragoal_finish, do not manage the parent UltraGoal plan, and do not re-orchestrate the whole objective.",
       role === "verifier" ? "" : workerQualityBrief(),
@@ -567,7 +725,7 @@ export function createCollabStore(
         : "If your slice is a hunt/audit/review that uncovers discrete defects, call report_finding the moment you confirm each one (one call per defect; do not batch them into your final report) — a fix slice is staffed automatically per finding.",
       role === "verifier"
         ? ""
-        : "When the slice is fully done, call the slice_done tool with your evidence (commit SHAs and the passing check output/summary) and then end your turn — a bare claim without evidence does not close the slice. If you cannot finish, call slice_blocked with the specific blocker and end your turn. These tool calls are the ONLY completion signals; prose claims do nothing.",
+        : "When fully done, call slice_done with general evidence (commit SHAs and passing check output) plus one finding_evidence {finding_id, proof} record per linked defect, then end your turn. A bare claim or prose ID mention does not close the slice. If blocked, call slice_blocked and end your turn.",
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -620,7 +778,7 @@ export function createCollabStore(
       visibility: "hidden" as const,
       origin: "plugin" as const,
     };
-    const child =
+      const child =
       fresh || fork_turns === "none"
         ? await bb.sdk.threads.spawn(spawnArgs)
         : await bb.sdk.threads
@@ -636,18 +794,55 @@ export function createCollabStore(
               origin: "plugin",
             })
             .catch(() => bb.sdk.threads.spawn(spawnArgs));
-    insert.run({
-      thread_id: child.id,
-      root_thread_id: rootId(threadId),
-      parent_thread_id: threadId,
-      task_name: taskName,
-      created_at: Date.now(),
-      display_name: displayName,
-      item_id: itemId,
-      role: role === "verifier" ? "verifier" : "worker",
-      source_thread_id: null,
-      last_verify_hash: null,
-    });
+      const row = {
+        thread_id: child.id,
+        root_thread_id: rootId(threadId),
+        parent_thread_id: threadId,
+        task_name: taskName,
+        created_at: Date.now(),
+        display_name: displayName,
+        item_id: itemId,
+        role: role === "verifier" ? "verifier" : "worker",
+        source_thread_id: null,
+        last_verify_hash: null,
+      };
+      if (reservationToken && requested) {
+        reservationCommitted = reservations.commit(
+          rootThreadId,
+          requested,
+          reservationToken,
+          () => {
+            insert.run(row);
+          },
+        );
+        if (!reservationCommitted) {
+          try {
+            await bb.sdk.threads.stop({ threadId: child.id });
+          } catch {
+            // The unowned child is still excluded from scheduler accounting.
+          }
+          return {
+            error: `Scheduler reservation for ${requested} expired before worker persistence; spawned thread was stopped.`,
+          };
+        }
+      } else {
+        insert.run(row);
+      }
+    if (strictItemClaim && requested) {
+      const persisted = rowOf(child.id);
+      if (!persisted || persisted.item_id !== requested || itemId !== requested) {
+        removeRow.run({ thread_id: child.id, retired_at: Date.now() });
+        try {
+          await bb.sdk.threads.stop({ threadId: child.id });
+        } catch {
+          // The durable row is retired even when the host cannot stop a
+          // malformed spawn; scheduler accounting will never accept it.
+        }
+        return {
+          error: `Spawned worker ${child.id} did not retain scheduler item ${requested}; worker was retired.`,
+        };
+      }
+    }
     try {
       await applyWorkTitle(child.id, trimmed);
     } catch {
@@ -655,13 +850,21 @@ export function createCollabStore(
     }
     if (itemId) hooks?.retitleItem?.(rootThreadId, itemId, trimmed);
     hooks?.onChange?.(rootThreadId);
-    return { threadId: child.id, taskName, nickname: displayName, itemId };
+      return { threadId: child.id, taskName, nickname: displayName, itemId };
+    } finally {
+      if (reservationToken && requested && !reservationCommitted) {
+        reservations.release(rootThreadId, requested, reservationToken);
+      }
+    }
   }
 
   return {
     rootId,
     rowOf,
     itemHasWorker,
+    setWorkerCap(rootThreadId: string, maxWorkers: number): boolean {
+      return reservations.setCap(rootId(rootThreadId), maxWorkers);
+    },
     threadIdsForRoot(rootThreadId: string): string[] {
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => row.thread_id);
     },
@@ -676,6 +879,14 @@ export function createCollabStore(
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[])
         .filter((row) => row.role !== "verifier" && row.item_id === itemId)
         .map((row) => row.thread_id);
+    },
+    claimantsOnItem(rootThreadId: string, itemId: string): string[] {
+      return [
+        ...(byRoot.all(rootId(rootThreadId)) as CollabRow[])
+          .filter((row) => row.role !== "verifier" && row.item_id === itemId)
+          .map((row) => row.thread_id),
+        ...reservations.claimants(rootId(rootThreadId), itemId),
+      ];
     },
     listForRoot,
     setMeta(threadId: string, patch: { displayName?: string | null; itemId?: string | null }) {
@@ -698,7 +909,7 @@ export function createCollabStore(
       removeRow.run({ thread_id: threadId, retired_at: Date.now() });
     },
 
-    setVerifyHash(threadId: string, hash: string) {
+    setVerifyHash(threadId: string, hash: string | null) {
       setHash.run({ thread_id: threadId, last_verify_hash: hash });
     },
 
@@ -711,17 +922,38 @@ export function createCollabStore(
     },
 
     /** Durable slice report from the slice_done / slice_blocked tools. */
-    setReport(threadId: string, status: "done" | "blocked", evidence: string): boolean {
+    setReport(
+      threadId: string,
+      status: "done" | "blocked",
+      evidence: string,
+      findingEvidence: readonly FindingAffirmativeEvidence[] = [],
+    ): boolean {
       const row = byThread.get(threadId) as CollabRow | undefined;
       if (!row) return false;
-      setReportStmt.run({ thread_id: threadId, status, evidence: evidence.trim() });
+      setReportStmt.run({
+        thread_id: threadId,
+        status,
+        evidence: encodeReport(evidence, findingEvidence),
+      });
       return true;
     },
 
-    reportOf(threadId: string): { status: "done" | "blocked"; evidence: string } | null {
+    reportOf(threadId: string): CollabReport | null {
       const row = byThread.get(threadId) as CollabRow | undefined;
-      if (!row || (row.report_status !== "done" && row.report_status !== "blocked")) return null;
-      return { status: row.report_status, evidence: row.report_evidence ?? "" };
+      return row ? decodeReport(row) : null;
+    },
+
+    findingEvidenceForItem(
+      rootThreadId: string,
+      itemId: string,
+      options?: { verifierOnly?: boolean },
+    ): FindingAffirmativeEvidence[] {
+      for (const row of reportsByItem.all(rootId(rootThreadId), itemId) as CollabRow[]) {
+        if (options?.verifierOnly && row.role !== "verifier") continue;
+        const report = decodeReport(row);
+        if (report?.findingEvidence.length) return report.findingEvidence;
+      }
+      return [];
     },
 
     /** Records a stall nudge; returns the new total. */
@@ -826,7 +1058,11 @@ export function createCollabStore(
       displayName?: string;
       message: string;
       skipClaim?: boolean;
-    }): Promise<{ threadId: string; taskName: string; nickname: string } | { error: string }> {
+      maxWorkers: number;
+    }): Promise<
+      | { threadId: string; taskName: string; nickname: string; itemId: string | null }
+      | { error: string }
+    > {
       const result = await spawnAgent({
         threadId: args.parentThreadId,
         projectId: undefined,
@@ -837,6 +1073,8 @@ export function createCollabStore(
         message: args.message,
         fresh: true,
         skipClaim: args.skipClaim,
+        strictItemClaim: Boolean(args.itemId) && !args.skipClaim,
+        schedulerMaxWorkers: args.maxWorkers,
       });
       return result;
     },

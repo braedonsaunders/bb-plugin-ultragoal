@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GoalSnapshot, GoalStatus } from "../contract.js";
 
@@ -168,22 +165,6 @@ export function validateObjective(objective: string): string | null {
   return null;
 }
 
-function importLegacyGoalDatabase(db: { prepare: (sql: string) => { get: () => unknown }; exec: (sql: string) => void }): void {
-  const count = (db.prepare("SELECT COUNT(*) AS n FROM goals").get() as { n: number }).n;
-  if (count > 0) return;
-  const legacy = join(homedir(), ".bb", "plugins", "goal", "data.db");
-  if (!existsSync(legacy)) return;
-  const escaped = legacy.replaceAll("'", "''");
-  db.exec(`ATTACH DATABASE '${escaped}' AS legacy`);
-  try {
-    db.exec("INSERT OR IGNORE INTO goals SELECT * FROM legacy.goals");
-    db.exec("INSERT OR IGNORE INTO goal_items SELECT * FROM legacy.goal_items");
-    db.exec("INSERT OR IGNORE INTO collab_agents SELECT * FROM legacy.collab_agents");
-  } finally {
-    db.exec("DETACH DATABASE legacy");
-  }
-}
-
 export function createGoalStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -316,8 +297,112 @@ export function createGoalStore(bb: BbPluginApi) {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )`,
+    // Scheduler reservations bridge the non-transactional BB thread spawn.
+    // The unique root/item key prevents overlapping plugin generations from
+    // externally spawning the same pending or abandoned in-progress work.
+    `CREATE TABLE IF NOT EXISTS collab_item_reservations (
+      root_thread_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      claim_token TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      PRIMARY KEY (root_thread_id, item_id)
+    )`,
+    // Preserve report ownership after retirement clears the live assignment.
+    `ALTER TABLE collab_agents ADD COLUMN report_item_id TEXT`,
+    // Trigger-based uniqueness is migration-safe even if an old database
+    // already contains duplicate live rows: existing history remains readable,
+    // while every future insert/update (including an overlapping old plugin
+    // generation) fails before it can create another owner.
+    `CREATE TRIGGER IF NOT EXISTS collab_agents_one_live_item_insert
+      BEFORE INSERT ON collab_agents
+      WHEN NEW.retired_at IS NULL
+        AND NEW.item_id IS NOT NULL
+        AND COALESCE(NEW.role, 'worker') != 'verifier'
+        AND EXISTS (
+          SELECT 1 FROM collab_agents
+          WHERE root_thread_id = NEW.root_thread_id
+            AND item_id = NEW.item_id
+            AND retired_at IS NULL
+            AND COALESCE(role, 'worker') != 'verifier'
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'work item already has a live worker');
+      END`,
+    `CREATE TRIGGER IF NOT EXISTS collab_agents_one_live_item_update
+      BEFORE UPDATE OF root_thread_id, item_id, role, retired_at ON collab_agents
+      WHEN NEW.retired_at IS NULL
+        AND NEW.item_id IS NOT NULL
+        AND COALESCE(NEW.role, 'worker') != 'verifier'
+        AND EXISTS (
+          SELECT 1 FROM collab_agents
+          WHERE root_thread_id = NEW.root_thread_id
+            AND item_id = NEW.item_id
+            AND retired_at IS NULL
+            AND COALESCE(role, 'worker') != 'verifier'
+            AND thread_id != OLD.thread_id
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'work item already has a live worker');
+      END`,
+    // Appended separately so a developer database that exercised an earlier
+    // v0.17.15 candidate receives the root-wide capacity field too.
+    `ALTER TABLE collab_item_reservations ADD COLUMN slot_limit INTEGER NOT NULL DEFAULT 1`,
+    // Materialized scheduler capacity. Unlike goals.max_workers this is never
+    // nullable: the reservation transaction writes the resolved per-root cap
+    // before an external child can be spawned, so DB triggers can fence old
+    // plugin generations too.
+    `CREATE TABLE IF NOT EXISTS collab_root_worker_caps (
+      root_thread_id TEXT PRIMARY KEY,
+      max_workers INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE TRIGGER IF NOT EXISTS collab_agents_root_capacity_insert
+      BEFORE INSERT ON collab_agents
+      WHEN NEW.retired_at IS NULL
+        AND COALESCE(NEW.role, 'worker') != 'verifier'
+        AND EXISTS (
+          SELECT 1 FROM collab_root_worker_caps WHERE root_thread_id = NEW.root_thread_id
+        )
+        AND (
+          (SELECT COUNT(*) FROM collab_agents
+           WHERE root_thread_id = NEW.root_thread_id
+             AND retired_at IS NULL
+             AND COALESCE(role, 'worker') != 'verifier')
+          +
+          (SELECT COUNT(*) FROM collab_item_reservations
+           WHERE root_thread_id = NEW.root_thread_id
+             AND expires_at > CAST(strftime('%s', 'now') AS INTEGER) * 1000
+             AND (NEW.item_id IS NULL OR item_id != NEW.item_id))
+        ) >= (SELECT max_workers FROM collab_root_worker_caps
+              WHERE root_thread_id = NEW.root_thread_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'root worker capacity is full');
+      END`,
+    `CREATE TRIGGER IF NOT EXISTS collab_agents_root_capacity_update
+      BEFORE UPDATE OF root_thread_id, role, retired_at ON collab_agents
+      WHEN NEW.retired_at IS NULL
+        AND COALESCE(NEW.role, 'worker') != 'verifier'
+        AND EXISTS (
+          SELECT 1 FROM collab_root_worker_caps WHERE root_thread_id = NEW.root_thread_id
+        )
+        AND (
+          (SELECT COUNT(*) FROM collab_agents
+           WHERE root_thread_id = NEW.root_thread_id
+             AND thread_id != OLD.thread_id
+             AND retired_at IS NULL
+             AND COALESCE(role, 'worker') != 'verifier')
+          +
+          (SELECT COUNT(*) FROM collab_item_reservations
+           WHERE root_thread_id = NEW.root_thread_id
+             AND expires_at > CAST(strftime('%s', 'now') AS INTEGER) * 1000
+             AND (NEW.item_id IS NULL OR item_id != NEW.item_id))
+        ) >= (SELECT max_workers FROM collab_root_worker_caps
+              WHERE root_thread_id = NEW.root_thread_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'root worker capacity is full');
+      END`,
   ]);
-  importLegacyGoalDatabase(db);
 
   const select = db.prepare("SELECT * FROM goals WHERE thread_id = ?");
   const selectActive = db.prepare(
@@ -379,6 +464,9 @@ export function createGoalStore(bb: BbPluginApi) {
       accounting_thread_ids = excluded.accounting_thread_ids
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
+  const removeWorkerCap = db.prepare(
+    "DELETE FROM collab_root_worker_caps WHERE root_thread_id = ?",
+  );
   const writeIntakeRow = db.prepare("UPDATE goals SET intake_row_id = ? WHERE thread_id = ?");
 
   return {
@@ -621,7 +709,11 @@ export function createGoalStore(bb: BbPluginApi) {
     },
 
     clear(threadId: string): boolean {
-      return remove.run(threadId).changes > 0;
+      const clear = db.transaction(() => {
+        removeWorkerCap.run(threadId);
+        return remove.run(threadId).changes > 0;
+      });
+      return clear.immediate();
     },
   };
 }

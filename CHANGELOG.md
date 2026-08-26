@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.17.15
+
+- Scheduler startup now reconstructs durable worker ownership before counting
+  capacity or rescuing old work. Active, idle, completed-but-unharvested, and
+  temporarily unknown holders survive reload; only explicitly stopped/error
+  workers are eligible for delayed rescue.
+- Scheduler-internal spawning is item-strict. A held requested work item fails
+  closed without entering the user-facing new-item fallback. A durable SQLite
+  reservation is acquired before any external thread spawn and atomically
+  committed only when no live worker owns the item, protecting overlapping
+  plugin generations and abandoned-item rescue. The same transaction enforces
+  the root's `maxWorkers` cap across live workers and reservations, including
+  different items. Spawn failures restore pending work, and every returned
+  item ID is verified before staffing or logging.
+- Root-capacity triggers fence late INSERT/UPDATE calls from a pre-reload plugin
+  generation. If its BB child already exists, active-event and repeated-tree
+  discovery immediately stop and tombstone the unowned child and return its
+  optimistic work item to pending.
+- Generated migration artifacts such as
+  `schema/migrations/generated/0001_baseline.sql` no longer provide semantic
+  evidence for later defect coalescing, even when line-stripped paths match.
+  The durable oldest-primary exception remains intact, and concrete domain
+  repair files or structured CONTEXT IDs still validate intentional links.
+- Every remediation worker and verifier brief now includes a bounded dossier
+  of all open linked defects: exact ID, title, evidence file, evidence, and
+  done-check. The dossier has a hard 64 KB ceiling without silently omitting
+  IDs, including for public verifier spawns.
+- `slice_done` and verifier reports now carry structured, durable affirmative
+  proof for every exact linked defect ID. Negative prose, prefixes, duplicate
+  or conflicting coverage, and ambiguous verdicts fail closed. A verifier must
+  end with one exact verdict line; missing coverage or malformed output clears
+  the verification digest and retries or safely assigns a replacement under a
+  durable three-attempt budget before handing the open work back to the root.
+- Restart reconciliation closes linked defects only from preserved qualifying
+  evidence, including evidence on retired workers. Otherwise it reopens the
+  remediation work, and plan completion repairs stale links before enforcing
+  coverage.
+- Added fake-host reload and prompt regressions plus two-connection reservation
+  races, real scheduler rollback, verifier retry, monolithic-baseline,
+  large-dossier, restart-evidence, and exact structured-coverage tests.
+
 ## 0.17.14
 
 - Exact concrete-path matching now treats square-bracket route segments such

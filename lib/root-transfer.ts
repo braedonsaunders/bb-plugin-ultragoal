@@ -19,6 +19,8 @@ export interface RootTransferCounts {
   findings: number;
   decisions: number;
   agents: number;
+  reservations: number;
+  workerCaps: number;
 }
 
 export interface RootTransferChild {
@@ -105,6 +107,12 @@ export function createRootTransferStore(bb: BbPluginApi) {
     findings: db.prepare("SELECT COUNT(*) AS n FROM goal_findings WHERE thread_id = ?"),
     decisions: db.prepare("SELECT COUNT(*) AS n FROM goal_decisions WHERE thread_id = ?"),
     agents: db.prepare("SELECT COUNT(*) AS n FROM collab_agents WHERE root_thread_id = ?"),
+    reservations: db.prepare(
+      "SELECT COUNT(*) AS n FROM collab_item_reservations WHERE root_thread_id = ?",
+    ),
+    workerCaps: db.prepare(
+      "SELECT COUNT(*) AS n FROM collab_root_worker_caps WHERE root_thread_id = ?",
+    ),
   };
   const collabThreadId = db.prepare(
     "SELECT 1 FROM collab_agents WHERE thread_id = ? LIMIT 1",
@@ -153,6 +161,12 @@ export function createRootTransferStore(bb: BbPluginApi) {
   const updateAgentRoots = db.prepare(
     "UPDATE collab_agents SET root_thread_id = ? WHERE root_thread_id = ?",
   );
+  const updateReservationRoots = db.prepare(
+    "UPDATE collab_item_reservations SET root_thread_id = ? WHERE root_thread_id = ?",
+  );
+  const updateWorkerCapRoots = db.prepare(
+    "UPDATE collab_root_worker_caps SET root_thread_id = ? WHERE root_thread_id = ?",
+  );
   const updateGoal = db.prepare(`
     UPDATE goals SET
       thread_id = ?, intake_row_id = ?,
@@ -172,6 +186,8 @@ export function createRootTransferStore(bb: BbPluginApi) {
     findings: n(count.findings, threadId),
     decisions: n(count.decisions, threadId),
     agents: n(count.agents, threadId),
+    reservations: n(count.reservations, threadId),
+    workerCaps: n(count.workerCaps, threadId),
   });
   const nonzero = (counts: RootTransferCounts): string[] =>
     Object.entries(counts)
@@ -296,6 +312,8 @@ export function createRootTransferStore(bb: BbPluginApi) {
         const decisionChanges = updateDecisions.run(targetThreadId, sourceThreadId).changes;
         updateLiveAgentParents.run(targetThreadId, sourceThreadId, sourceThreadId);
         const agentChanges = updateAgentRoots.run(targetThreadId, sourceThreadId).changes;
+        const reservationChanges = updateReservationRoots.run(targetThreadId, sourceThreadId).changes;
+        const workerCapChanges = updateWorkerCapRoots.run(targetThreadId, sourceThreadId).changes;
         const goalChanges = updateGoal.run(
           targetThreadId,
           before.journal.targetIntakeRowId,
@@ -311,6 +329,8 @@ export function createRootTransferStore(bb: BbPluginApi) {
           findingChanges !== expected.findings ||
           decisionChanges !== expected.decisions ||
           agentChanges !== expected.agents ||
+          reservationChanges !== expected.reservations ||
+          workerCapChanges !== expected.workerCaps ||
           goalChanges !== 1
         ) {
           throw new Error("UltraGoal root transfer changed an unexpected number of rows");

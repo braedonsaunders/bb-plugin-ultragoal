@@ -88,6 +88,10 @@ function seedState(state: ReturnType<typeof migratedHost>) {
   db.prepare(
     "UPDATE collab_agents SET report_status = 'done', report_evidence = 'sha abc123; npm test passed' WHERE thread_id = 'thr_live'",
   ).run();
+  db.prepare(`
+    INSERT INTO collab_root_worker_caps (root_thread_id, max_workers, updated_at)
+    VALUES ('thr_source', 2, 1)
+  `).run();
   return { items, findings, decisions, itemId: item!.id };
 }
 
@@ -99,7 +103,15 @@ describe("durable root transfer", () => {
     const originalItems = seeded.items.list("thr_source");
     const transfers = createRootTransferStore(state.host.bb);
     const before = transfers.inspect("thr_source", "thr_target");
-    assert.deepEqual(before.counts, { goals: 1, items: 2, findings: 1, decisions: 1, agents: 2 });
+    assert.deepEqual(before.counts, {
+      goals: 1,
+      items: 2,
+      findings: 1,
+      decisions: 1,
+      agents: 2,
+      reservations: 0,
+      workerCaps: 1,
+    });
     assert.deepEqual(before.directChildren, [{ threadId: "thr_live" }]);
     transfers.prepare("thr_source", "thr_target", "row_target_bootstrap", "wake-marker");
     transfers.setPhase("thr_source", "thr_target", "target_released");
@@ -162,6 +174,12 @@ describe("durable root transfer", () => {
         report_evidence: null,
       },
     ]);
+    assert.deepEqual(
+      state.db.prepare(
+        "SELECT root_thread_id, max_workers FROM collab_root_worker_caps",
+      ).all(),
+      [{ root_thread_id: "thr_target", max_workers: 2 }],
+    );
   });
 
   it("rolls the entire IMMEDIATE transaction back on a forced goal update failure", () => {
@@ -187,8 +205,18 @@ describe("durable root transfer", () => {
     );
     assert.equal(transfers.inspect("thr_source", "thr_target").mode, "transfer");
     assert.equal(transfers.journal("thr_source", "thr_target")!.phase, "target_released");
-    assert.equal(state.db.prepare("SELECT COUNT(*) AS n FROM goal_items WHERE thread_id='thr_source'").get().n, 2);
-    assert.equal(state.db.prepare("SELECT COUNT(*) AS n FROM goal_items WHERE thread_id='thr_target'").get().n, 0);
+    assert.equal(
+      (state.db.prepare(
+        "SELECT COUNT(*) AS n FROM goal_items WHERE thread_id='thr_source'",
+      ).get() as { n: number }).n,
+      2,
+    );
+    assert.equal(
+      (state.db.prepare(
+        "SELECT COUNT(*) AS n FROM goal_items WHERE thread_id='thr_target'",
+      ).get() as { n: number }).n,
+      0,
+    );
   });
 
   it("rejects a destination that is already any collaboration child id", () => {
@@ -254,7 +282,7 @@ describe("durable root transfer", () => {
         thread_id, root_thread_id, parent_thread_id, task_name, created_at,
         display_name, item_id, role, retired_at
       ) VALUES ('thr_live2', 'thr_source', 'thr_source', '/root/live2', 1, 'Live 2', ?, 'worker', NULL)
-    `).run(seeded.itemId);
+    `).run(seeded.items.list("thr_source")[1]!.id);
     const transfers = createRootTransferStore(state.host.bb);
     let wakeCount = 0;
     const dryRun = await executeRootTransfer({
