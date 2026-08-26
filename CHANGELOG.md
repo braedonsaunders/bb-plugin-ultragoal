@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.3
+
+- A root transfer can now proceed when the source root is in `error`. It
+  waited for the source to reach idle, and an errored thread never does — so
+  the transfer froze at `target_released` and re-running it froze again, in
+  precisely the case the feature exists for. A root whose provider ran out of
+  quota is already released: it holds no runtime and will not take another
+  turn. A source that is still RUNNING is still waited out.
+  0.20.1, 0.20.2 and this together are what "a dead root is recoverable"
+  actually required; each one alone left the goal stuck.
+
 ## 0.20.2
 
 - Root transfer no longer requires every worker to share the root's

@@ -486,12 +486,25 @@ export async function executeRootTransfer(input: {
       // Stop even an already-idle source to release any retained provider
       // runtime and disable its old continuation path before final accounting.
       await bb.sdk.threads.stop({ threadId: sourceThreadId });
-      await bb.sdk.threads.wait({
-        threadId: sourceThreadId,
-        status: "idle",
-        timeoutMs: 30_000,
-        pollIntervalMs: 250,
-      });
+      try {
+        await bb.sdk.threads.wait({
+          threadId: sourceThreadId,
+          status: "idle",
+          timeoutMs: 30_000,
+          pollIntervalMs: 250,
+        });
+      } catch (error) {
+        // An errored root never reaches idle, and waiting for it froze the
+        // transfer at this phase forever — in exactly the case the transfer
+        // exists for. A root whose provider ran out of quota IS released: it is
+        // holding no runtime and will not take another turn. Anything still
+        // running, though, has to be waited out.
+        const current = await bb.sdk.threads.get({ threadId: sourceThreadId });
+        if (current.status !== "error") throw error;
+        bb.log.info(
+          `Root transfer proceeding with source ${sourceThreadId} in status error; it holds no runtime and will not take another turn`,
+        );
+      }
       await input.finalAccount();
       inspection = store.commit(sourceThreadId, targetThreadId, input.workerExecution());
       transfer = inspection.journal!;
