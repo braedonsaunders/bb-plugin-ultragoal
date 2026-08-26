@@ -141,35 +141,42 @@ export function occupyingWorkerIds(
 }
 
 /**
- * Idle workers whose durable row no longer represents work, and so must be
- * retired to give their root slot back.
+ * Durable worker rows that no longer represent work, and so must be retired to
+ * give their root slot back.
  *
- * The durable SQL capacity fence counts every non-retired `collab_agents` row,
- * while {@link occupyingWorkerIds} counts only live-or-holding workers. A
- * finished worker used to be retired only once a later sweep observed its host
- * as `stopped`, which depends on a best-effort `threads.stop` that swallows its
+ * The SQL capacity fence counts every non-retired `collab_agents` row, while
+ * {@link occupyingWorkerIds} counts only live-or-holding workers. A finished
+ * worker used to be retired only once a later sweep observed its host as
+ * `stopped`, which depends on a best-effort `threads.stop` that swallows its
  * failures. Each swallowed failure left a row the fence counted forever and the
  * scheduler did not — enough of them and no reservation could ever be granted
- * again. Reconciling against the plan removes that dependency.
+ * again.
+ *
+ * Input must be the DURABLE rows, not the projected agent list: that projection
+ * drops any worker whose item is already completed, which is exactly the set
+ * this function exists to find. Passing the projection makes it a no-op.
  *
  * A worker is only retired when its slice is `completed` or gone from the plan
- * entirely; a `pending` slice may still be handed back to the same worker. A
- * worker with a verifier still reading it as a source is never retired, because
- * the verifier resolves its slice through that row.
+ * entirely; a `pending` or `in_progress` slice may still be handed back to the
+ * same worker. A worker whose host is still running is left alone, and so is one
+ * a verifier still reads as its source, because the verifier resolves its slice
+ * through that row.
  */
 export function finishedWorkerRetirements(
-  agents: readonly Pick<GoalAgent, "role" | "status" | "itemId" | "threadId">[],
+  workers: readonly { threadId: string; itemId: string | null; role: string | null }[],
   items: readonly Pick<GoalItem, "id" | "status">[],
+  isHostLive: (workerThreadId: string) => boolean,
   hasLiveVerifier: (workerThreadId: string) => boolean,
 ): string[] {
   const byId = new Map(items.map((item) => [item.id, item.status]));
   const retire: string[] = [];
-  for (const agent of agents) {
-    if (agent.role === "verifier" || agent.status !== "idle" || !agent.itemId) continue;
-    const status = byId.get(agent.itemId);
+  for (const worker of workers) {
+    if (worker.role === "verifier" || !worker.itemId) continue;
+    const status = byId.get(worker.itemId);
     if (status !== undefined && status !== "completed") continue;
-    if (hasLiveVerifier(agent.threadId)) continue;
-    retire.push(agent.threadId);
+    if (isHostLive(worker.threadId)) continue;
+    if (hasLiveVerifier(worker.threadId)) continue;
+    retire.push(worker.threadId);
   }
   return retire;
 }

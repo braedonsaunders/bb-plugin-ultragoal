@@ -81,40 +81,66 @@ describe("occupyingWorkerIds", () => {
 
 describe("finishedWorkerRetirements", () => {
   const noVerifier = () => false;
+  const noneLive = () => false;
   const items = [
     { id: "itm_open", status: "in_progress" as const },
     { id: "itm_done", status: "completed" as const },
     { id: "itm_waiting", status: "pending" as const },
   ];
 
-  it("retires an idle worker whose slice completed but whose host stop failed", () => {
+  it("retires a worker whose slice completed but whose host stop failed", () => {
     // The stop is best-effort, so the host can stay `idle` forever. The SQL
     // capacity fence counts the row regardless; without this reconciliation it
     // holds a root slot permanently.
     const retire = finishedWorkerRetirements(
-      [{ role: "worker", status: "idle", itemId: "itm_done", threadId: "thr_done" }],
+      [{ role: "worker", itemId: "itm_done", threadId: "thr_done" }],
       items,
+      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, ["thr_done"]);
   });
 
-  it("retires an idle worker whose slice vanished from the plan", () => {
+  it("retires a worker whose slice vanished from the plan", () => {
     const retire = finishedWorkerRetirements(
-      [{ role: "worker", status: "idle", itemId: "itm_gone", threadId: "thr_gone" }],
+      [{ role: "worker", itemId: "itm_gone", threadId: "thr_gone" }],
       items,
+      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, ["thr_gone"]);
   });
 
+  it("collects a finished worker the agent projection would have dropped", () => {
+    // oneWorkerPerItem drops any non-live worker whose item is completed, so the
+    // projected list cannot contain this row at all. Reconciling against the
+    // projection instead of the durable rows made this function a no-op that
+    // still looked correct: the one case it exists for was invisible to it.
+    const durableOnly = [{ role: null, itemId: "itm_done", threadId: "thr_invisible" }];
+    assert.deepEqual(
+      finishedWorkerRetirements(durableOnly, items, noneLive, noVerifier),
+      ["thr_invisible"],
+    );
+  });
+
   it("keeps workers whose slice is still in progress or still pending", () => {
     const retire = finishedWorkerRetirements(
       [
-        { role: "worker", status: "idle", itemId: "itm_open", threadId: "thr_open" },
-        { role: "worker", status: "idle", itemId: "itm_waiting", threadId: "thr_waiting" },
+        { role: "worker", itemId: "itm_open", threadId: "thr_open" },
+        { role: "worker", itemId: "itm_waiting", threadId: "thr_waiting" },
       ],
       items,
+      noneLive,
+      noVerifier,
+    );
+    assert.deepEqual(retire, []);
+  });
+
+  it("keeps a finished worker whose host is still running", () => {
+    const retire = finishedWorkerRetirements(
+      [{ role: "worker", itemId: "itm_done", threadId: "thr_done" }],
+      items,
+      (threadId) => threadId === "thr_done",
       noVerifier,
     );
     assert.deepEqual(retire, []);
@@ -122,38 +148,41 @@ describe("finishedWorkerRetirements", () => {
 
   it("keeps a finished worker a verifier still reads as its source", () => {
     const retire = finishedWorkerRetirements(
-      [{ role: "worker", status: "idle", itemId: "itm_done", threadId: "thr_done" }],
+      [{ role: "worker", itemId: "itm_done", threadId: "thr_done" }],
       items,
+      noneLive,
       (threadId) => threadId === "thr_done",
     );
     assert.deepEqual(retire, []);
   });
 
-  it("never retires running workers, verifiers, or itemless crew", () => {
+  it("never retires verifiers or itemless crew", () => {
     const retire = finishedWorkerRetirements(
       [
-        { role: "worker", status: "running", itemId: "itm_done", threadId: "thr_running" },
-        { role: "verifier", status: "idle", itemId: "itm_done", threadId: "thr_verifier" },
-        { role: "worker", status: "idle", itemId: null, threadId: "thr_itemless" },
+        { role: "verifier", itemId: "itm_done", threadId: "thr_verifier" },
+        { role: "worker", itemId: null, threadId: "thr_itemless" },
       ],
       items,
+      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, []);
   });
 
   it("frees every leaked slot so a wedged full crew can staff again", () => {
-    const agents = [1, 2, 3, 4, 5].map((n) => ({
+    const workers = [1, 2, 3, 4, 5].map((n) => ({
       role: "worker" as const,
-      status: "idle" as const,
       itemId: `itm_${n}`,
       threadId: `thr_${n}`,
     }));
-    const closed = agents.map((agent) => ({
-      id: agent.itemId,
+    const closed = workers.map((worker) => ({
+      id: worker.itemId,
       status: "completed" as const,
     }));
-    assert.equal(finishedWorkerRetirements(agents, closed, noVerifier).length, 5);
+    assert.equal(
+      finishedWorkerRetirements(workers, closed, noneLive, noVerifier).length,
+      5,
+    );
   });
 });
 

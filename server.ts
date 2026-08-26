@@ -1123,19 +1123,37 @@ export default function plugin(bb: BbPluginApi) {
       const plannedItems = items.list(rootThreadId);
       const openItems = plannedItems.filter((item) => item.status === "in_progress");
 
-      // An idle worker whose slice is already closed is not work: it is a
-      // durable row the SQL capacity fence keeps counting. Retiring it used to
-      // wait for a later sweep to observe the host as `stopped`, which depends
-      // on a best-effort threads.stop that swallows its failures — so every
-      // swallowed failure permanently consumed one root slot until no
-      // reservation could be granted. Reconcile against the plan instead.
-      const retirable = new Set(
-        finishedWorkerRetirements(
-          agents.filter((agent) => agent.threadId !== rootThreadId),
-          plannedItems,
-          (workerThreadId) => collab.verifiersFor(workerThreadId).length > 0,
-        ),
+      // A worker whose slice is already closed is not work: it is a durable row
+      // the SQL capacity fence keeps counting. Retiring it used to wait for a
+      // later sweep to observe the host as `stopped`, which depends on a
+      // best-effort threads.stop that swallows its failures — so every swallowed
+      // failure permanently consumed one root slot until no reservation could be
+      // granted.
+      //
+      // This must read the DURABLE rows. `agentCache` holds the projection from
+      // oneWorkerPerItem, which drops any worker whose item is completed — the
+      // exact set being collected here. Reconciling against the projection was a
+      // no-op that looked correct.
+      const liveHosts = new Set(
+        agents
+          .filter((agent) => agent.status === "running" || agent.status === "starting")
+          .map((agent) => agent.threadId),
       );
+      const retirable = finishedWorkerRetirements(
+        collab.durableRowsForRoot(rootThreadId).filter((row) => row.threadId !== rootThreadId),
+        plannedItems,
+        (workerThreadId) => liveHosts.has(workerThreadId),
+        (workerThreadId) => collab.verifiersFor(workerThreadId).length > 0,
+      );
+      for (const workerThreadId of retirable) {
+        collab.forget(workerThreadId);
+        firstSeenIdle.delete(workerThreadId);
+        void releaseWorkerRuntime(workerThreadId);
+        bb.log.info(
+          `Retired finished worker ${workerThreadId} on ${rootThreadId}: its slice is closed; released its scheduler slot`,
+        );
+      }
+      const retired = new Set(retirable);
 
       const liveVerifierSources = new Set(
         agents
@@ -1156,15 +1174,7 @@ export default function plugin(bb: BbPluginApi) {
           }
           continue;
         }
-        if (retirable.has(agent.threadId)) {
-          collab.forget(agent.threadId);
-          firstSeenIdle.delete(agent.threadId);
-          void releaseWorkerRuntime(agent.threadId);
-          bb.log.info(
-            `Retired finished worker ${agent.nickname} (${agent.threadId}) on ${rootThreadId}: slice ${agent.itemId} is closed; released its scheduler slot`,
-          );
-          continue;
-        }
+        if (retired.has(agent.threadId)) continue;
         if (!agent.itemId || !openItems.some((item) => item.id === agent.itemId)) continue;
         // Under judgment is not stalled: the verifier's verdict drives the
         // next step (VERIFY_PASS closes the slice; VERIFY_FAIL is routed back
@@ -2744,11 +2754,20 @@ export default function plugin(bb: BbPluginApi) {
       // four unrelated slices that way. The explicit CONTEXT clause is the
       // plugin's own durable ownership declaration, so this link survives both
       // stale-link detachment and auto-minted duplicate healing.
+      // Scope defaults to the evidence file when the filer declared no repair
+      // files. The scheduler serializes overlapping work through `item.files`
+      // alone, so an empty scope silently opts the slice out of that guard and
+      // lets a second worker edit the same file concurrently.
+      const evidenceFile = normalizeFindingFile(result.finding.file);
+      const declaredFiles = (input.fixFiles ?? []).filter(Boolean);
+      const scope = declaredFiles.length > 0
+        ? declaredFiles
+        : evidenceFile ? [evidenceFile] : [];
       const dedicated = items.add(
         rootThreadId,
-        `Fix: ${result.finding.title} [${normalizeFindingFile(result.finding.file)}] CONTEXT (audit findings: ${result.finding.id})`,
+        `Fix: ${result.finding.title} [${evidenceFile}] CONTEXT (audit findings: ${result.finding.id})`,
         "pending",
-        { deps: [], files: input.fixFiles ?? [], check: input.check ?? null },
+        { deps: [], files: scope, check: input.check ?? null },
       );
       if (dedicated && !findings.linkItem(rootThreadId, result.finding.id, dedicated.id)) {
         items.remove(rootThreadId, dedicated.id);
@@ -3366,7 +3385,12 @@ export default function plugin(bb: BbPluginApi) {
         // blind resume just repeats the same mistake. Three failed cycles
         // hand the slice to the orchestrator instead of looping forever.
         // The verifier's runtime is done either way — release it. (Verifiers
-        // were leaking one codex process per audit.)
+        // were leaking one codex process per audit.) Its durable row is done
+        // too: `verifiersFor` counts every non-retired verifier row regardless
+        // of host status, so a terminal row left behind would block its source
+        // worker from ever being retired. A later VERIFY_FAIL cycle spawns a
+        // fresh verifier.
+        collab.forget(thread.id);
         void releaseWorkerRuntime(thread.id);
         if (
           !passed &&
@@ -3733,6 +3757,66 @@ export default function plugin(bb: BbPluginApi) {
         return { exitCode: 0, stdout: formatGoalCard(view(goal)) };
       }
 
+      // An orchestrator that deliberately stops a worker had no supported way to
+      // get its slice back. `bb thread stop` leaves the host `idle`, not
+      // `stopped`, so ensureCrew never retires the durable row; the item stays
+      // in_progress and held, reclaimOrphanInProgress refuses to demote a held
+      // item, and the capacity fence keeps counting the row. The slot was gone
+      // until the stall healer eventually nudged the corpse three times.
+      if (action === "release") {
+        const target = (objective ?? "").trim();
+        if (!target) {
+          return {
+            exitCode: 1,
+            stderr: "Usage: bb ultragoal release <worker-thread-id|item-id> [--thread <id>]",
+          };
+        }
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const workerIds = target.startsWith("itm_")
+          ? collab.workersOnItem(threadId, target)
+          : [target];
+        if (workerIds.length === 0) {
+          return { exitCode: 1, stderr: `No live worker holds ${target}.` };
+        }
+        const released: string[] = [];
+        for (const workerId of workerIds) {
+          const row = collab.rowOf(workerId);
+          if (!row || row.root_thread_id !== threadId) {
+            return { exitCode: 1, stderr: `${workerId} is not a live worker on ${threadId}.` };
+          }
+          if (row.report_status === "done") {
+            return {
+              exitCode: 1,
+              stderr: `${workerId} reported done; let the completion path consume it rather than releasing it.`,
+            };
+          }
+          // Releasing a running worker would race its own writes. Stop it first.
+          try {
+            const host = await bb.sdk.threads.get({ threadId: workerId });
+            if (host.status === "active") {
+              return {
+                exitCode: 1,
+                stderr: `${workerId} is still active; stop it before releasing its slice.`,
+              };
+            }
+          } catch {
+            // An unreadable host is not proof of life; releasing is still correct.
+          }
+          collab.forget(workerId);
+          void releaseWorkerRuntime(workerId);
+          if (row.item_id) items.setStatus(threadId, row.item_id, "pending");
+          released.push(row.item_id ? `${workerId} -> ${row.item_id}` : workerId);
+        }
+        markGoalEvent(threadId);
+        void publishFresh(threadId);
+        void scheduleReady(threadId);
+        return {
+          exitCode: 0,
+          stdout: `Released ${released.length} slice(s) back to pending: ${released.join(", ")}`,
+        };
+      }
+
       if (action === "pause") {
         const goal = await pauseGoal(threadId, "Paused from the CLI.");
         return {
@@ -3771,6 +3855,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "decide", summary: "Answer an open owner decision", usage: "bb ultragoal decide <decision_id> <answer> [--thread <id>]" },
       { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--own-slice] [--thread <id>]" },
       { name: "transfer-root", summary: "Atomically transfer an unfinished UltraGoal to an idle Codex root", usage: "bb ultragoal transfer-root <source-thread-id> <target-thread-id> [--dry-run]" },
+      { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -3823,7 +3908,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "transfer-root";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -3845,7 +3930,10 @@ function parseCli(
   if (!action || action === "status") {
     return { action: "status", threadId };
   }
-  if (action === "set" || action === "edit" || action === "workers" || action === "decide") {
+  if (
+    action === "set" || action === "edit" || action === "workers" ||
+    action === "decide" || action === "release"
+  ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
   if (action === "finding") {

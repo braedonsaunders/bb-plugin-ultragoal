@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-ultragoal",
-  "version": "0.17.17",
+  "version": "0.17.18",
   "description": "Provider-neutral durable UltraGoals for Codex, Cursor, OpenCode, Claude Code, and Pi, with scheduled workers, verification, and defect remediation.",
   "license": "MIT",
   "author": "Braedon Saunders",

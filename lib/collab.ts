@@ -868,6 +868,26 @@ export function createCollabStore(
     threadIdsForRoot(rootThreadId: string): string[] {
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => row.thread_id);
     },
+    /** Every non-retired durable row for the root, unfiltered by host status or
+     * plan state. Slot cleanup must reconcile against THESE, not against the
+     * projected agent list: that projection drops a worker whose item is already
+     * completed, which is precisely the set whose rows still occupy capacity and
+     * still need retiring. */
+    durableRowsForRoot(rootThreadId: string): Array<{
+      threadId: string;
+      itemId: string | null;
+      role: string | null;
+      taskName: string;
+      reportStatus: string | null;
+    }> {
+      return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => ({
+        threadId: row.thread_id,
+        itemId: row.item_id ?? null,
+        role: row.role ?? null,
+        taskName: row.task_name,
+        reportStatus: row.report_status ?? null,
+      }));
+    },
     listRoots(): string[] {
       return (
         db.prepare("SELECT DISTINCT root_thread_id FROM collab_agents").all() as Array<{

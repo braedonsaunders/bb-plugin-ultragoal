@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.17.18
+
+- Finished-worker cleanup now reconciles against the durable `collab_agents`
+  rows instead of the projected agent list. `oneWorkerPerItem` drops any non-live
+  worker whose item is completed — exactly the set 0.17.16 was written to retire
+  — so reading the projection made that fix a no-op that still looked correct.
+  A worker whose host is still running is left alone.
+- A verifier's durable row is retired when its verdict lands. `verifiersFor`
+  counts every non-retired verifier row regardless of host status, so a terminal
+  row left behind blocked its source worker from ever being retired. A later
+  VERIFY_FAIL cycle spawns a fresh verifier as before.
+- `--own-slice` defaults the minted item's file scope to the finding's evidence
+  file when no `--fix-files` are declared. The scheduler serializes overlapping
+  work through `item.files` alone, so an empty scope silently opted the slice out
+  of that guard and allowed a second worker into the same file.
+- New `bb ultragoal release <worker-thread-id|item-id>`. An orchestrator that
+  deliberately stops a worker had no supported way to get the slice back:
+  `bb thread stop` leaves the host `idle`, not `stopped`, so the durable row is
+  never retired, the item stays `in_progress` and held, `reclaimOrphanInProgress`
+  refuses to demote a held item, and the capacity fence keeps counting the row.
+  Release retires the row, returns the slice to `pending` and restaffs. It
+  refuses a worker whose host is still active or that already reported done.
+
 ## 0.17.17
 
 - Worker completion now reads the `DEFECT_COVERAGE:` contract out of the slice
