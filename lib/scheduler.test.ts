@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   coalescingFilesOverlap,
   findingFilesMatchItem,
+  findingMatchesItem,
   filesOverlap,
   findingAction,
   freeSlots,
@@ -11,6 +12,7 @@ import {
   orphanInProgressIds,
   isTransientTurnFailure,
   isTurnAlreadyActiveError,
+  itemContextDeclaresFinding,
   threadAcceptsStart,
   threadAcceptsSteer,
   threadIsSettledForSubmit,
@@ -94,6 +96,7 @@ describe("findingAction", () => {
 
   it("attaches a same-file finding to the existing slice", () => {
     const result = findingAction({
+      findingId: "fnd_search",
       file: "web/lib/search.ts:88",
       staffedRemediationCount: 50,
       maxStaffedRemediations: 50,
@@ -104,6 +107,7 @@ describe("findingAction", () => {
 
   it("records without minting once remediation work capacity is hit", () => {
     const result = findingAction({
+      findingId: "fnd_authz",
       file: "web/lib/authz.ts",
       staffedRemediationCount: 50,
       maxStaffedRemediations: 50,
@@ -114,6 +118,7 @@ describe("findingAction", () => {
 
   it("mints a slice for a new file under the cap", () => {
     const result = findingAction({
+      findingId: "fnd_authz",
       file: "web/lib/authz.ts",
       staffedRemediationCount: 3,
       maxStaffedRemediations: 50,
@@ -124,6 +129,7 @@ describe("findingAction", () => {
 
   it("does not attach unrelated findings through a shared migration directory", () => {
     const result = findingAction({
+      findingId: "fnd_documents",
       file: "schema/migrations/generated",
       fixFiles: ["schema/src/documents.ts", "schema/migrations/generated"],
       staffedRemediationCount: 3,
@@ -142,6 +148,7 @@ describe("findingAction", () => {
 
   it("attaches when fix scope shares a concrete domain file", () => {
     const result = findingAction({
+      findingId: "fnd_recurring",
       file: "schema/migrations/generated",
       fixFiles: ["engine/src/recurring.ts", "schema/migrations/generated"],
       staffedRemediationCount: 50,
@@ -156,6 +163,60 @@ describe("findingAction", () => {
       ],
     });
     assert.deepEqual(result, { action: "attach", attachItemId: "itm_recurring" });
+  });
+
+  it("attaches an exact Next dynamic-route file", () => {
+    const result = findingAction({
+      findingId: "fnd_mt97llmk_73ao2v",
+      file: "web/app/api/admin/setup/[entity]/route.ts:42",
+      staffedRemediationCount: 50,
+      maxStaffedRemediations: 50,
+      openItems: [
+        {
+          id: "itm_setup",
+          step: "Fix tax setup in web/app/api/admin/setup/[entity]/route.ts",
+          status: "pending" as const,
+          files: ["web/app/api/admin/setup/[entity]/route.ts"],
+        },
+      ],
+    });
+    assert.deepEqual(result, { action: "attach", attachItemId: "itm_setup" });
+  });
+
+  it("attaches only ids named by a structured CONTEXT audit-findings clause", () => {
+    const item = {
+      id: "itm_payment",
+      step:
+        "Fix payment durability. CONTEXT (audit findings #42 fnd_mt97oet5_3vwaph + #43 fnd_mt97oqxt_pkqakx): both failures share one transaction boundary.",
+      status: "pending" as const,
+      files: [],
+    };
+    assert.deepEqual(
+      findingAction({
+        findingId: "fnd_mt97oqxt_pkqakx",
+        file: "schema/migrations/generated",
+        staffedRemediationCount: 50,
+        maxStaffedRemediations: 50,
+        openItems: [item],
+      }),
+      { action: "attach", attachItemId: "itm_payment" },
+    );
+    assert.deepEqual(
+      findingAction({
+        findingId: "fnd_mt97dd9k_xl8bc6",
+        file: "schema/migrations/generated",
+        staffedRemediationCount: 1,
+        maxStaffedRemediations: 50,
+        openItems: [
+          {
+            ...item,
+            step:
+              "AUDITOR TIGHTENING: fnd_mt97dd9k_xl8bc6 proves broad migration coalescing is WRONG.",
+          },
+        ],
+      }),
+      { action: "mint" },
+    );
   });
 });
 
@@ -215,6 +276,56 @@ describe("findingFilesMatchItem", () => {
         "schema/src/pricing.ts",
         [],
         { step: "Repair schema/src/segments.ts", files: ["schema/src/segments.ts"] },
+      ),
+      false,
+    );
+  });
+
+  it("treats square-bracket route segments as literal concrete paths", () => {
+    assert.equal(
+      findingFilesMatchItem(
+        "web/app/api/admin/setup/[entity]/route.ts:19",
+        [],
+        {
+          step: "Repair web/app/api/admin/setup/[entity]/route.ts.",
+          files: [],
+        },
+      ),
+      true,
+    );
+  });
+});
+
+describe("structured audit finding declarations", () => {
+  const paymentStep =
+    "Fix payments. CONTEXT (audit findings #42 fnd_mt97oet5_3vwaph + #43 fnd_mt97oqxt_pkqakx): durable claim required.";
+  const appStep =
+    "Fix apps. CONTEXT (audit findings #57 fnd_mt97wk5r_6qlleu + #58 fnd_mt97wkcv_xyihvs): make writes atomic.";
+
+  it("accepts exact ids in singular or plural CONTEXT audit clauses", () => {
+    assert.equal(itemContextDeclaresFinding(paymentStep, "fnd_mt97oet5_3vwaph"), true);
+    assert.equal(itemContextDeclaresFinding(paymentStep, "fnd_mt97oqxt_pkqakx"), true);
+    assert.equal(itemContextDeclaresFinding(appStep, "fnd_mt97wk5r_6qlleu"), true);
+    assert.equal(itemContextDeclaresFinding(appStep, "fnd_mt97wkcv_xyihvs"), true);
+    assert.equal(
+      itemContextDeclaresFinding(
+        "CONTEXT (audit finding #29, fnd_mt97dwj1_u541eg): enforce credit limits.",
+        "fnd_mt97dwj1_u541eg",
+      ),
+      true,
+    );
+  });
+
+  it("rejects ids mentioned outside the structured CONTEXT clause", () => {
+    const tightening =
+      "AUDITOR TIGHTENING: the old attachment of fnd_mt97dd9k_xl8bc6 was WRONG and must be detached.";
+    assert.equal(itemContextDeclaresFinding(tightening, "fnd_mt97dd9k_xl8bc6"), false);
+    assert.equal(
+      findingMatchesItem(
+        "fnd_mt97dd9k_xl8bc6",
+        "schema/migrations/generated",
+        ["schema/migrations/generated"],
+        { step: tightening, files: ["schema/migrations/generated"] },
       ),
       false,
     );

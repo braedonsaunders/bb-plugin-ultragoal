@@ -72,6 +72,9 @@ export function createItemStore(bb: BbPluginApi) {
   const listStmt = db.prepare(
     "SELECT * FROM goal_items WHERE thread_id = ? ORDER BY sort_order ASC, created_at ASC",
   );
+  const creationOrderStmt = db.prepare(
+    "SELECT id FROM goal_items WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
+  );
   const insertStmt = db.prepare(`
     INSERT INTO goal_items (id, thread_id, step, status, sort_order, created_at, updated_at, origin, deps, files, check_cmd)
     VALUES (@id, @thread_id, @step, @status, @sort_order, @created_at, @updated_at, @origin, @deps, @files, @check_cmd)
@@ -220,6 +223,11 @@ export function createItemStore(bb: BbPluginApi) {
   return {
     list(threadId: string): GoalItem[] {
       return (listStmt.all(threadId) as ItemRow[]).map(rowToItem);
+    },
+
+    /** Stable durable age ordering for conservative remediation repair. */
+    creationOrder(threadId: string): string[] {
+      return (creationOrderStmt.all(threadId) as Array<{ id: string }>).map((row) => row.id);
     },
 
     updatedAt(threadId: string, itemId: string): number | null {

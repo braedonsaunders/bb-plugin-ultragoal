@@ -2477,15 +2477,18 @@ export default function plugin(bb: BbPluginApi) {
         result.linked +
         result.minted +
         result.autoFixed +
+        result.healedDuplicates +
         result.requeuedMissing +
         result.requeuedInvalid;
       if (changed === 0) return;
       bb.log.info(
-        `Finding queue on ${rootThreadId}: ${result.minted} minted, ${result.linked} attached, ${result.autoFixed} recovered fixed, ${result.requeuedMissing} requeued missing, ${result.requeuedInvalid} requeued invalid; ${result.remediationWorkItems} remediation work item(s), ${result.awaitingAssignment} awaiting assignment`,
+        `Finding queue on ${rootThreadId}: ${result.minted} minted, ${result.linked} attached, ${result.healedDuplicates} duplicate singleton(s) healed, ${result.autoFixed} recovered fixed, ${result.requeuedMissing} requeued missing, ${result.requeuedInvalid} requeued invalid; ${result.remediationWorkItems} remediation work item(s), ${result.awaitingAssignment} awaiting assignment`,
       );
       markGoalEvent(rootThreadId);
       void publishFresh(rootThreadId);
-      if (result.minted > 0 || result.linked > 0) void scheduleReady(rootThreadId);
+      if (result.minted > 0 || result.linked > 0 || result.healedDuplicates > 0) {
+        void scheduleReady(rootThreadId);
+      }
     } finally {
       reconcilingFindingQueues.delete(rootThreadId);
     }

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.17.14
+
+- Exact concrete-path matching now treats square-bracket route segments such
+  as Next.js `[entity]` directories as literal repository paths while still
+  rejecting wildcard syntax, broad directories, and shared infrastructure.
+- A work item may explicitly own a later defect through its structured
+  `CONTEXT (audit finding[s] ... fnd_...)` clause. Arbitrary mentions elsewhere
+  in the work brief remain non-authoritative, including auditor notes that
+  describe an earlier coalescing decision as wrong.
+- Startup repair conservatively moves v0.17.13's scheduler-minted pending
+  singleton duplicates back to the oldest strong matching work item, removes
+  the orphan duplicates, and continues scanning linked work at full capacity.
+  The three live OpenBooks false-negative shapes now heal without growing the
+  remediation work-item count.
+- Added regressions for dynamic routes, both multi-defect context clauses,
+  negative auditor mentions, restart recovery, oldest-target selection, full
+  capacity, and duplicate cleanup.
+
 ## 0.17.13
 
 - Added a durable stale-link audit at startup and on every progress pulse. Each

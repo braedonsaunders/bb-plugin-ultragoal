@@ -1,6 +1,6 @@
 import type { FindingStore } from "./findings.js";
-import type { ItemStore } from "./items.js";
-import { findingAction, findingFilesMatchItem, normalizeFindingFile } from "./scheduler.js";
+import { currentSliceTitle, type ItemStore } from "./items.js";
+import { findingAction, findingMatchesItem, normalizeFindingFile } from "./scheduler.js";
 
 export interface FindingQueueResult {
   linked: number;
@@ -8,6 +8,7 @@ export interface FindingQueueResult {
   autoFixed: number;
   requeuedMissing: number;
   requeuedInvalid: number;
+  healedDuplicates: number;
   remediationWorkItems: number;
   awaitingAssignment: number;
 }
@@ -52,7 +53,9 @@ export function detachStaleFindingLinks(input: {
     // while their repair work correctly owned a schema source file. Preserve
     // that primary; later coalesced links must prove concrete-file overlap.
     if (primaryByItem.get(finding.itemId) === finding.id) continue;
-    if (!findingFilesMatchItem(finding.file, finding.fixFiles, item)) invalid.push(finding.id);
+    if (!findingMatchesItem(finding.id, finding.file, finding.fixFiles, item)) {
+      invalid.push(finding.id);
+    }
   }
   return {
     requeuedMissing: input.findings.unlinkItems(input.threadId, missing),
@@ -62,6 +65,81 @@ export function detachStaleFindingLinks(input: {
 
 export interface FindingCompletionResult extends StaleFindingLinkResult {
   fixed: number;
+}
+
+/**
+ * Repair the narrow v0.17.13 false-negative aftermath: a valid finding may
+ * already have been backfilled into a new scheduler-generated singleton.
+ * Only an unclaimed pending item with the exact auto-mint title is eligible,
+ * and only when an older, noncompleted item strongly matches the finding.
+ */
+export function healAutoMintedFindingDuplicates(input: {
+  threadId: string;
+  findings: FindingStore;
+  items: ItemStore;
+}): number {
+  const { threadId, findings, items } = input;
+  const allItems = items.list(threadId);
+  const itemById = new Map(allItems.map((item) => [item.id, item]));
+  const creationOrder = items.creationOrder(threadId);
+  const age = new Map(creationOrder.map((id, index) => [id, index]));
+  allItems.sort((left, right) => (age.get(left.id) ?? 0) - (age.get(right.id) ?? 0));
+  const open = findings.remediationQueue(threadId);
+  const all = findings.list(threadId);
+  const openByItem = new Map<string, typeof open>();
+  const allByItem = new Map<string, typeof all>();
+  for (const finding of open) {
+    if (!finding.itemId) continue;
+    const linked = openByItem.get(finding.itemId) ?? [];
+    linked.push(finding);
+    openByItem.set(finding.itemId, linked);
+  }
+  for (const finding of all) {
+    if (!finding.itemId) continue;
+    const linked = allByItem.get(finding.itemId) ?? [];
+    linked.push(finding);
+    allByItem.set(finding.itemId, linked);
+  }
+
+  const removed = new Set<string>();
+  let healed = 0;
+  for (const finding of open) {
+    if (!finding.itemId || removed.has(finding.itemId)) continue;
+    const current = itemById.get(finding.itemId);
+    if (!current || current.status !== "pending") continue;
+    const autoMintedStep = currentSliceTitle(
+      `Fix: ${finding.title} [${normalizeFindingFile(finding.file)}]`,
+    );
+    if (current.step !== autoMintedStep) continue;
+    if ((openByItem.get(current.id) ?? []).length !== 1) continue;
+    // Do not strand resolved history when removing the singleton item. The
+    // live repair shape has exactly this one open association.
+    if ((allByItem.get(current.id) ?? []).length !== 1) continue;
+
+    const currentAge = age.get(current.id);
+    if (currentAge === undefined) continue;
+    const target = allItems.find((item) => {
+      if (item.id === current.id || removed.has(item.id) || item.status === "completed") return false;
+      const candidateAge = age.get(item.id);
+      return (
+        candidateAge !== undefined &&
+        candidateAge < currentAge &&
+        findingMatchesItem(finding.id, finding.file, finding.fixFiles, item)
+      );
+    });
+    if (!target) continue;
+
+    if (!findings.moveItem(threadId, finding.id, current.id, target.id)) continue;
+    if (!items.remove(threadId, current.id)) {
+      // Preserve the prior consistent state if the unexpected item removal
+      // fails; the next pass can retry deterministically.
+      findings.moveItem(threadId, finding.id, target.id, current.id);
+      continue;
+    }
+    removed.add(current.id);
+    healed += 1;
+  }
+  return healed;
 }
 
 /** Completion guard: invalid open links are detached before the remaining
@@ -94,8 +172,11 @@ export function reconcileFindingQueue(input: {
 }): FindingQueueResult {
   const { threadId, findings, items } = input;
   const maxStaffed = Math.max(0, input.maxStaffed);
+  const healedDuplicates = healAutoMintedFindingDuplicates({ threadId, findings, items });
   const allItems = items.list(threadId);
   const itemById = new Map(allItems.map((item) => [item.id, item]));
+  const age = new Map(items.creationOrder(threadId).map((id, index) => [id, index]));
+  allItems.sort((left, right) => (age.get(left.id) ?? 0) - (age.get(right.id) ?? 0));
   let autoFixed = 0;
   const detached = detachStaleFindingLinks({ threadId, findings, items });
   const requeuedMissing = detached.requeuedMissing;
@@ -131,16 +212,20 @@ export function reconcileFindingQueue(input: {
   for (const finding of queue) {
     if (finding.itemId) continue;
     const disposition = findingAction({
+      findingId: finding.id,
       file: finding.file,
       fixFiles: finding.fixFiles,
       staffedRemediationCount: staffed.size,
       maxStaffedRemediations: maxStaffed,
       openItems: allItems.filter((item) => item.status !== "completed"),
     });
-    if (disposition.action === "record-only") break;
+    // A full capacity blocks new work items, not valid links to work already
+    // counted in that capacity. Keep scanning so a later declared finding is
+    // not stranded behind an older unrelated one.
+    if (disposition.action === "record-only") continue;
     if (disposition.action === "attach") {
       const consumesCapacity = !staffed.has(disposition.attachItemId);
-      if (consumesCapacity && staffed.size >= maxStaffed) break;
+      if (consumesCapacity && staffed.size >= maxStaffed) continue;
       if (findings.linkItem(threadId, finding.id, disposition.attachItemId)) {
         staffed.add(disposition.attachItemId);
         linked += 1;
@@ -148,7 +233,7 @@ export function reconcileFindingQueue(input: {
       continue;
     }
 
-    if (staffed.size >= maxStaffed) break;
+    if (staffed.size >= maxStaffed) continue;
     const fixItem = items.add(
       threadId,
       `Fix: ${finding.title} [${normalizeFindingFile(finding.file)}]`,
@@ -173,6 +258,7 @@ export function reconcileFindingQueue(input: {
     autoFixed,
     requeuedMissing,
     requeuedInvalid,
+    healedDuplicates,
     remediationWorkItems: new Set(
       queue.flatMap((finding) => (finding.itemId ? [finding.itemId] : [])),
     ).size,

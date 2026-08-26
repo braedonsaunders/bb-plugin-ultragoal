@@ -32,19 +32,37 @@ const SHARED_INFRASTRUCTURE_FILES: ReadonlySet<string> = new Set([
 
 export function isConcreteFindingFile(path: string): boolean {
   path = normalizeFindingFile(path);
-  if (!path || /[*?{}[\]]/.test(path)) return false;
+  // Square brackets are literal path characters in frameworks such as Next
+  // (`app/api/[entity]/route.ts`). Exact equality makes them safe here; only
+  // actual wildcard syntax remains non-concrete.
+  if (!path || /[*?{}]/.test(path)) return false;
   if (SHARED_INFRASTRUCTURE_FILES.has(path)) return false;
   const leaf = path.split("/").at(-1) ?? "";
   return leaf.includes(".");
 }
 
-const STEP_FILE_PATTERN = /(?:^|[\s`"'([{])((?:[A-Za-z0-9_.@+-]+\/)*[A-Za-z0-9_.@+-]+\.[A-Za-z0-9_+-]+(?::\d+(?:[-:]\d+)?)?)(?=$|[\s`"'\])},;.!?])/g;
+const STEP_FILE_PATTERN = /(?:^|[\s`"'([{])((?:[A-Za-z0-9_.@+\[\]-]+\/)*[A-Za-z0-9_.@+\[\]-]+\.[A-Za-z0-9_+-]+(?::\d+(?:[-:]\d+)?)?)(?=$|[\s`"'\])},;.!?])/g;
+const CONTEXT_AUDIT_FINDINGS_PATTERN = /\bCONTEXT\s*\(\s*audit\s+findings?\b([^)]*)\)/gi;
+const FINDING_ID_PATTERN = /\bfnd_[a-z0-9_]+\b/gi;
 
 /** Concrete repository files explicitly named in a work item's brief. */
 export function concreteFilesInStep(step: string): string[] {
   return [...step.matchAll(STEP_FILE_PATTERN)]
     .map((match) => normalizeFindingFile(match[1] ?? ""))
     .filter(isConcreteFindingFile);
+}
+
+/** Only the structured CONTEXT audit-finding clause is authoritative. A
+ * finding id mentioned elsewhere (for example, an auditor note explaining
+ * that an old coalescing decision was wrong) is deliberately ignored. */
+export function itemContextDeclaresFinding(step: string, findingId: string): boolean {
+  const target = findingId.trim().toLowerCase();
+  if (!/^fnd_[a-z0-9_]+$/.test(target)) return false;
+  for (const context of step.matchAll(CONTEXT_AUDIT_FINDINGS_PATTERN)) {
+    const ids = (context[1] ?? "").match(FINDING_ID_PATTERN) ?? [];
+    if (ids.some((id) => id.toLowerCase() === target)) return true;
+  }
+  return false;
 }
 
 /** A durable finding link needs direct file evidence. Directory scopes and
@@ -65,6 +83,20 @@ export function findingFilesMatchItem(
     ...concreteFilesInStep(item.step),
   ]);
   return evidenceFiles.some((file) => ownedFiles.has(file));
+}
+
+/** Exact concrete-file ownership is preferred; an explicit structured audit
+ * declaration is the only non-file positive signal accepted for coalescing. */
+export function findingMatchesItem(
+  findingId: string,
+  findingFile: string,
+  fixFiles: readonly string[],
+  item: Pick<GoalItem, "files" | "step">,
+): boolean {
+  return (
+    findingFilesMatchItem(findingFile, fixFiles, item) ||
+    itemContextDeclaresFinding(item.step, findingId)
+  );
 }
 
 /** Finding coalescing is deliberately stricter than scheduler scope overlap.
@@ -124,6 +156,7 @@ export type FindingAction =
 /** Same-file findings join the existing slice. Past the staffed-remediation cap,
  * new distinct files are recorded but do not mint another auto-staffed slice. */
 export function findingAction(input: {
+  findingId: string;
   file: string;
   fixFiles?: readonly string[];
   staffedRemediationCount: number;
@@ -133,7 +166,7 @@ export function findingAction(input: {
   const attach = input.openItems.find(
     (item) =>
       item.status !== "completed" &&
-      findingFilesMatchItem(input.file, input.fixFiles ?? [], item),
+      findingMatchesItem(input.findingId, input.file, input.fixFiles ?? [], item),
   );
   if (attach) return { action: "attach", attachItemId: attach.id };
   if (input.staffedRemediationCount >= input.maxStaffedRemediations) return { action: "record-only" };

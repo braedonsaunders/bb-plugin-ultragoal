@@ -134,6 +134,9 @@ export function createFindingStore(bb: BbPluginApi) {
   const setItem = db.prepare(
     "UPDATE goal_findings SET item_id = @item_id, updated_at = @updated_at WHERE thread_id = @thread_id AND id = @id AND status = 'open' AND item_id IS NULL",
   );
+  const moveItem = db.prepare(
+    "UPDATE goal_findings SET item_id = @item_id, updated_at = @updated_at WHERE thread_id = @thread_id AND id = @id AND status = 'open' AND item_id = @from_item_id",
+  );
   const clearItem = db.prepare(
     "UPDATE goal_findings SET item_id = NULL, updated_at = @updated_at WHERE thread_id = @thread_id AND id = @id AND status = 'open'",
   );
@@ -173,6 +176,17 @@ export function createFindingStore(bb: BbPluginApi) {
 
     linkItem(threadId: string, findingId: string, itemId: string): boolean {
       return setItem.run({ thread_id: threadId, id: findingId, item_id: itemId, updated_at: Date.now() }).changes > 0;
+    },
+
+    /** Atomically move one open finding from its current work item. */
+    moveItem(threadId: string, findingId: string, fromItemId: string, itemId: string): boolean {
+      return moveItem.run({
+        thread_id: threadId,
+        id: findingId,
+        from_item_id: fromItemId,
+        item_id: itemId,
+        updated_at: Date.now(),
+      }).changes > 0;
     },
 
     unlinkItem(threadId: string, findingId: string): boolean {
