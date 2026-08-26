@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.0
+
+- `bb ultragoal exec` shows and sets which provider and model workers and
+  verifiers run on. The pin was only reachable from the right-pane Settings, so
+  nothing on the CLI ever revealed it — a goal ran ninety-nine workers on a
+  provider nobody intended and the first sign was an exhausted quota. A pin
+  that expensive should be one command away from being read.
+
 ## 0.19.2
 
 - Reclaim now diffs `base...HEAD`, not `base`. 0.19.1 traded an ancestor test

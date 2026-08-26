@@ -4301,6 +4301,45 @@ export default function plugin(bb: BbPluginApi) {
         };
       }
 
+      if (action === "exec") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const tokens = parsed.rawRest ?? [];
+        const role = tokens[0] ?? "";
+        if (!role) {
+          // Reading this was impossible from the CLI, which is how a goal ran
+          // ninety-nine workers on the wrong provider before anyone noticed.
+          return {
+            exitCode: 0,
+            stdout: [
+              `worker:   ${goal.workerProviderOverride ?? "(inherits the root thread)"} ${goal.workerModelOverride ?? ""}`.trim(),
+              `verifier: ${goal.verifyProviderOverride ?? "(default)"} ${goal.verifyModelOverride ?? ""}`.trim(),
+            ].join("\n"),
+          };
+        }
+        if (role !== "worker" && role !== "verifier") {
+          return { exitCode: 1, stderr: 'Usage: bb ultragoal exec | exec worker <provider> <model> | exec verifier <provider> <model>' };
+        }
+        const providerId = (tokens[1] ?? "").trim();
+        const model = tokens.slice(2).join(" ").trim();
+        if (!providerId || !model) {
+          return { exitCode: 1, stderr: `Usage: bb ultragoal exec ${role} <provider> <model>` };
+        }
+        const updated = store.update(
+          threadId,
+          role === "worker"
+            ? { workerProviderOverride: providerId, workerModelOverride: model }
+            : { verifyProviderOverride: providerId, verifyModelOverride: model },
+        );
+        if (!updated) return { exitCode: 1, stderr: "Could not update the goal." };
+        markGoalEvent(threadId);
+        void publishFresh(threadId);
+        return {
+          exitCode: 0,
+          stdout: `${role} now runs on ${providerId} ${model}. Workers already running keep the provider they started on.`,
+        };
+      }
+
       if (action === "pause") {
         const goal = await pauseGoal(threadId, "Paused from the CLI.");
         return {
@@ -4335,6 +4374,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "pane", summary: "Dump the sidebar projection as JSON", usage: "bb ultragoal pane [--thread <id>]" },
       { name: "set", summary: "Set or replace the UltraGoal", usage: "bb ultragoal set <objective> [--thread <id>]" },
       { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
+      { name: "exec", summary: "Show or pin which provider and model workers and verifiers run on", usage: "bb ultragoal exec | exec worker <provider> <model> | exec verifier <provider> <model> [--thread <id>]" },
       { name: "workers", summary: "Set the goal's concurrent worker slots", usage: "bb ultragoal workers <0-16> [--thread <id>]" },
       { name: "decide", summary: "Answer an open owner decision", usage: "bb ultragoal decide <decision_id> <answer> [--thread <id>]" },
       { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--own-slice] [--thread <id>]" },
@@ -4396,7 +4436,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "requires" | "item" | "resolve" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "requires" | "item" | "resolve" | "exec" | "transfer-root";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -4425,7 +4465,7 @@ function parseCli(
   ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
-  if (action === "finding" || action === "item" || action === "resolve") {
+  if (action === "finding" || action === "item" || action === "resolve" || action === "exec") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim(), rawRest: rest.slice(1) };
   }
   if (action === "transfer-root") {
