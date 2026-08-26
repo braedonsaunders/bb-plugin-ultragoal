@@ -4016,7 +4016,8 @@ export default function plugin(bb: BbPluginApi) {
         const goal = store.get(threadId);
         if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
         const tokens = parsed.rawRest ?? [];
-        const itemId = tokens[0] ?? "";
+        const creating = tokens[0] === "--new";
+        const itemId = creating ? "" : tokens[0] ?? "";
         let step: string | undefined;
         let files: string[] | undefined;
         let check: string | null | undefined;
@@ -4033,10 +4034,37 @@ export default function plugin(bb: BbPluginApi) {
           }
           return { exitCode: 1, stderr: `Unknown option: ${token}` };
         }
+        if (creating) {
+          if (remove) return { exitCode: 1, stderr: "--new and --remove are contradictory." };
+          if (!step) {
+            return { exitCode: 1, stderr: 'A new work item needs --step "<what to do and how it is proven done>".' };
+          }
+          const before = new Set(items.list(threadId).map((row) => row.id));
+          const patched = items.patch(threadId, [{
+            step,
+            status: "pending",
+            ...(files !== undefined ? { files } : {}),
+            ...(check !== undefined ? { check } : {}),
+          }], []);
+          const created = patched.items.find((row) => !before.has(row.id));
+          if (!created) return { exitCode: 1, stderr: "Could not create the work item." };
+          markGoalEvent(threadId);
+          void publishFresh(threadId);
+          void scheduleReady(threadId);
+          return {
+            exitCode: 0,
+            stdout: [
+              `Created ${created.id} [${created.status}]`,
+              `  files: ${created.files.length > 0 ? created.files.join(", ") : "(none)"}`,
+              `  check: ${created.check ?? "(none)"}`,
+              "No finding is linked; it closes on its own report, not on defect coverage.",
+            ].join("\n"),
+          };
+        }
         if (!itemId) {
           return {
             exitCode: 1,
-            stderr: 'Usage: bb ultragoal item <item-id> [--step "<text>"] [--files a,b] [--check "<cmd>" | --no-check]',
+            stderr: 'Usage: bb ultragoal item <item-id> [--step "<text>"] [--files a,b] [--check "<cmd>" | --no-check] [--remove]\n       bb ultragoal item --new --step "<text>" [--files a,b] [--check "<cmd>"]',
           };
         }
         const item = items.list(threadId).find((row) => row.id === itemId);
@@ -4181,7 +4209,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
       { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
-      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] [--thread <id>]" },
+      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] | bb ultragoal item --new --step \"<text>\" [--files a,b] [--check \"<cmd>\"] [--thread <id>]" },
       { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.28
+
+- `bb ultragoal item --new` creates a plan item with no finding behind it.
+  An outside orchestrator could file a defect and get a slice for free, but
+  release-gate work — a test that fails only under the full suite, a broken
+  check command, CI wiring — is not a product defect, and minting a finding to
+  get a work item would put a fiction in the register that then has to be
+  explained away at close. Items created this way close on their own report
+  rather than on defect coverage, which is what a no-finding item means.
+
 ## 0.17.27
 
 - Resolving a finding now retires the slice it minted. A finding fixed in
