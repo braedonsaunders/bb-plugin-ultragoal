@@ -24,7 +24,9 @@ WORKTREES="$BB_HOME/worktrees"
 BB_DB="$BB_HOME/bb.db"
 APPLY=0
 FORCE=0
-for arg in "$@"; do
+# GC_ARGS lets a scheduled runner pass flags where it can only set environment
+# variables, which is how bb automations invoke a stored script.
+for arg in ${GC_ARGS:-} "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
     --force) FORCE=1 ;;
