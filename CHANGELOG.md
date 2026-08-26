@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.27
+
+- Resolving a finding now retires the slice it minted. A finding fixed in
+  someone else's slice, or dismissed, left its own work item behind as a ready,
+  unstaffed plan row; the scheduler cannot tell that from real work and staffs a
+  worker to re-fix already-guarded code. Two survived a resolve pass and stayed
+  ready. The row is REMOVED rather than completed — completion carries
+  per-defect evidence rules, and a shortcut through them would cost more than
+  the tidiness it buys — and only when every finding that ever pointed at the
+  item is resolved, nobody holds it, and it is still pending. An item no
+  finding ever pointed at is never touched: a declared deliverable exists on
+  its own terms. `bb ultragoal item <id> --remove` applies the same rule by
+  hand for rows orphaned before this shipped.
+
 ## 0.17.26
 
 - An external orchestrator can now reconcile a plan, not just add to it.

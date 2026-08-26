@@ -53,6 +53,7 @@ import {
   missingDeliverables,
   parseDeliverableEvidence,
 } from "./lib/deliverables.js";
+import { remediationItemRetirement } from "./lib/remediation-retirement.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
@@ -1426,6 +1427,31 @@ export default function plugin(bb: BbPluginApi) {
   // Close the loop Codex Goal closes inside the provider: a finished worker
   // finishes its plan item. With verification on, only VERIFY_PASS completes
   // the slice; with it off, the worker's own done report does.
+  /**
+   * A resolved finding can leave the slice it minted behind as a ready plan
+   * row, which the scheduler cannot tell from real work and will staff a worker
+   * against to re-fix already-guarded code. Retire it — remove, never complete,
+   * because completion carries per-defect evidence rules.
+   */
+  function retireOrphanedRemediationItem(rootThreadId: string, itemId: string | null | undefined): boolean {
+    if (!itemId) return false;
+    const item = items.list(rootThreadId).find((row) => row.id === itemId);
+    if (!item) return false;
+    const verdict = remediationItemRetirement({
+      item,
+      linkedFindings: findings.list(rootThreadId).filter((finding) => finding.itemId === itemId),
+      staffed:
+        workersOnItem(rootThreadId, itemId).length > 0 ||
+        itemClaimants(rootThreadId, itemId).length > 0,
+    });
+    if (!verdict.retire) return false;
+    const removed = items.patch(rootThreadId, [], [itemId]).removed > 0;
+    if (removed) {
+      bb.log.info(`Retired remediation item ${itemId} on ${rootThreadId}: no linked finding is open and nobody is on it`);
+    }
+    return removed;
+  }
+
   function closeItemFindings(rootThreadId: string, itemId: string, note: string): number {
     const result = closeFindingsForCompletedItem({
       threadId: rootThreadId,
@@ -3164,11 +3190,21 @@ export default function plugin(bb: BbPluginApi) {
           isError: true,
         };
       }
+      const retiredItemId = retireOrphanedRemediationItem(rootThreadId, resolved.itemId)
+        ? resolved.itemId
+        : null;
       reconcileFindingBacklog(rootThreadId);
       void publishFresh(rootThreadId);
       return {
         content: [
-          { type: "text", text: JSON.stringify({ finding_id: resolved.id, status: resolved.status }) },
+          {
+            type: "text",
+            text: JSON.stringify({
+              finding_id: resolved.id,
+              status: resolved.status,
+              ...(retiredItemId ? { retired_item_id: retiredItemId } : {}),
+            }),
+          },
         ],
       };
     },
@@ -3984,11 +4020,13 @@ export default function plugin(bb: BbPluginApi) {
         let step: string | undefined;
         let files: string[] | undefined;
         let check: string | null | undefined;
+        let remove = false;
         for (let i = 1; i < tokens.length; i += 1) {
           const token = tokens[i];
           if (token === "--step") { step = (tokens[++i] ?? "").trim(); continue; }
           if (token === "--check") { check = (tokens[++i] ?? "").trim() || null; continue; }
           if (token === "--no-check") { check = null; continue; }
+          if (token === "--remove") { remove = true; continue; }
           if (token === "--files") {
             files = (tokens[++i] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
             continue;
@@ -4003,6 +4041,24 @@ export default function plugin(bb: BbPluginApi) {
         }
         const item = items.list(threadId).find((row) => row.id === itemId);
         if (!item) return { exitCode: 1, stderr: `Unknown work item: ${itemId}` };
+        if (remove) {
+          const verdict = remediationItemRetirement({
+            item,
+            linkedFindings: findings.list(threadId).filter((finding) => finding.itemId === itemId),
+            staffed:
+              workersOnItem(threadId, itemId).length > 0 ||
+              itemClaimants(threadId, itemId).length > 0,
+          });
+          if (!verdict.retire) {
+            return { exitCode: 1, stderr: `Refusing to remove ${itemId}: ${verdict.reason}.` };
+          }
+          if (items.patch(threadId, [], [itemId]).removed === 0) {
+            return { exitCode: 1, stderr: `Could not remove ${itemId}.` };
+          }
+          markGoalEvent(threadId);
+          void publishFresh(threadId);
+          return { exitCode: 0, stdout: `Removed ${itemId}; every finding that pointed at it is resolved.` };
+        }
         if (step === undefined && files === undefined && check === undefined) {
           return {
             exitCode: 0,
@@ -4072,10 +4128,16 @@ export default function plugin(bb: BbPluginApi) {
         }
         const resolved = findings.resolve(threadId, findingId, resolution, evidence);
         if (!resolved) return { exitCode: 1, stderr: `Finding not found: ${findingId}` };
+        const retired = retireOrphanedRemediationItem(threadId, resolved.itemId);
         reconcileFindingBacklog(threadId);
         markGoalEvent(threadId);
         void publishFresh(threadId);
-        return { exitCode: 0, stdout: `${resolved.id} resolved: ${resolved.status}` };
+        return {
+          exitCode: 0,
+          stdout: retired
+            ? `${resolved.id} resolved: ${resolved.status}; retired its now-orphaned remediation item ${resolved.itemId}`
+            : `${resolved.id} resolved: ${resolved.status}`,
+        };
       }
 
       if (action === "pause") {
@@ -4119,7 +4181,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
       { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
-      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--thread <id>]" },
+      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] [--thread <id>]" },
       { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
