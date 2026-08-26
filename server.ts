@@ -50,6 +50,7 @@ import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
+  finishedWorkerRetirements,
   freeSlots,
   liveVerifierCount,
   occupyingWorkerIds,
@@ -1118,9 +1119,22 @@ export default function plugin(bb: BbPluginApi) {
       const agents = agentCache.get(rootThreadId) ?? [];
       const now = Date.now();
 
-      const openItems = items
-        .list(rootThreadId)
-        .filter((item) => item.status === "in_progress");
+      const plannedItems = items.list(rootThreadId);
+      const openItems = plannedItems.filter((item) => item.status === "in_progress");
+
+      // An idle worker whose slice is already closed is not work: it is a
+      // durable row the SQL capacity fence keeps counting. Retiring it used to
+      // wait for a later sweep to observe the host as `stopped`, which depends
+      // on a best-effort threads.stop that swallows its failures — so every
+      // swallowed failure permanently consumed one root slot until no
+      // reservation could be granted. Reconcile against the plan instead.
+      const retirable = new Set(
+        finishedWorkerRetirements(
+          agents.filter((agent) => agent.threadId !== rootThreadId),
+          plannedItems,
+          (workerThreadId) => collab.verifiersFor(workerThreadId).length > 0,
+        ),
+      );
 
       const liveVerifierSources = new Set(
         agents
@@ -1139,6 +1153,15 @@ export default function plugin(bb: BbPluginApi) {
           if (agent.status === "running" || agent.status === "starting") {
             collab.resetNudges(agent.threadId);
           }
+          continue;
+        }
+        if (retirable.has(agent.threadId)) {
+          collab.forget(agent.threadId);
+          firstSeenIdle.delete(agent.threadId);
+          void releaseWorkerRuntime(agent.threadId);
+          bb.log.info(
+            `Retired finished worker ${agent.nickname} (${agent.threadId}) on ${rootThreadId}: slice ${agent.itemId} is closed; released its scheduler slot`,
+          );
           continue;
         }
         if (!agent.itemId || !openItems.some((item) => item.id === agent.itemId)) continue;

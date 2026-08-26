@@ -140,6 +140,40 @@ export function occupyingWorkerIds(
   return [...ids];
 }
 
+/**
+ * Idle workers whose durable row no longer represents work, and so must be
+ * retired to give their root slot back.
+ *
+ * The durable SQL capacity fence counts every non-retired `collab_agents` row,
+ * while {@link occupyingWorkerIds} counts only live-or-holding workers. A
+ * finished worker used to be retired only once a later sweep observed its host
+ * as `stopped`, which depends on a best-effort `threads.stop` that swallows its
+ * failures. Each swallowed failure left a row the fence counted forever and the
+ * scheduler did not — enough of them and no reservation could ever be granted
+ * again. Reconciling against the plan removes that dependency.
+ *
+ * A worker is only retired when its slice is `completed` or gone from the plan
+ * entirely; a `pending` slice may still be handed back to the same worker. A
+ * worker with a verifier still reading it as a source is never retired, because
+ * the verifier resolves its slice through that row.
+ */
+export function finishedWorkerRetirements(
+  agents: readonly Pick<GoalAgent, "role" | "status" | "itemId" | "threadId">[],
+  items: readonly Pick<GoalItem, "id" | "status">[],
+  hasLiveVerifier: (workerThreadId: string) => boolean,
+): string[] {
+  const byId = new Map(items.map((item) => [item.id, item.status]));
+  const retire: string[] = [];
+  for (const agent of agents) {
+    if (agent.role === "verifier" || agent.status !== "idle" || !agent.itemId) continue;
+    const status = byId.get(agent.itemId);
+    if (status !== undefined && status !== "completed") continue;
+    if (hasLiveVerifier(agent.threadId)) continue;
+    retire.push(agent.threadId);
+  }
+  return retire;
+}
+
 export function liveVerifierCount(
   agents: readonly Pick<GoalAgent, "role" | "status">[],
 ): number {

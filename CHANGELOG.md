@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.16
+
+- Finished workers now release their root slot by reconciling against the plan
+  instead of waiting for a later sweep to observe a `stopped` host. Retirement
+  previously depended on a best-effort `threads.stop` whose failures are
+  swallowed, so each swallowed failure left an idle durable row that the SQL
+  capacity fence counted forever while the in-memory scheduler did not — enough
+  of them and no reservation could be granted again, wedging the whole crew. An
+  idle worker is retired once its slice is `completed` or gone from the plan,
+  and never while a verifier still reads it as a source.
+
 ## 0.17.15
 
 - Scheduler startup now reconstructs durable worker ownership before counting
