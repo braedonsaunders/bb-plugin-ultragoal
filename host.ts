@@ -86,16 +86,17 @@ export default experimental_defineHostEntry({
         // outranks any disk saving.
         const dirty = await git(checkoutPath, "status", "--porcelain").catch(() => "x");
         if (dirty.length > 0) return keep("checkout has uncommitted changes");
-        // NOT an ancestor check. A squash-merge rewrites the work into a new
-        // commit, so this branch's own commits are never reachable from the
-        // base afterwards and an ancestor test declines every single time.
-        // What matters is whether anything here is still absent from the base,
-        // so compare CONTENT: an empty diff means the base already has it,
-        // however it got there.
+        // Three dots, and the distinction is the whole check. An ancestor test
+        // declines every squash-merge, because squashing rewrites the work into
+        // a new commit. A two-dot diff declines almost as often for the
+        // opposite reason: the base has moved on, and every later commit on it
+        // reads as a difference. `base...HEAD` asks the only question that
+        // matters — does this branch still ADD anything the base lacks — by
+        // diffing from where the two parted company.
         try {
-          await git(checkoutPath, "diff", "--quiet", mergedInto, "--");
+          await git(checkoutPath, "diff", "--quiet", `${mergedInto}...HEAD`);
         } catch {
-          return keep(`content differs from ${mergedInto}`);
+          return keep(`still adds work ${mergedInto} does not have`);
         }
       }
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.2
+
+- Reclaim now diffs `base...HEAD`, not `base`. 0.19.1 traded an ancestor test
+  that declined every squash-merge for a two-dot diff that declined almost as
+  often for the opposite reason: the base branch keeps moving, and every later
+  commit on it reads as a difference from a finished slice. Three dots diff
+  from where the branch and the base parted company, which asks the only
+  question that matters — does this branch still ADD anything the base lacks.
+  On a live goal that is the difference between reclaiming a handful of
+  worktrees and reclaiming a hundred and forty-eight.
+
 ## 0.19.1
 
 - The reclaim in 0.19.0 declined every worktree it was offered. It asked
