@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.2
+
+- Root transfer no longer requires every worker to share the root's
+  environment. A worker gets its own managed worktree by design — that is what
+  one agent per slice means — so the check refused every transfer as soon as a
+  single worker had been staffed. Combined with 0.20.1, a dead root is now
+  actually recoverable. The project must still match.
+
 ## 0.20.1
 
 - Root transfer no longer demands the target run `codex/gpt-5.6-sol xhigh

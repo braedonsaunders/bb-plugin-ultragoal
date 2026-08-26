@@ -430,8 +430,13 @@ export async function executeRootTransfer(input: {
   const childParents = new Map<string, string | null>();
   for (const child of inspection.directChildren) {
     const thread = await bb.sdk.threads.get({ threadId: child.threadId });
-    if (thread.projectId !== source.projectId || thread.environmentId !== source.environmentId) {
-      throw new Error(`worker ${child.threadId} is not in the source project/environment`);
+    // Project only. A worker gets its OWN managed worktree by design — that is
+    // the whole point of one agent per slice — so requiring it to share the
+    // root's environment refuses every transfer as soon as a single worker has
+    // ever been staffed. The environment moves with the worker; what must not
+    // change under it is the project.
+    if (thread.projectId !== source.projectId) {
+      throw new Error(`worker ${child.threadId} is not in the source project`);
     }
     if (thread.archivedAt || thread.deletedAt) {
       throw new Error(`live worker ${child.threadId} is archived or deleted`);
