@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.1
+
+- The reclaim in 0.19.0 declined every worktree it was offered. It asked
+  whether the branch's commits were reachable from the base, and a squash-merge
+  rewrites the work into a new commit — so after the very merge that triggers
+  the reclaim, the answer is always no. It now compares CONTENT instead: an
+  empty diff against the base means the base already has the work, however it
+  got there. The dirty-checkout guard is unchanged.
+
 ## 0.19.0
 
 - **The plugin now cleans up after its own slices.** It creates one worktree

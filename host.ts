@@ -86,11 +86,16 @@ export default experimental_defineHostEntry({
         // outranks any disk saving.
         const dirty = await git(checkoutPath, "status", "--porcelain").catch(() => "x");
         if (dirty.length > 0) return keep("checkout has uncommitted changes");
+        // NOT an ancestor check. A squash-merge rewrites the work into a new
+        // commit, so this branch's own commits are never reachable from the
+        // base afterwards and an ancestor test declines every single time.
+        // What matters is whether anything here is still absent from the base,
+        // so compare CONTENT: an empty diff means the base already has it,
+        // however it got there.
         try {
-          const head = await git(checkoutPath, "rev-parse", "HEAD");
-          await git(checkoutPath, "merge-base", "--is-ancestor", head, mergedInto);
+          await git(checkoutPath, "diff", "--quiet", mergedInto, "--");
         } catch {
-          return keep(`commits are not reachable from ${mergedInto}`);
+          return keep(`content differs from ${mergedInto}`);
         }
       }
 
