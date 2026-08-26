@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.20.4
+
+- Root transfer now carries the standing worker brief, the per-item completion
+  floors and the staffing holds. It moved items, findings, decisions, agents,
+  reservations and caps — every table that existed when it was written — and
+  silently left behind three that were added later. A live transfer dropped a
+  3,485-character standing brief, twenty-eight `requires` floors and six holds
+  onto a root that was then deleted. The goal kept running with none of them
+  and nothing reported it. Each move is guarded, because these tables are
+  created at their use sites and a database that predates one must still
+  transfer.
+
 ## 0.20.3
 
 - A root transfer can now proceed when the source root is in `error`. It

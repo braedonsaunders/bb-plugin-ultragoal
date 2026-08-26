@@ -154,6 +154,22 @@ export function createRootTransferStore(bb: BbPluginApi) {
   const updateItems = db.prepare("UPDATE goal_items SET thread_id = ? WHERE thread_id = ?");
   const updateFindings = db.prepare("UPDATE goal_findings SET thread_id = ? WHERE thread_id = ?");
   const updateDecisions = db.prepare("UPDATE goal_decisions SET thread_id = ? WHERE thread_id = ?");
+  // Every goal-scoped table has to move, and these three were added after the
+  // transfer was written. A transfer silently left the standing worker brief,
+  // twenty-eight completion floors and six staffing holds behind on a root
+  // that was then deleted — the goal kept running with none of them, and
+  // nothing said so. Tables are created at their use sites, so guard each
+  // move: a goal whose database predates one of them must still transfer.
+  const moveGoalScoped = (table: string) => {
+    try {
+      return db.prepare(`UPDATE ${table} SET thread_id = ? WHERE thread_id = ?`);
+    } catch {
+      return null;
+    }
+  };
+  const updateWorkerBrief = moveGoalScoped("goal_worker_briefs");
+  const updateItemRequirements = moveGoalScoped("goal_item_requirements");
+  const updateStaffingHolds = moveGoalScoped("goal_item_staffing_holds");
   const updateLiveAgentParents = db.prepare(`
     UPDATE collab_agents SET parent_thread_id = ?
     WHERE root_thread_id = ? AND parent_thread_id = ? AND retired_at IS NULL
@@ -310,6 +326,13 @@ export function createRootTransferStore(bb: BbPluginApi) {
         const itemChanges = updateItems.run(targetThreadId, sourceThreadId).changes;
         const findingChanges = updateFindings.run(targetThreadId, sourceThreadId).changes;
         const decisionChanges = updateDecisions.run(targetThreadId, sourceThreadId).changes;
+        for (const move of [updateWorkerBrief, updateItemRequirements, updateStaffingHolds]) {
+          try {
+            move?.run(targetThreadId, sourceThreadId);
+          } catch {
+            // A table this database has never created has nothing to move.
+          }
+        }
         updateLiveAgentParents.run(targetThreadId, sourceThreadId, sourceThreadId);
         const agentChanges = updateAgentRoots.run(targetThreadId, sourceThreadId).changes;
         const reservationChanges = updateReservationRoots.run(targetThreadId, sourceThreadId).changes;
