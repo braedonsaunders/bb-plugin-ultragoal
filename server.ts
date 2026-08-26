@@ -55,6 +55,7 @@ import {
 } from "./lib/deliverables.js";
 import { remediationItemRetirement } from "./lib/remediation-retirement.js";
 import { createStaffingHoldStore } from "./lib/staffing-hold.js";
+import { hostContract } from "./host-contract.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
@@ -229,6 +230,8 @@ let snapshotDefaults: GoalSettingDefaults = {
   maxOpenFindings: DEFAULT_MAX_OPEN_FINDINGS,
   autoApproveAgentRequests: false,
   workerPermissionMode: "auto",
+  reclaimMergedWorktrees: true,
+  shareWorktreeNodeModules: true,
 };
 
 export default function plugin(bb: BbPluginApi) {
@@ -278,6 +281,20 @@ export default function plugin(bb: BbPluginApi) {
       description: "Repository paths that nearly every slice touches — a pinned schema inventory, a generated manifest — and so cannot prove which defect owns a change. Listing them here stops unrelated defects coalescing onto one file. Ecosystem manifests such as package.json are always included.",
       default: "",
     },
+    reclaimMergedWorktrees: {
+      type: "boolean",
+      label: "Delete a slice's worktree once its work is merged",
+      description:
+        "This plugin creates one worktree per slice and used to remove none of them: 217 worktrees and 9.9 GB accumulated for a goal with 177 completed slices. A worktree is removed only after its commits are on the base branch, and never when the checkout is dirty.",
+      default: true,
+    },
+    shareWorktreeNodeModules: {
+      type: "boolean",
+      label: "Share node_modules between worktrees by reference",
+      description:
+        "Thirteen worktrees each installed the same 1.1 GB dependency tree. Where the filesystem supports copy-by-reference (APFS, Btrfs), each worktree gets a real, independent node_modules that costs nothing until it diverges.",
+      default: true,
+    },
     autoApproveAgentRequests: {
       type: "boolean",
       label: "Automatically approve agent command, file and permission requests",
@@ -312,6 +329,8 @@ export default function plugin(bb: BbPluginApi) {
       maxWorkers: parseNonNegativeInt(value.maxWorkers) ?? DEFAULT_MAX_WORKERS,
       maxOpenFindings: parsePositiveInt(value.maxOpenFindings) ?? DEFAULT_MAX_OPEN_FINDINGS,
       autoApproveAgentRequests: value.autoApproveAgentRequests === true,
+      reclaimMergedWorktrees: value.reclaimMergedWorktrees !== false,
+      shareWorktreeNodeModules: value.shareWorktreeNodeModules !== false,
       workerPermissionMode: normalizePermissionMode(value.workerPermissionMode),
     };
     // Which files count as shared infrastructure is a property of the
@@ -986,6 +1005,7 @@ export default function plugin(bb: BbPluginApi) {
   // squash-merged into the base branch, one merge at a time per goal;
   // conflicts escalate to the orchestrator. Pushing the remote stays the
   // orchestrator's job.
+  const hostClient = bb.hosts.experimental_client({ contract: hostContract });
   const integrating = new Map<string, Promise<void>>();
   const INTEGRATION_STEER_COOLDOWN_MS = 30 * 60_000;
   const integrationSteerAt = new Map<string, number>();
@@ -1126,6 +1146,60 @@ export default function plugin(bb: BbPluginApi) {
     integrating.set(rootThreadId, next);
   }
 
+  /**
+   * Hand a merged slice's worktree back to the filesystem.
+   *
+   * Runs on the host daemon that owns the directory, because git and rm are not
+   * on the server-side API. Everything here is best effort and non-fatal: a
+   * failure to reclaim disk must never turn a successful integration into a
+   * failed one.
+   */
+  async function reclaimWorktree(
+    rootThreadId: string,
+    itemId: string,
+    environmentId: string,
+    mergedInto: string,
+  ): Promise<void> {
+    if (!snapshotDefaults.reclaimMergedWorktrees) return;
+    try {
+      const environment = await bb.sdk.environments.get({ environmentId });
+      const checkoutPath = (environment as { path?: string | null }).path ?? null;
+      const hostId = (environment as { hostId?: string | null }).hostId ?? null;
+      if (!checkoutPath || !hostId) return;
+      if (!environment.isWorktree || !environment.managed) return;
+
+      if (snapshotDefaults.shareWorktreeNodeModules) {
+        // Seed the store from a checkout that is about to be deleted: the
+        // cheapest possible moment to capture a good dependency tree.
+        const seeded = await hostClient
+          .call("shareNodeModules", { checkoutPath, seedIfEmpty: true }, { hostId })
+          .catch(() => null);
+        if (seeded?.seeded) {
+          bb.log.info(`Seeded the node_modules store from ${itemId} (${seeded.key})`);
+        }
+      }
+
+      const result = await hostClient.call(
+        "reclaimWorktree",
+        { checkoutPath, mergedInto, force: false },
+        { hostId },
+      );
+      if (result.removed) {
+        bb.log.info(
+          `Reclaimed the worktree for slice ${itemId}: ${Math.round(result.freedBytes / 1048576)}MB`,
+        );
+      } else if (result.reason) {
+        bb.log.info(`Kept the worktree for slice ${itemId}: ${result.reason}`);
+      }
+    } catch (error) {
+      bb.log.warn(
+        `Worktree reclaim failed for slice ${itemId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   async function integrateWorker(
     rootThreadId: string,
     workerThreadId: string,
@@ -1147,6 +1221,10 @@ export default function plugin(bb: BbPluginApi) {
       bb.log.info(
         `Integrated slice ${itemId}: squash-merged ${environment.branchName ?? worker.environmentId} into ${base} on ${rootThreadId}`,
       );
+      // Completed, merged, and now the worktree is pure disk. The plugin made
+      // it, so the plugin removes it — leaving that to whoever notices the disk
+      // filling is how 217 of them accumulated.
+      await reclaimWorktree(rootThreadId, itemId, worker.environmentId, base);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/no changes|nothing to (merge|commit)|up.to.date|already/i.test(message)) {

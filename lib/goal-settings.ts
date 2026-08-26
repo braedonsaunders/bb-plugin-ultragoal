@@ -70,6 +70,9 @@ export interface GoalSettingDefaults {
   /** Off unless an operator deliberately opts in; see the setting's description. */
   autoApproveAgentRequests: boolean;
   workerPermissionMode: AgentPermissionMode;
+  /** Remove a slice's worktree once its commits are on the base branch. */
+  reclaimMergedWorktrees: boolean;
+  shareWorktreeNodeModules: boolean;
 }
 
 export function resolveGoalSettings(

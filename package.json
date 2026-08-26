@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-ultragoal",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Provider-neutral durable UltraGoals for Codex, Cursor, OpenCode, Claude Code, and Pi, with scheduled workers, verification, and defect remediation.",
   "license": "MIT",
   "author": "Braedon Saunders",
@@ -29,7 +29,9 @@
     "templates",
     "assets",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "host.ts",
+    "host-contract.ts"
   ],
   "engines": {
     "bb": ">=0.39",
@@ -45,7 +47,8 @@
     "app": "./app.tsx",
     "skills": [
       "skills"
-    ]
+    ],
+    "host": "./host.ts"
   },
   "dependencies": {
     "zod": "^4.3.6"

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.19.0
+
+- **The plugin now cleans up after its own slices.** It creates one worktree
+  per slice and removed none of them: 217 worktrees and 9.9 GB accumulated for
+  a goal with 177 completed slices, on top of thirteen private copies of the
+  same 1.1 GB dependency tree. Reclaiming that was left to whoever noticed the
+  disk filling, which is not a reasonable thing to ask of an owner.
+  A new host entry does the filesystem work on the daemon that owns the
+  directory, because git and rm are not on the server-side API. The moment a
+  slice's commits are squash-merged, its worktree is removed and its branch
+  deleted — but only after the checkout is confirmed clean and its commits
+  confirmed reachable from the base branch, and never for a dirty one, because
+  uncommitted work outranks any amount of disk.
+  The same entry seeds a `node_modules` store from the checkout it is about to
+  delete, and clones from it by reference (APFS clonefile, Btrfs reflink) so
+  every later worktree gets a real, independent tree that costs nothing until
+  it diverges. Copy-by-reference is required, not preferred: the copy FAILS
+  rather than silently writing the 1.1 GB duplicate it exists to prevent.
+  Both are settings — `reclaimMergedWorktrees` and `shareWorktreeNodeModules`,
+  on by default — and a failure to reclaim disk never fails an integration.
+
 ## 0.18.0
 
 - **Automatic approval is now off by default.** The background service was
