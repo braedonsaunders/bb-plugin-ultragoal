@@ -10,6 +10,7 @@ import {
   ownSliceScope,
   planWorkerRelease,
   retirementPermittedByHost,
+  setSharedInfrastructureFiles,
   freeSlots,
   liveVerifierCount,
   occupyingWorkerIds,
@@ -655,15 +656,32 @@ describe("coalescingFilesOverlap", () => {
     assert.equal(coalescingFilesOverlap(["web/lib/search.ts"], ["web/lib/search.ts:42"]), true);
   });
 
-  it("does not use shared infrastructure files as semantic ownership", () => {
+  it("does not use ecosystem manifests as semantic ownership", () => {
+    // Only files nearly every repository has are built in. A path meaningful to
+    // one project used to sit in this list, which applied that project's layout
+    // to every other one.
+    for (const manifest of ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"]) {
+      assert.equal(coalescingFilesOverlap([manifest], [manifest]), false, manifest);
+    }
+  });
+
+  it("treats a configured repository file as shared, and stops when it is unconfigured", () => {
+    const repoFile = "schema/canonical-baseline.test.ts";
+    // Unconfigured, it is an ordinary file and may anchor ownership.
+    setSharedInfrastructureFiles([]);
+    assert.equal(coalescingFilesOverlap([repoFile], [repoFile]), true);
+    // Configured, it can no longer merge two unrelated defects.
+    setSharedInfrastructureFiles([repoFile]);
+    assert.equal(coalescingFilesOverlap([repoFile], [repoFile]), false);
+    // The built-ins survive configuration rather than being replaced by it.
     assert.equal(coalescingFilesOverlap(["package.json"], ["package.json"]), false);
-    assert.equal(
-      coalescingFilesOverlap(
-        ["schema/canonical-baseline.test.ts"],
-        ["schema/canonical-baseline.test.ts"],
-      ),
-      false,
-    );
+    setSharedInfrastructureFiles([]);
+  });
+
+  it("normalizes configured paths, so a line-qualified entry still matches", () => {
+    setSharedInfrastructureFiles(["schema/inventory.ts:42"]);
+    assert.equal(coalescingFilesOverlap(["schema/inventory.ts"], ["schema/inventory.ts"]), false);
+    setSharedInfrastructureFiles([]);
   });
 });
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.23
+
+- Removed a project-specific path from defect coalescing.
+  `schema/canonical-baseline.test.ts` was hardcoded into the shared-file set,
+  which applied one repository's layout to every project running this plugin.
+  The built-in set is now only ecosystem manifests, and a new
+  `sharedInfrastructureFiles` setting lets an installation name the files its
+  own repository shares. Which files those are is a property of the repository,
+  so it is configuration, not code.
+
 ## 0.17.22
 
 - New `bb ultragoal brief` sets standing rules that every worker on a goal

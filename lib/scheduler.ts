@@ -22,13 +22,34 @@ export function normalizeFindingFile(file: string): string {
   return file.trim().replace(/[:#]\d+([-:]\d+)?$/, "");
 }
 
-const SHARED_INFRASTRUCTURE_FILES: ReadonlySet<string> = new Set([
+// Files nearly every repository shares, which therefore prove nothing about
+// which defect owns a change. Deliberately only ecosystem-level manifests: a
+// path meaningful to one project does not belong in a plugin every project
+// runs. `schema/canonical-baseline.test.ts` used to sit here, which quietly
+// applied one repository's layout to everyone else's.
+const BUILT_IN_SHARED_FILES: readonly string[] = [
   "package.json",
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
-  "schema/canonical-baseline.test.ts",
-]);
+];
+
+let SHARED_INFRASTRUCTURE_FILES: ReadonlySet<string> = new Set(BUILT_IN_SHARED_FILES);
+
+/**
+ * Extend the shared-file set with paths this installation cares about.
+ *
+ * A repository usually has one or two files that every slice touches — a pinned
+ * schema inventory, a generated lockfile of its own — and letting such a file
+ * anchor defect ownership merges unrelated defects. Which files those are is a
+ * property of the repository, so it is configuration, not code.
+ */
+export function setSharedInfrastructureFiles(paths: readonly string[]): void {
+  SHARED_INFRASTRUCTURE_FILES = new Set([
+    ...BUILT_IN_SHARED_FILES,
+    ...paths.map((path) => normalizeFindingFile(path)).filter(Boolean),
+  ]);
+}
 const GENERATED_MIGRATION_ARTIFACT = /(?:^|\/)migrations\/generated(?:\/|$)/;
 
 export function isConcreteFindingFile(path: string): boolean {

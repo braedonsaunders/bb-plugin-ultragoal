@@ -62,6 +62,7 @@ import {
   isTurnAlreadyActiveError,
   normalizeFindingFile,
   planWorkerRelease,
+  setSharedInfrastructureFiles,
   type ReleaseTarget,
   threadAcceptsStart,
   threadAcceptsSteer,
@@ -261,6 +262,12 @@ export default function plugin(bb: BbPluginApi) {
       description: "Ready-queue slot count: assigned workers occupy a slot until their slice closes, including idle Codex turns. Default 5.",
       default: String(DEFAULT_MAX_WORKERS),
     },
+    sharedInfrastructureFiles: {
+      type: "string",
+      label: "Shared infrastructure files (comma-separated)",
+      description: "Repository paths that nearly every slice touches — a pinned schema inventory, a generated manifest — and so cannot prove which defect owns a change. Listing them here stops unrelated defects coalescing onto one file. Ecosystem manifests such as package.json are always included.",
+      default: "",
+    },
     maxOpenFindings: {
       type: "string",
       label: "Remediation work capacity per goal",
@@ -281,6 +288,12 @@ export default function plugin(bb: BbPluginApi) {
       maxWorkers: parseNonNegativeInt(value.maxWorkers) ?? DEFAULT_MAX_WORKERS,
       maxOpenFindings: parsePositiveInt(value.maxOpenFindings) ?? DEFAULT_MAX_OPEN_FINDINGS,
     };
+    // Which files count as shared infrastructure is a property of the
+    // repository being worked on, not of this plugin, so it arrives as
+    // configuration and is re-read whenever defaults refresh.
+    setSharedInfrastructureFiles(
+      value.sharedInfrastructureFiles.split(",").map((entry) => entry.trim()).filter(Boolean),
+    );
   }
   void refreshDefaults();
   settings.onChange(() => {
@@ -308,6 +321,7 @@ export default function plugin(bb: BbPluginApi) {
   const linkedDefectBrief = (rootThreadId: string, itemId: string): string =>
     formatLinkedDefectBrief(linkedOpenFindings(rootThreadId, itemId));
   const workerBriefs = createWorkerBriefStore(bb.storage.database());
+
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
       void publishFresh(rootThreadId);
