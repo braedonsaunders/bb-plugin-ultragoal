@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.22
+
+- New `bb ultragoal brief` sets standing rules that every worker on a goal
+  inherits, instead of the orchestrator retyping them into each slice. The rules
+  it forgot were the expensive ones: a critical concurrency fix landed with
+  ninety-five lines of code and no committed regression because its reproduction
+  was ephemeral, and workers kept starting private PostgreSQL containers on
+  majors the product does not ship on. A rule that depends on someone
+  remembering to repeat it is not a rule. Per goal, not global, because house
+  rules belong to the repository being worked on.
+
 ## 0.17.21
 
 - The 0.17.20 token table never actually got created. `bb.storage.migrate`

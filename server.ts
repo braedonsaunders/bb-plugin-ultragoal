@@ -47,6 +47,7 @@ import {
   type LiveNativeTask,
 } from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
+import { createWorkerBriefStore, withStandingBrief } from "./lib/worker-brief.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
@@ -306,6 +307,7 @@ export default function plugin(bb: BbPluginApi) {
       .filter((finding) => finding.itemId === itemId);
   const linkedDefectBrief = (rootThreadId: string, itemId: string): string =>
     formatLinkedDefectBrief(linkedOpenFindings(rootThreadId, itemId));
+  const workerBriefs = createWorkerBriefStore(bb.storage.database());
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
       void publishFresh(rootThreadId);
@@ -3175,10 +3177,15 @@ export default function plugin(bb: BbPluginApi) {
                 "You may spawn nested helpers for your slice if it splits cleanly.",
               ].join("\n")
           : undefined;
+      // The goal here is the worker's inherited root, so its thread id is the
+      // goal whose house rules apply.
+      const briefed = worker && goal
+        ? withStandingBrief(worker, workerBriefs.get(goal.threadId))
+        : worker;
       return {
         tools: [...COLLAB_TOOL_NAMES, "slice_done", "slice_blocked", "report_finding", "resolve_finding", "request_decision"],
         skills: [],
-        instructions: worker,
+        instructions: briefed,
       };
     }
 
@@ -3869,6 +3876,28 @@ export default function plugin(bb: BbPluginApi) {
         };
       }
 
+      if (action === "brief") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const text = (objective ?? "").trim();
+        if (text === "--clear") {
+          const removed = workerBriefs.clear(threadId);
+          return { exitCode: 0, stdout: removed ? "Standing worker brief cleared." : "No standing worker brief was set." };
+        }
+        if (!text) {
+          const current = workerBriefs.get(threadId);
+          return {
+            exitCode: 0,
+            stdout: current
+              ? `Standing worker brief:\n${current}`
+              : "No standing worker brief. Set one so every worker inherits it instead of relying on each slice to repeat it.",
+          };
+        }
+        const error = workerBriefs.set(threadId, text);
+        if (error) return { exitCode: 1, stderr: error };
+        return { exitCode: 0, stdout: "Standing worker brief set; every worker spawned from now on inherits it." };
+      }
+
       if (action === "pause") {
         const goal = await pauseGoal(threadId, "Paused from the CLI.");
         return {
@@ -3908,6 +3937,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--own-slice] [--thread <id>]" },
       { name: "transfer-root", summary: "Atomically transfer an unfinished UltraGoal to an idle Codex root", usage: "bb ultragoal transfer-root <source-thread-id> <target-thread-id> [--dry-run]" },
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
+      { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -3960,7 +3990,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "transfer-root";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -3984,7 +4014,7 @@ function parseCli(
   }
   if (
     action === "set" || action === "edit" || action === "workers" ||
-    action === "decide" || action === "release"
+    action === "decide" || action === "release" || action === "brief"
   ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
