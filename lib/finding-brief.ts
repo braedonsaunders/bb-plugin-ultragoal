@@ -93,10 +93,15 @@ export function missingLinkedDefectEvidenceIds(
     .filter((id) => !proven.has(id.toLowerCase()));
 }
 
-/** Parse only the documented JSONL verdict contract. Free-form mentions —
+/** Parse only the documented JSONL coverage contract. Free-form mentions —
  * including "fnd_x is NOT fixed" beside VERIFY_PASS — are intentionally
- * invisible to completion logic. */
-export function parseVerifierFindingEvidence(
+ * invisible to completion logic.
+ *
+ * Both roles emit this contract: a verifier alongside its verdict, and a worker
+ * whose provider cannot dispose the `slice_done` tool as its turn ends and so
+ * reports through the ULTRAGOAL_DONE sentinel instead. The evidence bar is
+ * identical either way — exact finding id, status pass, nonempty proof. */
+export function parseDefectCoverageEvidence(
   output: string | null | undefined,
 ): FindingAffirmativeEvidence[] {
   const byId = new Map<string, FindingAffirmativeEvidence>();

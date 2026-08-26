@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.17.17
+
+- Worker completion now reads the `DEFECT_COVERAGE:` contract out of the slice
+  report, not only out of the `slice_done` tool. Providers that cannot dispose a
+  tool call as the turn ends close with that contract plus the `ULTRAGOAL_DONE`
+  sentinel; completion discarded it, so every such slice stayed unattended and
+  `in_progress` with its finding open, and the stall healer kept re-running
+  workers that had already finished. The evidence bar is unchanged — exact
+  finding id, status pass, nonempty proof — and a bare sentinel with no coverage
+  lines still closes nothing. The worker brief now documents the fallback, and
+  the parser is renamed `parseDefectCoverageEvidence` because both roles use it.
+- `bb ultragoal finding --own-slice` mints a dedicated work item for a filed
+  defect instead of coalescing it into an older item that happens to share one
+  file. Coalescing is right for keeping two workers out of the same file and
+  wrong for a distinct blocker with its own reproduction and done-check. The
+  minted item carries an explicit `CONTEXT (audit findings: fnd_…)` declaration,
+  so the link survives stale-link detachment and duplicate healing.
+
 ## 0.17.16
 
 - Finished workers now release their root slot by reconciling against the plan

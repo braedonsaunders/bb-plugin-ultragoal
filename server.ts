@@ -34,7 +34,7 @@ import {
 import {
   formatLinkedDefectBrief,
   missingLinkedDefectEvidenceIds,
-  parseVerifierFindingEvidence,
+  parseDefectCoverageEvidence,
   parseVerifierVerdict,
   type FindingAffirmativeEvidence,
 } from "./lib/finding-brief.js";
@@ -57,6 +57,7 @@ import {
   orphanInProgressIds,
   isTransientTurnFailure,
   isTurnAlreadyActiveError,
+  normalizeFindingFile,
   threadAcceptsStart,
   threadAcceptsSteer,
   threadIsSettledForSubmit,
@@ -1439,9 +1440,18 @@ export default function plugin(bb: BbPluginApi) {
       .list(rootThreadId)
       .find((row) => row.id === itemId && row.status === "in_progress");
     if (!item) return false;
+    // A worker normally proves its linked defects through the slice_done tool.
+    // Some providers cannot dispose a tool call as the turn ends, so those
+    // workers are briefed to close with DEFECT_COVERAGE lines and the
+    // ULTRAGOAL_DONE sentinel instead. That is the same machine-readable
+    // contract the verifier emits and clears the same bar — discarding it is
+    // what stranded every sentinel worker's slice as unattended in_progress
+    // with its finding still open.
     const findingEvidence = options?.requirePass
-      ? parseVerifierFindingEvidence(report)
-      : options?.findingEvidence ?? [];
+      ? parseDefectCoverageEvidence(report)
+      : options?.findingEvidence?.length
+        ? options.findingEvidence
+        : parseDefectCoverageEvidence(report);
     const missingFindingIds = missingCompletionFindingIds(
       rootThreadId,
       itemId,
@@ -2709,7 +2719,14 @@ export default function plugin(bb: BbPluginApi) {
 
   async function registerFinding(
     rootThreadId: string,
-    input: { title: string; file: string; evidence: string; fixFiles?: string[]; check?: string | null },
+    input: {
+      title: string;
+      file: string;
+      evidence: string;
+      fixFiles?: string[];
+      check?: string | null;
+      ownSlice?: boolean;
+    },
   ): Promise<{ created: boolean; findingId: string; fixItemId: string | null; status: string }> {
     const result = findings.report(rootThreadId, {
       title: input.title,
@@ -2718,6 +2735,25 @@ export default function plugin(bb: BbPluginApi) {
       fixFiles: input.fixFiles,
       check: input.check,
     });
+    if (result.created && input.ownSlice) {
+      // An outside auditor filing a proven blocker can demand its own slice.
+      // Ordinary coalescing attaches a finding to any older open item sharing
+      // one concrete file, which is right for avoiding two workers in the same
+      // file and wrong for a distinct defect with its own reproduction and
+      // done-check — six proven launch blockers were silently buried inside
+      // four unrelated slices that way. The explicit CONTEXT clause is the
+      // plugin's own durable ownership declaration, so this link survives both
+      // stale-link detachment and auto-minted duplicate healing.
+      const dedicated = items.add(
+        rootThreadId,
+        `Fix: ${result.finding.title} [${normalizeFindingFile(result.finding.file)}] CONTEXT (audit findings: ${result.finding.id})`,
+        "pending",
+        { deps: [], files: input.fixFiles ?? [], check: input.check ?? null },
+      );
+      if (dedicated && !findings.linkItem(rootThreadId, result.finding.id, dedicated.id)) {
+        items.remove(rootThreadId, dedicated.id);
+      }
+    }
     reconcileFindingBacklog(rootThreadId);
     const latest = findings.get(rootThreadId, result.finding.id) ?? result.finding;
     if (!result.created) {
@@ -3083,6 +3119,7 @@ export default function plugin(bb: BbPluginApi) {
             : [
                 `You are an UltraGoal subagent${row?.display_name ? ` (${row.display_name})` : ""}. Parent objective: ${goal.objective}`,
                 "Complete only the slice you were assigned. Signal completion ONLY via slice_done with general evidence plus one structured finding_evidence {finding_id, proof} entry per linked defect, or slice_blocked. Prose claims and ID mentions do nothing.",
+                'If your provider cannot call a tool as your turn ends, use the text fallback instead: emit one line per linked defect — DEFECT_COVERAGE: {"finding_id":"fnd_...","status":"pass","proof":"what you checked"} — and end your final message with ULTRAGOAL_DONE (or ULTRAGOAL_BLOCKED). It carries exactly the same evidence bar; a sentinel without per-defect coverage lines does not close the slice.',
                 "If your slice is a hunt/audit/review, call report_finding per discrete defect the moment you confirm it — fixes are staffed automatically; do not batch findings into your final report.",
                 "Do not call ultragoal_finish, do not rewrite the parent plan, and do not take over the whole UltraGoal.",
                 "You may spawn nested helpers for your slice if it splits cleanly.",
@@ -3232,7 +3269,7 @@ export default function plugin(bb: BbPluginApi) {
         const sourceItemId = child.source_thread_id
           ? (collab.rowOf(child.source_thread_id)?.item_id ?? child.item_id)
           : child.item_id;
-        const verifierEvidence = parseVerifierFindingEvidence(lastAssistantText);
+        const verifierEvidence = parseDefectCoverageEvidence(lastAssistantText);
         const verdict = parseVerifierVerdict(lastAssistantText);
         const passClaim = verdict === "pass";
         const missingVerifierCoverage =
@@ -3647,12 +3684,14 @@ export default function plugin(bb: BbPluginApi) {
         let evidence = "";
         let check: string | null = null;
         let fixFiles: string[] = [];
+        let ownSlice = false;
         const titleParts: string[] = [];
         for (let i = 0; i < tokens.length; i += 1) {
           const token = tokens[i];
           if (token === "--file") { file = tokens[++i] ?? ""; continue; }
           if (token === "--evidence") { evidence = tokens[++i] ?? ""; continue; }
           if (token === "--check") { check = tokens[++i] ?? null; continue; }
+          if (token === "--own-slice") { ownSlice = true; continue; }
           if (token === "--fix-files") {
             fixFiles = (tokens[++i] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
             continue;
@@ -3664,14 +3703,16 @@ export default function plugin(bb: BbPluginApi) {
           return {
             exitCode: 1,
             stderr:
-              'Usage: bb ultragoal finding "<title>" --file <path[:line]> --evidence "<proof>" [--fix-files a,b] [--check <cmd>] [--thread <id>]',
+              'Usage: bb ultragoal finding "<title>" --file <path[:line]> --evidence "<proof>" [--fix-files a,b] [--check <cmd>] [--own-slice] [--thread <id>]',
           };
         }
         const goal = store.get(threadId);
         if (!goal || (goal.status !== "active" && goal.status !== "budget_limited")) {
           return { exitCode: 1, stderr: "No active UltraGoal on this thread." };
         }
-        const registered = await registerFinding(threadId, { title, file, evidence, fixFiles, check });
+        const registered = await registerFinding(threadId, {
+          title, file, evidence, fixFiles, check, ownSlice,
+        });
         return {
           exitCode: 0,
           stdout: registered.created
@@ -3728,7 +3769,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "edit", summary: "Edit the UltraGoal objective", usage: "bb ultragoal edit <objective> [--thread <id>]" },
       { name: "workers", summary: "Set the goal's concurrent worker slots", usage: "bb ultragoal workers <0-16> [--thread <id>]" },
       { name: "decide", summary: "Answer an open owner decision", usage: "bb ultragoal decide <decision_id> <answer> [--thread <id>]" },
-      { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--thread <id>]" },
+      { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--own-slice] [--thread <id>]" },
       { name: "transfer-root", summary: "Atomically transfer an unfinished UltraGoal to an idle Codex root", usage: "bb ultragoal transfer-root <source-thread-id> <target-thread-id> [--dry-run]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },

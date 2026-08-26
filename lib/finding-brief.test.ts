@@ -4,7 +4,7 @@ import {
   formatLinkedDefectBrief,
   MAX_LINKED_DEFECT_BRIEF_CHARS,
   missingLinkedDefectEvidenceIds,
-  parseVerifierFindingEvidence,
+  parseDefectCoverageEvidence,
   parseVerifierVerdict,
 } from "./finding-brief.ts";
 
@@ -80,7 +80,7 @@ describe("linked defect worker briefs", () => {
   });
 
   it("parses exact verifier JSONL across case and surrounding output punctuation", () => {
-    const parsed = parseVerifierFindingEvidence([
+    const parsed = parseDefectCoverageEvidence([
       "Review complete:",
       'DEFECT_COVERAGE: {"finding_id":"FND_DOWNGRADE","status":"PASS","proof":"downgrade check passed"}',
       'DEFECT_COVERAGE: {"finding_id":"fnd_actor_provenance","status":"pass","proof":"audit row inspected"}',
@@ -92,8 +92,39 @@ describe("linked defect worker briefs", () => {
     );
   });
 
+  it("reads a sentinel worker's coverage out of an ordinary prose slice report", () => {
+    // Providers that cannot dispose slice_done as the turn ends close with
+    // DEFECT_COVERAGE lines plus ULTRAGOAL_DONE. Completion reads that report
+    // through this same parser, so the shape a real worker emits — prose,
+    // fenced test output, a prose finding_evidence blob, then the contract
+    // lines — has to clear the bar exactly as a verifier's does.
+    const parsed = parseDefectCoverageEvidence([
+      "Slice complete. Validation at HEAD (`1ab18121`, clean tree, no new commit created):",
+      "```",
+      "ℹ tests 6  ℹ pass 6  ℹ fail 0",
+      "```",
+      'finding_evidence {"finding_id": "fnd_actor_provenance", "proof": "prose blob, not the contract"}',
+      'DEFECT_COVERAGE: {"finding_id":"fnd_downgrade","status":"pass","proof":"focused regression passes at HEAD"}',
+      'DEFECT_COVERAGE: {"finding_id":"fnd_actor_provenance","status":"pass","proof":"audit row carries the attributed actor"}',
+      "",
+      "ULTRAGOAL_DONE",
+    ].join("\n"));
+    assert.deepEqual(missingLinkedDefectEvidenceIds(parsed, linked), []);
+  });
+
+  it("does not let a bare sentinel close a slice without per-defect coverage", () => {
+    const parsed = parseDefectCoverageEvidence(
+      "Everything is fixed, I checked fnd_downgrade and fnd_actor_provenance.\n\nULTRAGOAL_DONE",
+    );
+    assert.deepEqual(parsed, []);
+    assert.deepEqual(missingLinkedDefectEvidenceIds(parsed, linked), [
+      "fnd_downgrade",
+      "fnd_actor_provenance",
+    ]);
+  });
+
   it("does not treat negative prose mentions beside VERIFY_PASS as coverage", () => {
-    const parsed = parseVerifierFindingEvidence(
+    const parsed = parseDefectCoverageEvidence(
       "fnd_downgrade is NOT fixed; check failed. fnd_actor_provenance also failed.\nVERIFY_PASS: done",
     );
     assert.deepEqual(parsed, []);
@@ -104,12 +135,12 @@ describe("linked defect worker briefs", () => {
   });
 
   it("fails duplicate or conflicting coverage for the same exact ID closed", () => {
-    const duplicate = parseVerifierFindingEvidence([
+    const duplicate = parseDefectCoverageEvidence([
       'DEFECT_COVERAGE: {"finding_id":"fnd_downgrade","status":"pass","proof":"first check passed"}',
       'DEFECT_COVERAGE: {"finding_id":"FND_DOWNGRADE","status":"fail","proof":"later check failed"}',
     ].join("\n"));
     assert.deepEqual(duplicate, []);
-    const malformedLater = parseVerifierFindingEvidence([
+    const malformedLater = parseDefectCoverageEvidence([
       'DEFECT_COVERAGE: {"finding_id":"fnd_actor_provenance","status":"pass","proof":"first check passed"}',
       'DEFECT_COVERAGE: {"finding_id":"fnd_actor_provenance","status":}',
     ].join("\n"));
