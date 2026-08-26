@@ -54,6 +54,7 @@ import {
   parseDeliverableEvidence,
 } from "./lib/deliverables.js";
 import { remediationItemRetirement } from "./lib/remediation-retirement.js";
+import { createStaffingHoldStore } from "./lib/staffing-hold.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
@@ -328,6 +329,7 @@ export default function plugin(bb: BbPluginApi) {
     formatLinkedDefectBrief(linkedOpenFindings(rootThreadId, itemId));
   const workerBriefs = createWorkerBriefStore(bb.storage.database());
   const itemRequirements = createItemRequirementStore(bb.storage.database());
+  const staffingHolds = createStaffingHoldStore(bb.storage.database());
 
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
@@ -847,6 +849,10 @@ export default function plugin(bb: BbPluginApi) {
       for (const item of list) {
         if (slots <= 0) break;
         if (item.status === "completed" || heldLive.has(item.id)) continue;
+        // Held out of scheduling while its contract is rewritten. Without this
+        // a released slice is re-staffed within seconds under the same wrong
+        // brief, and the only way to edit one item was to pause the whole goal.
+        if (staffingHolds.isHeld(rootThreadId, item.id)) continue;
         const lastTry = lastStaffTry.get(item.id);
         if (lastTry != null && now - lastTry < STAFF_RETRY_MS) continue;
         if (item.deps.some((dep) => !completedIds.has(dep))) continue;
@@ -3895,20 +3901,35 @@ export default function plugin(bb: BbPluginApi) {
       // item, and the capacity fence keeps counting the row. The slot was gone
       // until the stall healer eventually nudged the corpse three times.
       if (action === "release") {
-        const target = (objective ?? "").trim();
+        const words = (objective ?? "").trim().split(/\s+/).filter(Boolean);
+        const hold = words.includes("--hold");
+        const target = words.filter((word) => word !== "--hold").join(" ").trim();
         if (!target) {
           return {
             exitCode: 1,
-            stderr: "Usage: bb ultragoal release <worker-thread-id|item-id> [--thread <id>]",
+            stderr: "Usage: bb ultragoal release <worker-thread-id|item-id> [--hold] [--thread <id>]",
           };
         }
         const goal = store.get(threadId);
         if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        // Hold before releasing, never after: the scheduler runs on the
+        // release and would staff the slice again in the gap.
+        if (hold && target.startsWith("itm_")) {
+          if (!items.list(threadId).some((row) => row.id === target)) {
+            return { exitCode: 1, stderr: `Unknown work item: ${target}` };
+          }
+          staffingHolds.hold(threadId, target, "released for re-scoping", Date.now());
+          void publishFresh(threadId);
+        } else if (hold) {
+          return { exitCode: 1, stderr: "--hold needs an item id; a worker thread id does not identify the slice to hold." };
+        }
         const workerIds = target.startsWith("itm_")
           ? collab.workersOnItem(threadId, target)
           : [target];
         if (workerIds.length === 0) {
-          return { exitCode: 1, stderr: `No live worker holds ${target}.` };
+          return hold
+            ? { exitCode: 0, stdout: `No live worker held ${target}; it is now held out of scheduling. Editing it lifts the hold.` }
+            : { exitCode: 1, stderr: `No live worker holds ${target}.` };
         }
         // Validate every target before mutating any of them; see
         // planWorkerRelease for why a partial release is not acceptable.
@@ -3947,7 +3968,9 @@ export default function plugin(bb: BbPluginApi) {
         void scheduleReady(threadId);
         return {
           exitCode: 0,
-          stdout: `Released ${released.length} slice(s) back to pending: ${released.join(", ")}`,
+          stdout: hold
+            ? `Released ${released.length} slice(s) and held ${target} out of scheduling: ${released.join(", ")}. Editing the item lifts the hold.`
+            : `Released ${released.length} slice(s) back to pending: ${released.join(", ")}`,
         };
       }
 
@@ -4022,12 +4045,14 @@ export default function plugin(bb: BbPluginApi) {
         let files: string[] | undefined;
         let check: string | null | undefined;
         let remove = false;
+        let unhold = false;
         for (let i = 1; i < tokens.length; i += 1) {
           const token = tokens[i];
           if (token === "--step") { step = (tokens[++i] ?? "").trim(); continue; }
           if (token === "--check") { check = (tokens[++i] ?? "").trim() || null; continue; }
           if (token === "--no-check") { check = null; continue; }
           if (token === "--remove") { remove = true; continue; }
+          if (token === "--unhold") { unhold = true; continue; }
           if (token === "--files") {
             files = (tokens[++i] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
             continue;
@@ -4087,11 +4112,23 @@ export default function plugin(bb: BbPluginApi) {
           void publishFresh(threadId);
           return { exitCode: 0, stdout: `Removed ${itemId}; every finding that pointed at it is resolved.` };
         }
+        if (unhold && step === undefined && files === undefined && check === undefined) {
+          const lifted = staffingHolds.lift(threadId, itemId);
+          if (lifted) {
+            markGoalEvent(threadId);
+            void publishFresh(threadId);
+            void scheduleReady(threadId);
+          }
+          return {
+            exitCode: 0,
+            stdout: lifted ? `${itemId} is schedulable again.` : `${itemId} was not held.`,
+          };
+        }
         if (step === undefined && files === undefined && check === undefined) {
           return {
             exitCode: 0,
             stdout: [
-              `${item.id} [${item.status}]`,
+              `${item.id} [${item.status}]${staffingHolds.isHeld(threadId, itemId) ? " HELD out of scheduling" : ""}`,
               `  step:  ${item.step}`,
               `  files: ${item.files.length > 0 ? item.files.join(", ") : "(none)"}`,
               `  check: ${item.check ?? "(none)"}`,
@@ -4121,12 +4158,17 @@ export default function plugin(bb: BbPluginApi) {
           ...(check !== undefined ? { check } : {}),
         }], []);
         const next = patched.items.find((row) => row.id === itemId) ?? item;
+        // The edit is what the hold was waiting for. Lifting it here rather
+        // than on a second command is the point: a hold nobody remembers to
+        // lift is just a lost slice.
+        const lifted = staffingHolds.lift(threadId, itemId);
         markGoalEvent(threadId);
         void publishFresh(threadId);
+        if (lifted) void scheduleReady(threadId);
         return {
           exitCode: 0,
           stdout: [
-            `Updated ${next.id} [${next.status}]`,
+            `Updated ${next.id} [${next.status}]${lifted ? " — hold lifted, schedulable again" : ""}`,
             `  step:  ${next.step}`,
             `  files: ${next.files.length > 0 ? next.files.join(", ") : "(none)"}`,
             `  check: ${next.check ?? "(none)"}`,
@@ -4206,10 +4248,10 @@ export default function plugin(bb: BbPluginApi) {
       { name: "decide", summary: "Answer an open owner decision", usage: "bb ultragoal decide <decision_id> <answer> [--thread <id>]" },
       { name: "finding", summary: "File a defect finding from outside the goal (auditors, automations)", usage: "bb ultragoal finding \"<title>\" --file <path[:line]> --evidence \"<proof>\" [--fix-files a,b] [--check <cmd>] [--own-slice] [--thread <id>]" },
       { name: "transfer-root", summary: "Atomically transfer an unfinished UltraGoal to an idle Codex root", usage: "bb ultragoal transfer-root <source-thread-id> <target-thread-id> [--dry-run]" },
-      { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
+      { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--hold] [--thread <id>]" },
       { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
-      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] | bb ultragoal item --new --step \"<text>\" [--files a,b] [--check \"<cmd>\"] [--thread <id>]" },
+      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] [--unhold] | bb ultragoal item --new --step \"<text>\" [--files a,b] [--check \"<cmd>\"] [--thread <id>]" },
       { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },

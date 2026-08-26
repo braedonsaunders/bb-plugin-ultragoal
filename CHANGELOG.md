@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.29
+
+- `bb ultragoal release <item> --hold` returns a slice AND keeps the scheduler
+  off it until the item is edited. Releasing alone was not enough: the
+  scheduler picked the slice back up within seconds, under the same brief that
+  was wrong, so four separate re-scopings in one session started fresh workers
+  on contracts that could not be completed legally. The only workaround was to
+  pause the entire goal — stopping every other slice — to edit one.
+  Editing the item lifts the hold automatically, because the edit is what the
+  hold was waiting for and a hold nobody remembers to lift is just a lost
+  slice; `--unhold` lifts one by hand, and a held item says so when read.
+
 ## 0.17.28
 
 - `bb ultragoal item --new` creates a plan item with no finding behind it.
