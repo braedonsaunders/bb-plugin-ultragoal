@@ -1,3 +1,4 @@
+import type { AgentPermissionMode } from "./goal-settings.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { isPromptLikeTitle, shortSliceTitle } from "./titles.js";
 import { z } from "zod";
@@ -144,6 +145,13 @@ export function createCollabStore(
       rootThreadId: string,
       itemId: string,
     ) => { files: string[]; check: string | null; linkedDefects?: string } | null;
+    /**
+     * Permission mode for spawned workers. Defaults to "auto" so a worker's
+     * risky actions still reach the normal approval gate; an operator raises it
+     * deliberately for an unattended run. Verifiers never use this — they are
+     * pinned to "auto" because a verifier that can write is not a verifier.
+     */
+    workerPermissionMode?: () => AgentPermissionMode;
     /** A discovered BB child could not obtain a durable root worker slot. */
     onRejectedChild?: (
       rootThreadId: string,
@@ -762,7 +770,7 @@ export function createCollabStore(
         ...(execReasoning ? { reasoningLevel: "explicit" as const } : {}),
         ...(execServiceTier ? { serviceTier: "explicit" as const } : {}),
       },
-      permissionMode: "full" as const,
+      permissionMode: hooks?.workerPermissionMode?.() ?? ("auto" as const),
       // Non-forked workers get their own managed worktree: sharing the root's
       // environment would put concurrent writers in one directory.
       environment: {
@@ -786,7 +794,7 @@ export function createCollabStore(
               sourceThreadId: threadId,
               input: [{ type: "text", text: prompt, mentions: [] }],
               title: shortSliceTitle(trimmed) || displayName,
-              permissionMode: "full",
+              permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
               visibility: "hidden",
               workspace: "reuse",
               // Plugin-origin children skip bb's parent "needs help"
@@ -1041,7 +1049,11 @@ export function createCollabStore(
           ...(args.reasoningLevel ? { reasoningLevel: "explicit" as const } : {}),
           ...(args.serviceTier ? { serviceTier: "explicit" as const } : {}),
         },
-        permissionMode: "full",
+        // A verifier inspects a worktree and reports. It never needs to write,
+        // so it is pinned to the ordinary approval gate and is deliberately not
+        // configurable: a verifier that can edit the work it is judging can
+        // make its own verdict come true.
+        permissionMode: "auto",
         environment: verifyEnvironmentId
           ? { type: "reuse" as const, environmentId: verifyEnvironmentId }
           : { type: "project-default" as const },
@@ -1111,7 +1123,6 @@ export function createCollabStore(
       bb.agents.registerTool({
         name: "spawn_agent",
         description: SPAWN_AGENT_DESCRIPTION,
-        experimental_statusLabels: { pending: "Spawning agent", completed: "Spawned agent" },
         parameters: z.object({
           task_name: z
             .string()
@@ -1187,7 +1198,6 @@ export function createCollabStore(
         name: "send_message",
         description:
           "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
-        experimental_statusLabels: { pending: "Sending message", completed: "Sent message" },
         parameters: z.object({
           target: z
             .string()
@@ -1206,7 +1216,7 @@ export function createCollabStore(
           }
           await bb.sdk.threads.queuedMessages.create({
             threadId: agent.thread_id,
-            permissionMode: "full",
+            permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
             input: [{ type: "text", text: trimmed, mentions: [] }],
           });
           return "";
@@ -1217,7 +1227,6 @@ export function createCollabStore(
         name: "followup_task",
         description:
           "Steer an existing agent about the ONE slice it was spawned for (clarify, unblock, course-correct). One agent = one slice: a worker whose slice is finished is retired and cannot take new work — spawn a fresh agent with spawn_agent instead.",
-        experimental_statusLabels: { pending: "Sending follow-up", completed: "Sent follow-up" },
         parameters: z.object({
           target: z
             .string()
@@ -1260,7 +1269,7 @@ export function createCollabStore(
           await bb.sdk.threads.send({
             threadId: agent.thread_id,
             mode: "auto",
-            permissionMode: "full",
+            permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
             input: [{ type: "text", text: trimmed, mentions: [] }],
           });
           hooks?.onChange?.(rootThreadId);
@@ -1271,7 +1280,6 @@ export function createCollabStore(
       bb.agents.registerTool({
         name: "list_agents",
         description: "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
-        experimental_statusLabels: { pending: "Listing agents", completed: "Listed agents" },
         parameters: z.object({
           path_prefix: z
             .string()
@@ -1298,7 +1306,6 @@ export function createCollabStore(
         name: "wait_agent",
         description:
           "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
-        experimental_statusLabels: { pending: "Waiting for agent", completed: "Waited for agent" },
         parameters: z.object({
           timeout_ms: z
             .number()
@@ -1352,7 +1359,6 @@ export function createCollabStore(
         name: "interrupt_agent",
         description:
           "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
-        experimental_statusLabels: { pending: "Interrupting agent", completed: "Interrupted agent" },
         parameters: z.object({
           target: z
             .string()

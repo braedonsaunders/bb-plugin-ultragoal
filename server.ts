@@ -134,6 +134,7 @@ import {
   DEFAULT_PROGRESS_UPDATE_MINUTES,
   DEFAULT_VERIFY_MODEL,
   DEFAULT_VERIFY_PROVIDER,
+  normalizePermissionMode,
   resolveGoalSettings,
   type GoalSettingDefaults,
 } from "./lib/goal-settings.js";
@@ -226,6 +227,8 @@ let snapshotDefaults: GoalSettingDefaults = {
   progressUpdateMinutes: DEFAULT_PROGRESS_UPDATE_MINUTES,
   maxWorkers: DEFAULT_MAX_WORKERS,
   maxOpenFindings: DEFAULT_MAX_OPEN_FINDINGS,
+  autoApproveAgentRequests: false,
+  workerPermissionMode: "auto",
 };
 
 export default function plugin(bb: BbPluginApi) {
@@ -275,6 +278,20 @@ export default function plugin(bb: BbPluginApi) {
       description: "Repository paths that nearly every slice touches — a pinned schema inventory, a generated manifest — and so cannot prove which defect owns a change. Listing them here stops unrelated defects coalescing onto one file. Ecosystem manifests such as package.json are always included.",
       default: "",
     },
+    autoApproveAgentRequests: {
+      type: "boolean",
+      label: "Automatically approve agent command, file and permission requests",
+      description:
+        "OFF by default, and it should stay off unless you are deliberately running unattended. When on, this plugin resolves approval prompts on the goal's own threads for you — that is a real approval boundary being crossed on your behalf, not a convenience toggle. User questions are never answered automatically.",
+      default: false,
+    },
+    workerPermissionMode: {
+      type: "string",
+      label: "Permission mode for spawned workers (auto | accept-edits | full)",
+      description:
+        "Defaults to auto, so a worker's risky actions still reach the normal approval gate. Set to full only for a deliberately unattended run.",
+      default: "auto",
+    },
     maxOpenFindings: {
       type: "string",
       label: "Remediation work capacity per goal",
@@ -294,6 +311,8 @@ export default function plugin(bb: BbPluginApi) {
         parseNonNegativeInt(value.progressUpdateMinutes) ?? DEFAULT_PROGRESS_UPDATE_MINUTES,
       maxWorkers: parseNonNegativeInt(value.maxWorkers) ?? DEFAULT_MAX_WORKERS,
       maxOpenFindings: parsePositiveInt(value.maxOpenFindings) ?? DEFAULT_MAX_OPEN_FINDINGS,
+      autoApproveAgentRequests: value.autoApproveAgentRequests === true,
+      workerPermissionMode: normalizePermissionMode(value.workerPermissionMode),
     };
     // Which files count as shared infrastructure is a property of the
     // repository being worked on, not of this plugin, so it arrives as
@@ -426,6 +445,7 @@ export default function plugin(bb: BbPluginApi) {
         linkedDefects: linkedDefectBrief(rootThreadId, itemId),
       };
     },
+    workerPermissionMode: () => snapshotDefaults.workerPermissionMode,
     onRejectedChild(rootThreadId, childThreadId, itemId) {
       if (itemId) {
         const otherClaimants = itemClaimants(rootThreadId, itemId).filter(
@@ -1281,7 +1301,7 @@ export default function plugin(bb: BbPluginApi) {
           await bb.sdk.threads.send({
             threadId: agent.threadId,
             mode: "auto",
-            permissionMode: "full",
+            permissionMode: snapshotDefaults.workerPermissionMode,
             input: [
               {
                 type: "text",
@@ -1704,10 +1724,13 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
-  // UltraGoal runs unattended: approval gates (command, file-change,
-  // permission, plan) on the goal tree are resolved automatically, session-wide
-  // when the provider allows it. User questions are left for the user.
+  // Approving another agent's command, file-change, permission or plan request
+  // is a real approval boundary, and a long-running goal is not a reason to
+  // cross it silently. This is opt-in and OFF by default: with the setting off,
+  // every request reaches the owner exactly as it would without this plugin.
+  // User questions are never answered here either way.
   async function approveInteractions(threadId: string): Promise<number> {
+    if (!snapshotDefaults.autoApproveAgentRequests) return 0;
     let rows: Array<Record<string, unknown>> = [];
     try {
       const listed = await bb.sdk.threads.interactions.list({ threadId });
@@ -1763,6 +1786,7 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   async function approvalPulse(): Promise<void> {
+    if (!snapshotDefaults.autoApproveAgentRequests) return;
     for (const threadId of store.listActiveThreadIds()) {
       if (transferLocked(threadId)) continue;
       try {
@@ -2060,7 +2084,7 @@ export default function plugin(bb: BbPluginApi) {
     await bb.sdk.threads.send({
       threadId,
       mode,
-      permissionMode: "full",
+      permissionMode: snapshotDefaults.workerPermissionMode,
       input: [{ type: "text", text: `[ultragoal]\n${text}`, visibility: "agent-only", mentions: [] }],
     });
   }
@@ -2596,7 +2620,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "ultragoal_start",
     description:
       "Start a durable UltraGoal only when explicitly requested by the user or system/developer instructions. Do not infer an UltraGoal from an ordinary task. Set token_budget only when explicitly requested. Fails while an unfinished UltraGoal exists.",
-    experimental_statusLabels: { pending: "Starting UltraGoal", completed: "Started UltraGoal" },
     parameters: z
       .object({
         objective: z
@@ -2636,7 +2659,6 @@ export default function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "ultragoal_state",
     description: "Read the durable UltraGoal and a bounded page of its work items.",
-    experimental_statusLabels: { pending: "Checking UltraGoal", completed: "Checked UltraGoal" },
     parameters: z.object({
       plan_status: z.enum(["open", "pending", "in_progress", "completed", "all"]).optional(),
       plan_cursor: z.number().int().nonnegative().optional(),
@@ -2659,7 +2681,6 @@ export default function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "ultragoal_patch",
     description: "Patch up to 200 new or changed work items in the durable UltraGoal. Omitted items are preserved.",
-    experimental_statusLabels: { pending: "Updating UltraGoal work", completed: "Updated UltraGoal work" },
     parameters: z.object({
       explanation: z.string().optional(),
       remove_item_ids: z.array(z.string().min(1)).max(200).optional(),
@@ -2750,7 +2771,6 @@ export default function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "ultragoal_finish",
     description: "Mark the durable UltraGoal complete or genuinely blocked. Completion requires a delivery summary and no open defects or owner decisions.",
-    experimental_statusLabels: { pending: "Finishing UltraGoal", completed: "Updated UltraGoal" },
     parameters: z.object({
       status: z.enum(["complete", "blocked"]),
       summary: z.string().optional(),
@@ -2907,7 +2927,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "add_slice",
     description:
       "Add ONE new plan slice to the goal (feature request, follow-up work, or escalation that is not a defect — defects go through report_finding). The scheduler staffs it when its deps complete. Write the step as a self-contained brief; keep files the narrow real touched set or empty.",
-    experimental_statusLabels: { pending: "Adding slice", completed: "Added slice" },
     parameters: z.object({
       step: z.string().min(10).describe("Self-contained slice brief: objective + boundaries."),
       files: z.array(z.string()).optional().describe("Narrow file scope, or omit."),
@@ -2942,7 +2961,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "slice_done",
     description:
       "Formally report your assigned slice complete. Pass general evidence plus one structured finding_evidence entry (exact finding_id and nonempty affirmative proof) for every linked defect. Prose mentions never count. Then END YOUR TURN: the slice closes or verification starts when your turn ends.",
-    experimental_statusLabels: { pending: "Reporting slice done", completed: "Slice reported done" },
     parameters: z.object({
       evidence: z
         .string()
@@ -3005,7 +3023,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "slice_blocked",
     description:
       "Formally report your assigned slice blocked. Pass the specific blocker (what you need, from whom). Then END YOUR TURN - the orchestrator is woken to act. This tool call is the only blocked signal; prose claims do nothing.",
-    experimental_statusLabels: { pending: "Reporting slice blocked", completed: "Slice reported blocked" },
     parameters: z.object({
       blocker: z.string().min(10).describe("The specific blocker: what is needed and from whom."),
     }),
@@ -3031,7 +3048,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "report_finding",
     description:
       "Report ONE discrete defect the moment you confirm it during a hunt/audit/review — do not batch findings into a final report. Findings are fingerprint-deduplicated. Same-file defects coalesce; new files mint ready fix slices until the staffed remediation cap, then queue durably and backfill oldest-first. Open findings block goal completion.",
-    experimental_statusLabels: { pending: "Reporting finding", completed: "Reported finding" },
     parameters: z.object({
       title: z.string().min(1).describe("One-sentence statement of the defect."),
       file: z
@@ -3102,7 +3118,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "request_decision",
     description:
       "Escalate a decision only the OWNER (the human user) can make — irreversible actions (history rewrites, deletions, spending), scope changes, or preference calls. It renders in the UltraGoal pane's 'Needs you' section and blocks goal completion until answered (bb ultragoal decide <id> <answer>). Also post one short user-visible chat message stating the question. Never bury an owner decision inside a progress note, never re-ask an open one, and never proceed on an assumed answer.",
-    experimental_statusLabels: { pending: "Requesting decision", completed: "Requested decision" },
     parameters: z.object({
       question: z.string().min(1).describe("The single decision the owner must make, phrased as a question."),
       context: z
@@ -3143,7 +3158,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "resolve_decision",
     description:
       "Close an open owner decision: pass the owner's answer verbatim when they gave one in chat, or withdraw a decision that became moot (with the reason). Never invent an answer the owner did not give.",
-    experimental_statusLabels: { pending: "Resolving decision", completed: "Resolved decision" },
     parameters: z.object({
       decision: z.string().min(1).describe("Decision id (dec_...) from request_decision or ultragoal_state."),
       resolution: z.enum(["answered", "withdrawn"]).describe("answered = the owner decided; withdrawn = moot."),
@@ -3173,7 +3187,6 @@ export default function plugin(bb: BbPluginApi) {
     name: "resolve_finding",
     description:
       "Resolve an open finding that will not be closed by a fix slice: mark it not_a_defect with evidence, or fixed when the fix landed outside its own slice. Findings fixed by their auto-created fix slice close automatically — do not resolve those by hand.",
-    experimental_statusLabels: { pending: "Resolving finding", completed: "Resolved finding" },
     parameters: z.object({
       finding: z.string().min(1).describe("Finding id (fnd_...) or fingerprint from report_finding/ultragoal_state."),
       resolution: z.enum(["fixed", "not_a_defect"]).describe("What happened to it."),
@@ -3464,7 +3477,7 @@ export default function plugin(bb: BbPluginApi) {
             await bb.sdk.threads.send({
               threadId: thread.id,
               mode: "auto",
-              permissionMode: "full",
+              permissionMode: snapshotDefaults.workerPermissionMode,
               input: [{
                 type: "text",
                 text: [
@@ -3522,7 +3535,7 @@ export default function plugin(bb: BbPluginApi) {
               await bb.sdk.threads.send({
                 threadId: child.source_thread_id,
                 mode: "auto",
-                permissionMode: "full",
+                permissionMode: snapshotDefaults.workerPermissionMode,
                 input: [
                   {
                     type: "text",

@@ -46,6 +46,19 @@ export interface ResolvedGoalSettings {
   workerServiceTier: ServiceTier | null;
 }
 
+/** The three permission modes bb exposes for a spawned thread. */
+export type AgentPermissionMode = "auto" | "accept-edits" | "full";
+
+/**
+ * Anything but `auto` weakens the approval gate a spawned agent runs behind, so
+ * an unrecognised value must fall back to the safe one rather than to whatever
+ * the operator meant to type.
+ */
+export function normalizePermissionMode(value: string | null | undefined): AgentPermissionMode {
+  const mode = (value ?? "").trim().toLowerCase();
+  return mode === "full" || mode === "accept-edits" ? mode : "auto";
+}
+
 export interface GoalSettingDefaults {
   verifyByDefault: boolean;
   verifyProvider: string;
@@ -54,6 +67,9 @@ export interface GoalSettingDefaults {
   progressUpdateMinutes: number;
   maxWorkers: number;
   maxOpenFindings: number;
+  /** Off unless an operator deliberately opts in; see the setting's description. */
+  autoApproveAgentRequests: boolean;
+  workerPermissionMode: AgentPermissionMode;
 }
 
 export function resolveGoalSettings(

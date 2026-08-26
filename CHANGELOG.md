@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.18.0
+
+- **Automatic approval is now off by default.** The background service was
+  resolving command, file-change, permission and plan requests on every thread
+  in the goal tree. That is a real approval boundary, and "the goal runs
+  unattended" is not a reason to cross it silently. `autoApproveAgentRequests`
+  turns it on for a deliberately unattended run; with it off, every request
+  reaches the owner exactly as it would without this plugin. User questions
+  were never answered automatically and still are not.
+- **Spawned agents no longer default to full permissions.**
+  `workerPermissionMode` defaults to `auto`, so a worker's risky actions still
+  reach the normal approval gate; an unrecognised value falls back to `auto`
+  rather than to whatever was meant, because a typo must not hand an agent full
+  access. Verifiers are pinned to `auto` and are deliberately NOT configurable:
+  a verifier that can edit the work it is judging can make its own verdict come
+  true.
+- Removed `experimental_statusLabels`, which SDK 0.4.16 rejects at activation.
+- New `scripts/worktree-gc.sh` reclaims managed worktrees whose slice is
+  finished and whose commits are already on the base branch, and
+  `scripts/node-modules-share.sh` gives each worktree an APFS-cloned
+  `node_modules` instead of its own 1.1 GB install. One agent = one slice meant
+  one worktree per slice and nothing ever removed them: 217 worktrees and
+  thirteen private copies of the same dependency tree. Both refuse to touch a
+  busy environment, a dirty checkout, or unmerged commits.
+
 ## 0.17.29
 
 - `bb ultragoal release <item> --hold` returns a slice AND keeps the scheduler
