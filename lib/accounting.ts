@@ -8,7 +8,57 @@ import {
 import { readProviderSessionTokens } from "./provider-tokens.js";
 
 const NEW_SESSION_SCANS_PER_TICK = 8;
-const tokensByGoalSession = new Map<string, Map<string, number>>();
+
+/**
+ * Durable per-session token totals.
+ *
+ * A goal's usage is the sum across every provider session it ever ran, and
+ * "one agent = one slice" means sessions retire constantly — a long run
+ * accumulates hundreds of them against a handful live at any moment. Holding
+ * the per-session map only in memory meant a plugin reload could rebuild it
+ * from the live handful alone, whose sum never again exceeded the historical
+ * high-water mark the total was floored to. The counter froze permanently.
+ *
+ * Storing each session's own total fixes that: a retired session keeps
+ * contributing exactly what it spent, and a new one contributes its own growth.
+ */
+export function createSessionTokenStore(db: ReturnType<BbPluginApi["storage"]["database"]>) {
+  const record = db.prepare(`
+    INSERT INTO goal_session_tokens (goal_thread_id, session_id, tokens, updated_at)
+    VALUES (@goal_thread_id, @session_id, @tokens, @updated_at)
+    ON CONFLICT(goal_thread_id, session_id) DO UPDATE SET
+      -- A provider's cumulative counter only rises; a lower reading is a
+      -- partial or restarted report, never a refund.
+      tokens = MAX(goal_session_tokens.tokens, excluded.tokens),
+      updated_at = excluded.updated_at
+  `);
+  const totalFor = db.prepare(
+    "SELECT COALESCE(SUM(tokens), 0) AS total FROM goal_session_tokens WHERE goal_thread_id = ?",
+  );
+  const recorded = db.prepare(
+    "SELECT session_id FROM goal_session_tokens WHERE goal_thread_id = ?",
+  );
+  return {
+    record(goalThreadId: string, sessionId: string, tokens: number): void {
+      record.run({
+        goal_thread_id: goalThreadId,
+        session_id: sessionId,
+        tokens,
+        updated_at: Date.now(),
+      });
+    },
+    total(goalThreadId: string): number {
+      return (totalFor.get(goalThreadId) as { total: number }).total;
+    },
+    recordedSessions(goalThreadId: string): Set<string> {
+      return new Set(
+        (recorded.all(goalThreadId) as Array<{ session_id: string }>).map((row) => row.session_id),
+      );
+    },
+  };
+}
+
+export type SessionTokenStore = ReturnType<typeof createSessionTokenStore>;
 
 function numberFrom(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
@@ -140,9 +190,14 @@ export async function accountGoalProgress(
   options?: {
     evenIfIdle?: boolean;
     busy?: boolean;
+    /** Threads still running, re-read every tick. */
     extraThreadIds?: string[];
+    /** Every thread the goal ever ran, retired included; backfilled a few per
+     * tick and never re-read once recorded. */
+    historicalThreadIds?: string[];
     force?: boolean;
     scan?: boolean;
+    sessionTokens?: SessionTokenStore;
   },
 ): Promise<StoredGoal | null> {
   const existing = store.get(threadId);
@@ -158,30 +213,48 @@ export async function accountGoalProgress(
   const running = options?.busy === true ? true : await threadIsRunning(bb, threadId);
   const extras = [...new Set((options?.extraThreadIds ?? []).filter((id) => id && id !== threadId))];
   const ids = [threadId, ...extras];
-  const bucket = tokensByGoalSession.get(threadId) ?? new Map<string, number>();
-  let scansLeft = options?.scan === true ? NEW_SESSION_SCANS_PER_TICK : 0;
+  const sessions = options?.sessionTokens ?? createSessionTokenStore(bb.storage.database());
+  const recorded = sessions.recordedSessions(threadId);
+  let sawTokens = recorded.size > 0;
+
+  // Live threads are re-read every tick because their totals are still moving.
   for (const id of ids) {
     const sessionId = await sessionIdForThread(bb, id);
     if (!sessionId) continue;
-    const known = bucket.has(sessionId);
-    const allowRead = id === threadId || known || (options?.scan === true && scansLeft > 0);
-    if (!allowRead) continue;
-    if (options?.scan === true && !known && id !== threadId) scansLeft -= 1;
     const tokens = await readThreadTokens(bb, id, { allowScan: true });
     if (tokens == null) continue;
-    bucket.set(sessionId, tokens);
+    sessions.record(threadId, sessionId, tokens);
+    sawTokens = true;
   }
-  tokensByGoalSession.set(threadId, bucket);
 
-  let currentTokens = 0;
-  for (const value of bucket.values()) currentTokens += value;
-  const sawTokens = bucket.size > 0;
+  // Retired threads are read once and then never again: their totals are final,
+  // and a long goal accumulates hundreds of them. Backfilling a bounded few per
+  // tick converges without turning every tick into hundreds of reads.
+  if (options?.scan === true) {
+    const live = new Set(ids);
+    const historical = (options.historicalThreadIds ?? []).filter((id) => id && !live.has(id));
+    let scansLeft = NEW_SESSION_SCANS_PER_TICK;
+    for (const id of historical) {
+      if (scansLeft <= 0) break;
+      const sessionId = await sessionIdForThread(bb, id);
+      if (!sessionId || recorded.has(sessionId)) continue;
+      scansLeft -= 1;
+      const tokens = await readThreadTokens(bb, id, { allowScan: true });
+      if (tokens == null) continue;
+      sessions.record(threadId, sessionId, tokens);
+      recorded.add(sessionId);
+      sawTokens = true;
+    }
+  }
+
+  const currentTokens = sessions.total(threadId);
 
   let tokensUsed = existing.tokensUsed;
   let lastSeenTokens = existing.lastSeenTokens;
   if (sawTokens) {
-    // Reloads and root transfers rebuild this in-memory bucket in bounded
-    // scans. A partial reconstruction must never erase the durable total.
+    // The floor still guards goals that predate this table, whose historical
+    // total was recorded before any per-session rows existed. Once the durable
+    // sum overtakes it the floor stops binding, and the counter moves again.
     tokensUsed = Math.max(existing.tokensUsed, currentTokens);
     lastSeenTokens = Math.max(existing.lastSeenTokens ?? 0, currentTokens);
   }

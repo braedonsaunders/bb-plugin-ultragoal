@@ -868,6 +868,14 @@ export function createCollabStore(
     threadIdsForRoot(rootThreadId: string): string[] {
       return (byRoot.all(rootId(rootThreadId)) as CollabRow[]).map((row) => row.thread_id);
     },
+    /** Every thread the root ever ran, retired included. Token accounting needs
+     * this: a goal's usage is the sum over every session it ever had, and
+     * "one agent = one slice" retires far more of them than it keeps. */
+    allThreadIdsForRoot(rootThreadId: string): string[] {
+      return (byRootAll.all(rootId(rootThreadId)) as Array<{ thread_id: string }>).map(
+        (row) => row.thread_id,
+      );
+    },
     /** Every non-retired durable row for the root, unfiltered by host status or
      * plan state. Slot cleanup must reconcile against THESE, not against the
      * projected agent list: that projection drops a worker whose item is already

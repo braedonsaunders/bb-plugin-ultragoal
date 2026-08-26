@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.20
+
+- The goal token counter no longer freezes. A goal's usage is the sum across
+  every provider session it ever ran, but that per-session map lived only in
+  memory, and "one agent = one slice" retires sessions constantly — this run had
+  216 retired workers against 8 live. After a plugin reload the map could only
+  be rebuilt from the live handful, whose sum never again exceeded the
+  historical high-water mark the total was floored to with `Math.max`, so the
+  displayed number stopped moving permanently. It sat at 1,065,788,395 for
+  hours. Per-session totals are now durable in `goal_session_tokens`, so a
+  retired session keeps contributing exactly what it spent and a new one
+  contributes its own growth. Live threads are re-read each tick; retired ones
+  are backfilled a bounded few per tick and then never re-read.
+
 ## 0.17.19
 
 Four failures an independent review found on 0.17.18 despite 112/112 green.

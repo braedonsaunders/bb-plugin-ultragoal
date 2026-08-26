@@ -440,6 +440,10 @@ export default function plugin(bb: BbPluginApi) {
         ...(store.get(threadId)?.accountingThreadIds ?? []),
         ...collab.threadIdsForRoot(threadId),
       ],
+      // A goal's usage is the sum over every session it ever ran, and
+      // one-agent-per-slice retires far more sessions than it keeps. Retired
+      // ones are backfilled a few per tick and then never re-read.
+      historicalThreadIds: collab.allThreadIdsForRoot(threadId),
     });
   }
 

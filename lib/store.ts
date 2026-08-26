@@ -357,6 +357,19 @@ export function createGoalStore(bb: BbPluginApi) {
       max_workers INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )`,
+    // Token usage per provider session, kept durably because the goal's total
+    // is the SUM across every session it ever ran. Holding that only in memory
+    // froze the counter: one agent = one slice, so sessions retire constantly,
+    // and after a reload the in-memory bucket could only be rebuilt from the
+    // handful still live. Their sum never again exceeded the historical
+    // high-water mark, so the displayed total stopped moving for good.
+    `CREATE TABLE IF NOT EXISTS goal_session_tokens (
+      goal_thread_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      tokens INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (goal_thread_id, session_id)
+    )`,
     `CREATE TRIGGER IF NOT EXISTS collab_agents_root_capacity_insert
       BEFORE INSERT ON collab_agents
       WHEN NEW.retired_at IS NULL
