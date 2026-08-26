@@ -41,11 +41,19 @@ done
 # obvious alternative — .backup to a temp file — copies 1.8 GB per run and then
 # could not be reopened, which is worse than the problem it avoided.
 
-# An environment is BUSY when any live thread on it is active or starting.
+# An environment is OFF LIMITS while ANY live thread still references it —
+# not merely a running one. This started as "active or starting", which deleted
+# the worktrees of four review-council threads: they were idle, they never
+# commit, so they read as clean and merged, and they hold no ultragoal slice so
+# the slice guard skipped them too. Their transcripts survived; their working
+# directories did not, and an errored thread with no environment cannot take a
+# turn to explain itself. A thread that still exists is still using its
+# worktree. Archive or delete the thread first, then collect the directory.
 busy_envs=$(sqlite3 -readonly "$BB_DB" "
   select distinct environment_id from threads
-   where environment_id is not null and deleted_at is null
-     and status in ('active','starting')" 2>/dev/null || true)
+   where environment_id is not null
+     and deleted_at is null
+     and archived_at is null" 2>/dev/null || true)
 
 is_busy() {
   case "

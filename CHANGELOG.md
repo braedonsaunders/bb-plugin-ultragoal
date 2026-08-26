@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.5
+
+- `worktree-gc.sh` treats an environment as in use when ANY live thread
+  references it, not merely a running one. The old rule — active or starting —
+  deleted the worktrees of four review-council threads: they sat idle between
+  rounds, they never commit so they read as clean and merged, and they hold no
+  work item so the unfinished-slice guard skipped them as well. Their
+  transcripts survived, their working directories did not, and a thread with no
+  environment errors without being able to say why. A thread that still exists
+  is still using its worktree; archive or delete the thread first.
+
 ## 0.20.4
 
 - Root transfer now carries the standing worker brief, the per-item completion
