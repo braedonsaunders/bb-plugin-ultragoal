@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.17.26
+
+- An external orchestrator can now reconcile a plan, not just add to it.
+  `bb ultragoal finding` let an auditor outside the goal file defects, but
+  every follow-through — correcting an item's scope, sharpening its check,
+  closing a finding whose fix landed in someone else's slice — needed a tool
+  only threads inside the goal have. So triage arrived as prose asking the root
+  to retype it, and the register drifted from the code: two findings sat open
+  against surfaces already guarded on main.
+  `bb ultragoal item <id>` edits a work item's step, files and check, and
+  `bb ultragoal resolve <finding-id>` closes a finding with evidence. Item
+  status stays uneditable — completion carries per-defect evidence rules, and a
+  flag that skipped them would be the shortest path around the whole contract —
+  and, like `requires`, an item already in progress is refused rather than
+  rewritten underneath the worker briefed on it.
+
 ## 0.17.25
 
 - The token metric now reads in billions past a billion. A long-running goal

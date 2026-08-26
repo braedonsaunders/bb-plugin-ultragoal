@@ -3976,6 +3976,108 @@ export default function plugin(bb: BbPluginApi) {
         return { exitCode: 0, stdout: `${itemId} now requires: ${stored.join(", ")}` };
       }
 
+      if (action === "item") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const tokens = parsed.rawRest ?? [];
+        const itemId = tokens[0] ?? "";
+        let step: string | undefined;
+        let files: string[] | undefined;
+        let check: string | null | undefined;
+        for (let i = 1; i < tokens.length; i += 1) {
+          const token = tokens[i];
+          if (token === "--step") { step = (tokens[++i] ?? "").trim(); continue; }
+          if (token === "--check") { check = (tokens[++i] ?? "").trim() || null; continue; }
+          if (token === "--no-check") { check = null; continue; }
+          if (token === "--files") {
+            files = (tokens[++i] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+            continue;
+          }
+          return { exitCode: 1, stderr: `Unknown option: ${token}` };
+        }
+        if (!itemId) {
+          return {
+            exitCode: 1,
+            stderr: 'Usage: bb ultragoal item <item-id> [--step "<text>"] [--files a,b] [--check "<cmd>" | --no-check]',
+          };
+        }
+        const item = items.list(threadId).find((row) => row.id === itemId);
+        if (!item) return { exitCode: 1, stderr: `Unknown work item: ${itemId}` };
+        if (step === undefined && files === undefined && check === undefined) {
+          return {
+            exitCode: 0,
+            stdout: [
+              `${item.id} [${item.status}]`,
+              `  step:  ${item.step}`,
+              `  files: ${item.files.length > 0 ? item.files.join(", ") : "(none)"}`,
+              `  check: ${item.check ?? "(none)"}`,
+            ].join("\n"),
+          };
+        }
+        // Same rule as `requires`: a running worker was briefed under this
+        // step, scope and check, and rewriting them underneath it changes the
+        // contract mid-slice.
+        if (item.status === "in_progress") {
+          return {
+            exitCode: 1,
+            stderr: `${itemId} is in progress; its worker was briefed under the current step and scope. Wait for it to settle, or release the slice first.`,
+          };
+        }
+        if (step !== undefined && step.length === 0) {
+          return { exitCode: 1, stderr: "An empty --step would erase the item's brief." };
+        }
+        // Status is deliberately not editable here. Completion carries
+        // per-defect evidence rules, and a flag that skipped them would be the
+        // shortest path around the whole evidence contract.
+        const patched = items.patch(threadId, [{
+          id: item.id,
+          step: step ?? item.step,
+          status: item.status,
+          ...(files !== undefined ? { files } : {}),
+          ...(check !== undefined ? { check } : {}),
+        }], []);
+        const next = patched.items.find((row) => row.id === itemId) ?? item;
+        markGoalEvent(threadId);
+        void publishFresh(threadId);
+        return {
+          exitCode: 0,
+          stdout: [
+            `Updated ${next.id} [${next.status}]`,
+            `  step:  ${next.step}`,
+            `  files: ${next.files.length > 0 ? next.files.join(", ") : "(none)"}`,
+            `  check: ${next.check ?? "(none)"}`,
+          ].join("\n"),
+        };
+      }
+
+      if (action === "resolve") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const tokens = parsed.rawRest ?? [];
+        const findingId = tokens[0] ?? "";
+        let as = "";
+        let evidence = "";
+        for (let i = 1; i < tokens.length; i += 1) {
+          const token = tokens[i];
+          if (token === "--as") { as = (tokens[++i] ?? "").trim(); continue; }
+          if (token === "--evidence") { evidence = (tokens[++i] ?? "").trim(); continue; }
+          return { exitCode: 1, stderr: `Unknown option: ${token}` };
+        }
+        const resolution = as === "fixed" ? "fixed" : as === "not-a-defect" || as === "not_a_defect" ? "dismissed" : null;
+        if (!findingId || !resolution || !evidence) {
+          return {
+            exitCode: 1,
+            stderr: 'Usage: bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence "<proof>"',
+          };
+        }
+        const resolved = findings.resolve(threadId, findingId, resolution, evidence);
+        if (!resolved) return { exitCode: 1, stderr: `Finding not found: ${findingId}` };
+        reconcileFindingBacklog(threadId);
+        markGoalEvent(threadId);
+        void publishFresh(threadId);
+        return { exitCode: 0, stdout: `${resolved.id} resolved: ${resolved.status}` };
+      }
+
       if (action === "pause") {
         const goal = await pauseGoal(threadId, "Paused from the CLI.");
         return {
@@ -4017,6 +4119,8 @@ export default function plugin(bb: BbPluginApi) {
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
       { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
+      { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--thread <id>]" },
+      { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -4069,7 +4173,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "requires" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "requires" | "item" | "resolve" | "transfer-root";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -4098,7 +4202,7 @@ function parseCli(
   ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }
-  if (action === "finding") {
+  if (action === "finding" || action === "item" || action === "resolve") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim(), rawRest: rest.slice(1) };
   }
   if (action === "transfer-root") {
