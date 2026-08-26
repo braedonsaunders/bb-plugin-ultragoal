@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.21
+
+- The 0.17.20 token table never actually got created. `bb.storage.migrate`
+  records progress by array INDEX, so the statement was first added mid-array —
+  landing on an index already marked applied — and even once appended it did not
+  apply on reload, leaving every accounting pulse throwing "no such table".
+  The session-token store now creates its own table where it is used, so it is
+  self-healing and independent of that ordering scheme, and the migration list
+  carries an append-only warning.
+
 ## 0.17.20
 
 - The goal token counter no longer freezes. A goal's usage is the sum across

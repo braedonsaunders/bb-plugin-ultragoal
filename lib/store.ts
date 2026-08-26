@@ -357,19 +357,6 @@ export function createGoalStore(bb: BbPluginApi) {
       max_workers INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )`,
-    // Token usage per provider session, kept durably because the goal's total
-    // is the SUM across every session it ever ran. Holding that only in memory
-    // froze the counter: one agent = one slice, so sessions retire constantly,
-    // and after a reload the in-memory bucket could only be rebuilt from the
-    // handful still live. Their sum never again exceeded the historical
-    // high-water mark, so the displayed total stopped moving for good.
-    `CREATE TABLE IF NOT EXISTS goal_session_tokens (
-      goal_thread_id TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      tokens INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (goal_thread_id, session_id)
-    )`,
     `CREATE TRIGGER IF NOT EXISTS collab_agents_root_capacity_insert
       BEFORE INSERT ON collab_agents
       WHEN NEW.retired_at IS NULL
@@ -415,6 +402,24 @@ export function createGoalStore(bb: BbPluginApi) {
       BEGIN
         SELECT RAISE(ABORT, 'root worker capacity is full');
       END`,
+    // APPEND ONLY, NEVER INSERT. bb.storage.migrate records progress by array
+    // INDEX, so a statement added in the middle shifts every later index: the
+    // new statement lands on an index already marked applied and silently never
+    // runs, while a previously-applied one re-runs under a new index. Adding
+    // the table below mid-array is exactly how it failed the first time.
+    //
+    // Token usage per provider session. A goal's total is the SUM across every
+    // session it ever ran, and one-agent-per-slice retires sessions constantly.
+    // Keeping that map only in memory froze the counter: after a reload it could
+    // be rebuilt from the live handful alone, whose sum never again exceeded the
+    // historical high-water mark the total was floored to.
+    `CREATE TABLE IF NOT EXISTS goal_session_tokens (
+      goal_thread_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      tokens INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (goal_thread_id, session_id)
+    )`,
   ]);
 
   const select = db.prepare("SELECT * FROM goals WHERE thread_id = ?");

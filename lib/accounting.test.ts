@@ -16,15 +16,6 @@ function db() {
   const dir = mkdtempSync(join(tmpdir(), "ultragoal-tokens-"));
   dirs.push(dir);
   const handle = new Database(join(dir, "data.db"));
-  handle.exec(`
-    CREATE TABLE goal_session_tokens (
-      goal_thread_id TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      tokens INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (goal_thread_id, session_id)
-    );
-  `);
   return handle as unknown as Parameters<typeof createSessionTokenStore>[0];
 }
 
@@ -85,5 +76,21 @@ describe("session token accounting", () => {
 
   it("totals zero for a goal that has run nothing, without throwing", () => {
     assert.equal(createSessionTokenStore(db()).total("thr_empty"), 0);
+  });
+
+  it("creates its own table, so a missed migration cannot break accounting", () => {
+    // The shared migration list records progress by array index and did not
+    // apply the appended statement on reload; every accounting pulse then threw
+    // "no such table". The store owns the table where it is used instead.
+    const handle = db();
+    const exists = () =>
+      (handle as unknown as {
+        prepare(sql: string): { get(name: string): unknown };
+      })
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+        .get("goal_session_tokens");
+    assert.equal(exists(), undefined);
+    createSessionTokenStore(handle);
+    assert.notEqual(exists(), undefined);
   });
 });

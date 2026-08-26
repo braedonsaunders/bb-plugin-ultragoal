@@ -23,6 +23,20 @@ const NEW_SESSION_SCANS_PER_TICK = 8;
  * contributing exactly what it spent, and a new one contributes its own growth.
  */
 export function createSessionTokenStore(db: ReturnType<BbPluginApi["storage"]["database"]>) {
+  // Created here rather than trusting the shared migration list alone.
+  // bb.storage.migrate records progress by array index, and on this database it
+  // did not apply the appended statement on reload — accounting then threw
+  // "no such table" on every pulse. Owning the table where it is used makes the
+  // store self-healing and independent of that ordering scheme.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS goal_session_tokens (
+      goal_thread_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      tokens INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (goal_thread_id, session_id)
+    )
+  `);
   const record = db.prepare(`
     INSERT INTO goal_session_tokens (goal_thread_id, session_id, tokens, updated_at)
     VALUES (@goal_thread_id, @session_id, @tokens, @updated_at)
