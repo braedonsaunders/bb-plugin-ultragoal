@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.25
+
+- The token metric now reads in billions past a billion. A long-running goal
+  went by 1,000M and kept counting, and "1680.7M" stops reading as a quantity
+  at a glance — the tier exists so the number can be taken in, and above a
+  billion it no longer was.
+
 ## 0.17.24
 
 - Work items can now declare outputs they cannot close without.

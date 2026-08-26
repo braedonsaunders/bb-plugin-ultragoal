@@ -45,6 +45,10 @@ function statusLabel(goal: GoalSnapshot): string {
 }
 
 function formatTokens(value: number): string {
+  // A long-running goal passes a billion tokens, where "1680.7M" stops reading
+  // as a quantity. Two decimals so the billions tier keeps the same resolution
+  // the millions tier had at the same width.
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 10_000) return `${Math.round(value / 1000)}k`;
   if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
