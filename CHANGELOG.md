@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.17.19
+
+Four failures an independent review found on 0.17.18 despite 112/112 green.
+
+- A failed or deleted child's durable row is now retired. `thread.failed` and
+  `thread.deleted` left the row live, so a crashed worker kept consuming root
+  capacity and a crashed VERIFIER blocked its source worker's retirement for the
+  life of the goal, since `verifiersFor` counts rows regardless of host state.
+  A verifier also stops blocking once it records a verdict or outlives the
+  rescue window without producing one.
+- Retirement no longer infers liveness from the in-memory projection. That
+  projection drops exactly the workers this pass collects, so absence read as
+  "not live" would retire and stop a genuinely running worker on any transient
+  host-read failure. The pass now confirms each candidate's host directly and
+  fails closed when it cannot: `finishedWorkerRetirements` is split into
+  `finishedWorkerRetirementCandidates` plus `retirementPermittedByHost`.
+- `bb ultragoal release` validates every target before mutating any of them, so
+  an item held by several rows can no longer be half-released. It also rejects
+  `starting` hosts and verifier ids, neither of which it previously refused.
+- `--own-slice` normalizes DECLARED fix files, not just the fallback. Scopes are
+  compared as exact paths, so a line-qualified `src/x.ts:99` was stored
+  literally and never overlapped `src/x.ts`, defeating the very serialization
+  guard the scope default exists to preserve.
+
 ## 0.17.18
 
 - Finished-worker cleanup now reconciles against the durable `collab_agents`

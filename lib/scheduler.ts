@@ -141,8 +141,7 @@ export function occupyingWorkerIds(
 }
 
 /**
- * Durable worker rows that no longer represent work, and so must be retired to
- * give their root slot back.
+ * Durable worker rows whose slice is over, and so are CANDIDATES for retirement.
  *
  * The SQL capacity fence counts every non-retired `collab_agents` row, while
  * {@link occupyingWorkerIds} counts only live-or-holding workers. A finished
@@ -156,16 +155,21 @@ export function occupyingWorkerIds(
  * drops any worker whose item is already completed, which is exactly the set
  * this function exists to find. Passing the projection makes it a no-op.
  *
- * A worker is only retired when its slice is `completed` or gone from the plan
- * entirely; a `pending` or `in_progress` slice may still be handed back to the
- * same worker. A worker whose host is still running is left alone, and so is one
- * a verifier still reads as its source, because the verifier resolves its slice
- * through that row.
+ * These are candidates, not decisions. Liveness deliberately is NOT decided
+ * here, because the only liveness signal available in memory is that same
+ * projection — and inferring "not live" from "absent from the projection" would
+ * retire and stop a genuinely running worker whenever a host read failed
+ * transiently. The caller must confirm each candidate's host directly and fail
+ * closed when it cannot.
+ *
+ * A worker is only a candidate when its slice is `completed` or gone from the
+ * plan entirely; a `pending` or `in_progress` slice may still be handed back to
+ * the same worker. One a verifier still reads as its source is never a
+ * candidate, because the verifier resolves its slice through that row.
  */
-export function finishedWorkerRetirements(
+export function finishedWorkerRetirementCandidates(
   workers: readonly { threadId: string; itemId: string | null; role: string | null }[],
   items: readonly Pick<GoalItem, "id" | "status">[],
-  isHostLive: (workerThreadId: string) => boolean,
   hasLiveVerifier: (workerThreadId: string) => boolean,
 ): string[] {
   const byId = new Map(items.map((item) => [item.id, item.status]));
@@ -174,11 +178,131 @@ export function finishedWorkerRetirements(
     if (worker.role === "verifier" || !worker.itemId) continue;
     const status = byId.get(worker.itemId);
     if (status !== undefined && status !== "completed") continue;
-    if (isHostLive(worker.threadId)) continue;
     if (hasLiveVerifier(worker.threadId)) continue;
     retire.push(worker.threadId);
   }
   return retire;
+}
+
+/** Host states that mean a worker is still doing something. `starting` counts:
+ * its first turn has produced nothing yet, but it is about to. Both the host
+ * and projection vocabularies appear here because callers read from both. */
+const HOST_LIVE: ReadonlySet<string> = new Set(["active", "running", "starting"]);
+
+/**
+ * Whether a confirmed host status permits retiring the row.
+ *
+ * `null` means the host could not be read, and unknown is not proof of death:
+ * retiring there would stop a live worker mid-slice. Retirement is a
+ * fail-closed decision, unlike release, where an unreadable host is the very
+ * situation the operator is trying to clean up.
+ */
+export function retirementPermittedByHost(hostStatus: string | null): boolean {
+  if (hostStatus === null) return false;
+  return !HOST_LIVE.has(hostStatus);
+}
+
+/**
+ * The file scope an `--own-slice` item is created with.
+ *
+ * Both branches normalize, because the scheduler compares scopes as exact
+ * paths: a line-qualified `src/x.ts:99` stored literally would never overlap
+ * another slice's `src/x.ts`, silently defeating the serialization guard that
+ * defaulting the scope exists to preserve.
+ */
+export function ownSliceScope(
+  evidenceFile: string,
+  fixFiles: readonly string[] | undefined,
+): string[] {
+  const declared = [
+    ...new Set((fixFiles ?? []).map(normalizeFindingFile).filter(Boolean)),
+  ];
+  if (declared.length > 0) return declared;
+  const evidence = normalizeFindingFile(evidenceFile);
+  return evidence ? [evidence] : [];
+}
+
+/**
+ * Whether any verifier can still produce a verdict for this worker, and so must
+ * keep its source row alive.
+ *
+ * Row existence alone is not the question. `verifiersFor` returns every
+ * non-retired verifier row regardless of host state, so a verifier that crashed
+ * or was deleted before emitting a verdict used to block its source worker's
+ * retirement for the life of the goal — wedging that slot in the SQL capacity
+ * fence. A verifier counts only while it is live in the refreshed snapshot, or
+ * young enough that an unharvested idle verdict is still plausible. One that
+ * already recorded a terminal report has had its say.
+ */
+export function verifierStillDeciding(
+  verifiers: readonly { threadId: string; createdAt: number; reportStatus: string | null }[],
+  isHostLive: (threadId: string) => boolean,
+  now: number,
+  graceMs: number,
+): boolean {
+  return verifiers.some((verifier) => {
+    if (verifier.reportStatus === "done" || verifier.reportStatus === "blocked") return false;
+    if (isHostLive(verifier.threadId)) return true;
+    return now - verifier.createdAt < graceMs;
+  });
+}
+
+export type ReleaseTarget = {
+  threadId: string;
+  rootThreadId: string | null;
+  role: string | null;
+  itemId: string | null;
+  reportStatus: string | null;
+  /** Refreshed host status, or null when the host could not be read. */
+  hostStatus: string | null;
+};
+
+export type ReleasePlan =
+  | { ok: true; release: Array<{ threadId: string; itemId: string | null }> }
+  | { ok: false; reason: string };
+
+/**
+ * Validate every release target before any of them is mutated.
+ *
+ * An item can be held by more than one durable row, so releasing some and then
+ * rejecting a later one would leave a half-released slice the caller has no way
+ * to reason about. An unreadable host is not proof of life — the row is still
+ * releasable — but `active` and `starting` both are: `starting` has produced
+ * nothing yet, and is about to.
+ */
+export function planWorkerRelease(
+  targets: readonly ReleaseTarget[],
+  rootThreadId: string,
+): ReleasePlan {
+  if (targets.length === 0) {
+    return { ok: false, reason: "no live worker holds that target" };
+  }
+  const release: Array<{ threadId: string; itemId: string | null }> = [];
+  for (const target of targets) {
+    if (target.rootThreadId !== rootThreadId) {
+      return { ok: false, reason: `${target.threadId} is not a live worker on ${rootThreadId}` };
+    }
+    if (target.role === "verifier") {
+      return {
+        ok: false,
+        reason: `${target.threadId} is a verifier, not a slice holder; releasing it would strand the worker it judges`,
+      };
+    }
+    if (target.reportStatus === "done") {
+      return {
+        ok: false,
+        reason: `${target.threadId} reported done; let the completion path consume it rather than releasing it`,
+      };
+    }
+    if (target.hostStatus === "active" || target.hostStatus === "starting") {
+      return {
+        ok: false,
+        reason: `${target.threadId} is ${target.hostStatus}; stop it before releasing its slice`,
+      };
+    }
+    release.push({ threadId: target.threadId, itemId: target.itemId });
+  }
+  return { ok: true, release };
 }
 
 export function liveVerifierCount(

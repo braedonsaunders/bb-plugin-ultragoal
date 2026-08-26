@@ -6,7 +6,10 @@ import {
   findingMatchesItem,
   filesOverlap,
   findingAction,
-  finishedWorkerRetirements,
+  finishedWorkerRetirementCandidates,
+  ownSliceScope,
+  planWorkerRelease,
+  retirementPermittedByHost,
   freeSlots,
   liveVerifierCount,
   occupyingWorkerIds,
@@ -17,7 +20,139 @@ import {
   threadAcceptsStart,
   threadAcceptsSteer,
   threadIsSettledForSubmit,
+  verifierStillDeciding,
 } from "./scheduler.ts";
+
+describe("planWorkerRelease", () => {
+  const ROOT = "thr_root";
+  const worker = (over: Record<string, unknown> = {}) => ({
+    threadId: "thr_w",
+    rootThreadId: ROOT,
+    role: "worker" as string | null,
+    itemId: "itm_1" as string | null,
+    reportStatus: null as string | null,
+    hostStatus: "idle" as string | null,
+    ...over,
+  });
+
+  it("releases an idle worker's slice", () => {
+    assert.deepEqual(planWorkerRelease([worker()], ROOT), {
+      ok: true,
+      release: [{ threadId: "thr_w", itemId: "itm_1" }],
+    });
+  });
+
+  it("releases a worker whose host could not be read", () => {
+    // An unreadable host is not proof of life, and refusing there would make the
+    // command useless in exactly the situation it exists for.
+    const plan = planWorkerRelease([worker({ hostStatus: null })], ROOT);
+    assert.equal(plan.ok, true);
+  });
+
+  it("refuses an active or starting worker", () => {
+    for (const hostStatus of ["active", "starting"]) {
+      const plan = planWorkerRelease([worker({ hostStatus })], ROOT);
+      assert.equal(plan.ok, false);
+      assert.match((plan as { reason: string }).reason, new RegExp(hostStatus));
+    }
+  });
+
+  it("refuses a verifier, which holds no slice of its own", () => {
+    const plan = planWorkerRelease([worker({ role: "verifier" })], ROOT);
+    assert.equal(plan.ok, false);
+    assert.match((plan as { reason: string }).reason, /verifier/);
+  });
+
+  it("refuses a worker that already reported done", () => {
+    const plan = planWorkerRelease([worker({ reportStatus: "done" })], ROOT);
+    assert.equal(plan.ok, false);
+    assert.match((plan as { reason: string }).reason, /completion path/);
+  });
+
+  it("refuses a worker belonging to another root", () => {
+    const plan = planWorkerRelease([worker({ rootThreadId: "thr_other" })], ROOT);
+    assert.equal(plan.ok, false);
+  });
+
+  it("refuses the whole batch when any later target is invalid", () => {
+    // Partial release is the failure mode this two-phase shape exists to
+    // prevent: the caller could not tell which half of a held item was freed.
+    const plan = planWorkerRelease(
+      [worker(), worker({ threadId: "thr_w2", hostStatus: "active" })],
+      ROOT,
+    );
+    assert.equal(plan.ok, false);
+    assert.match((plan as { reason: string }).reason, /thr_w2/);
+  });
+
+  it("refuses an empty target set rather than reporting success", () => {
+    assert.equal(planWorkerRelease([], ROOT).ok, false);
+  });
+});
+
+describe("verifierStillDeciding", () => {
+  const GRACE = 10 * 60_000;
+  const NOW = 1_000_000_000;
+  const noneLive = () => false;
+
+  it("blocks retirement while a verifier is live", () => {
+    assert.equal(
+      verifierStillDeciding(
+        [{ threadId: "thr_v", createdAt: NOW - GRACE * 5, reportStatus: null }],
+        (id) => id === "thr_v",
+        NOW,
+        GRACE,
+      ),
+      true,
+    );
+  });
+
+  it("blocks retirement for a young verifier whose verdict may be unharvested", () => {
+    assert.equal(
+      verifierStillDeciding(
+        [{ threadId: "thr_v", createdAt: NOW - 1_000, reportStatus: null }],
+        noneLive,
+        NOW,
+        GRACE,
+      ),
+      true,
+    );
+  });
+
+  it("stops blocking once a crashed verifier is past the grace window", () => {
+    // verifiersFor returns every non-retired row regardless of host state, so a
+    // verifier that died before emitting a verdict used to hold its source
+    // worker's slot for the life of the goal.
+    assert.equal(
+      verifierStillDeciding(
+        [{ threadId: "thr_v", createdAt: NOW - GRACE - 1, reportStatus: null }],
+        noneLive,
+        NOW,
+        GRACE,
+      ),
+      false,
+    );
+  });
+
+  it("stops blocking as soon as a verifier has recorded its verdict", () => {
+    for (const reportStatus of ["done", "blocked"]) {
+      assert.equal(
+        verifierStillDeciding(
+          [{ threadId: "thr_v", createdAt: NOW, reportStatus }],
+          () => true,
+          NOW,
+          GRACE,
+        ),
+        false,
+        `report ${reportStatus} should not block`,
+      );
+    }
+  });
+
+  it("does not block when there is no verifier at all", () => {
+    assert.equal(verifierStillDeciding([], noneLive, NOW, GRACE), false);
+  });
+});
 
 describe("occupyingWorkerIds", () => {
   const open = new Set(["itm_a", "itm_b"]);
@@ -79,9 +214,56 @@ describe("occupyingWorkerIds", () => {
   });
 });
 
-describe("finishedWorkerRetirements", () => {
+describe("retirementPermittedByHost", () => {
+  it("refuses to retire when the host could not be read", () => {
+    // Unknown is not proof of death. The in-memory projection drops exactly the
+    // workers this pass collects, so treating absence as "not live" would stop
+    // a genuinely running worker on any transient host-read failure.
+    assert.equal(retirementPermittedByHost(null), false);
+  });
+
+  it("refuses to retire a live host in either status vocabulary", () => {
+    for (const status of ["active", "running", "starting"]) {
+      assert.equal(retirementPermittedByHost(status), false, status);
+    }
+  });
+
+  it("permits retiring a settled host", () => {
+    for (const status of ["idle", "stopped", "error", "completed"]) {
+      assert.equal(retirementPermittedByHost(status), true, status);
+    }
+  });
+});
+
+describe("ownSliceScope", () => {
+  it("normalizes declared fix files so line-qualified paths still overlap", () => {
+    // The scheduler compares scopes as exact paths, so a stored
+    // "src/shared.ts:99" would never overlap another slice's "src/shared.ts".
+    assert.deepEqual(
+      ownSliceScope("src/x.ts:12", ["src/shared.ts:99", "src/other.ts"]),
+      ["src/shared.ts", "src/other.ts"],
+    );
+  });
+
+  it("deduplicates declared files that normalize to the same path", () => {
+    assert.deepEqual(
+      ownSliceScope("src/x.ts", ["src/a.ts:1", "src/a.ts:2", "src/a.ts"]),
+      ["src/a.ts"],
+    );
+  });
+
+  it("falls back to the normalized evidence file when nothing is declared", () => {
+    assert.deepEqual(ownSliceScope("src/x.ts:12", undefined), ["src/x.ts"]);
+    assert.deepEqual(ownSliceScope("src/x.ts:12", []), ["src/x.ts"]);
+  });
+
+  it("returns an empty scope only when there is genuinely nothing to scope", () => {
+    assert.deepEqual(ownSliceScope("", []), []);
+  });
+});
+
+describe("finishedWorkerRetirementCandidates", () => {
   const noVerifier = () => false;
-  const noneLive = () => false;
   const items = [
     { id: "itm_open", status: "in_progress" as const },
     { id: "itm_done", status: "completed" as const },
@@ -92,20 +274,18 @@ describe("finishedWorkerRetirements", () => {
     // The stop is best-effort, so the host can stay `idle` forever. The SQL
     // capacity fence counts the row regardless; without this reconciliation it
     // holds a root slot permanently.
-    const retire = finishedWorkerRetirements(
+    const retire = finishedWorkerRetirementCandidates(
       [{ role: "worker", itemId: "itm_done", threadId: "thr_done" }],
       items,
-      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, ["thr_done"]);
   });
 
   it("retires a worker whose slice vanished from the plan", () => {
-    const retire = finishedWorkerRetirements(
+    const retire = finishedWorkerRetirementCandidates(
       [{ role: "worker", itemId: "itm_gone", threadId: "thr_gone" }],
       items,
-      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, ["thr_gone"]);
@@ -118,52 +298,40 @@ describe("finishedWorkerRetirements", () => {
     // still looked correct: the one case it exists for was invisible to it.
     const durableOnly = [{ role: null, itemId: "itm_done", threadId: "thr_invisible" }];
     assert.deepEqual(
-      finishedWorkerRetirements(durableOnly, items, noneLive, noVerifier),
+      finishedWorkerRetirementCandidates(durableOnly, items, noVerifier),
       ["thr_invisible"],
     );
   });
 
   it("keeps workers whose slice is still in progress or still pending", () => {
-    const retire = finishedWorkerRetirements(
+    const retire = finishedWorkerRetirementCandidates(
       [
         { role: "worker", itemId: "itm_open", threadId: "thr_open" },
         { role: "worker", itemId: "itm_waiting", threadId: "thr_waiting" },
       ],
       items,
-      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, []);
   });
 
-  it("keeps a finished worker whose host is still running", () => {
-    const retire = finishedWorkerRetirements(
-      [{ role: "worker", itemId: "itm_done", threadId: "thr_done" }],
-      items,
-      (threadId) => threadId === "thr_done",
-      noVerifier,
-    );
-    assert.deepEqual(retire, []);
-  });
 
   it("keeps a finished worker a verifier still reads as its source", () => {
-    const retire = finishedWorkerRetirements(
+    const retire = finishedWorkerRetirementCandidates(
       [{ role: "worker", itemId: "itm_done", threadId: "thr_done" }],
       items,
-      noneLive,
       (threadId) => threadId === "thr_done",
     );
     assert.deepEqual(retire, []);
   });
 
   it("never retires verifiers or itemless crew", () => {
-    const retire = finishedWorkerRetirements(
+    const retire = finishedWorkerRetirementCandidates(
       [
         { role: "verifier", itemId: "itm_done", threadId: "thr_verifier" },
         { role: "worker", itemId: null, threadId: "thr_itemless" },
       ],
       items,
-      noneLive,
       noVerifier,
     );
     assert.deepEqual(retire, []);
@@ -180,7 +348,7 @@ describe("finishedWorkerRetirements", () => {
       status: "completed" as const,
     }));
     assert.equal(
-      finishedWorkerRetirements(workers, closed, noneLive, noVerifier).length,
+      finishedWorkerRetirementCandidates(workers, closed, noVerifier).length,
       5,
     );
   });

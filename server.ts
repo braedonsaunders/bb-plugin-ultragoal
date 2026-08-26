@@ -50,17 +50,22 @@ import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
-  finishedWorkerRetirements,
+  finishedWorkerRetirementCandidates,
   freeSlots,
+  ownSliceScope,
+  retirementPermittedByHost,
   liveVerifierCount,
   occupyingWorkerIds,
   orphanInProgressIds,
   isTransientTurnFailure,
   isTurnAlreadyActiveError,
   normalizeFindingFile,
+  planWorkerRelease,
+  type ReleaseTarget,
   threadAcceptsStart,
   threadAcceptsSteer,
   threadIsSettledForSubmit,
+  verifierStillDeciding,
 } from "./lib/scheduler.js";
 import {
   closeFindingsForCompletedItem,
@@ -1139,21 +1144,41 @@ export default function plugin(bb: BbPluginApi) {
           .filter((agent) => agent.status === "running" || agent.status === "starting")
           .map((agent) => agent.threadId),
       );
-      const retirable = finishedWorkerRetirements(
+      const candidates = finishedWorkerRetirementCandidates(
         collab.durableRowsForRoot(rootThreadId).filter((row) => row.threadId !== rootThreadId),
         plannedItems,
-        (workerThreadId) => liveHosts.has(workerThreadId),
-        (workerThreadId) => collab.verifiersFor(workerThreadId).length > 0,
+        (workerThreadId) => verifierStillDeciding(
+          collab.verifiersFor(workerThreadId).map((row) => ({
+            threadId: row.thread_id,
+            createdAt: row.created_at,
+            reportStatus: row.report_status ?? null,
+          })),
+          (verifierThreadId) => liveHosts.has(verifierThreadId),
+          now,
+          RESCUE_AFTER_MS,
+        ),
       );
-      for (const workerThreadId of retirable) {
+      const retired = new Set<string>();
+      for (const workerThreadId of candidates) {
+        // Confirm each candidate's host directly. The in-memory projection
+        // cannot answer this: it drops exactly these workers, so absence there
+        // means "unknown", not "dead". Retiring on unknown would stop a live
+        // worker whenever a single host read failed transiently.
+        let hostStatus: string | null = null;
+        try {
+          hostStatus = (await bb.sdk.threads.get({ threadId: workerThreadId })).status ?? null;
+        } catch {
+          continue;
+        }
+        if (!retirementPermittedByHost(hostStatus)) continue;
         collab.forget(workerThreadId);
         firstSeenIdle.delete(workerThreadId);
+        retired.add(workerThreadId);
         void releaseWorkerRuntime(workerThreadId);
         bb.log.info(
-          `Retired finished worker ${workerThreadId} on ${rootThreadId}: its slice is closed; released its scheduler slot`,
+          `Retired finished worker ${workerThreadId} on ${rootThreadId} (host ${hostStatus}): its slice is closed; released its scheduler slot`,
         );
       }
-      const retired = new Set(retirable);
 
       const liveVerifierSources = new Set(
         agents
@@ -2758,11 +2783,13 @@ export default function plugin(bb: BbPluginApi) {
       // files. The scheduler serializes overlapping work through `item.files`
       // alone, so an empty scope silently opts the slice out of that guard and
       // lets a second worker edit the same file concurrently.
+      //
+      // Declared files are normalized too, not just the fallback: overlap is
+      // compared as exact paths, so a line-qualified `src/x.ts:99` would be
+      // stored literally and never match another slice's `src/x.ts`, quietly
+      // defeating the same guard the default exists to preserve.
       const evidenceFile = normalizeFindingFile(result.finding.file);
-      const declaredFiles = (input.fixFiles ?? []).filter(Boolean);
-      const scope = declaredFiles.length > 0
-        ? declaredFiles
-        : evidenceFile ? [evidenceFile] : [];
+      const scope = ownSliceScope(result.finding.file, input.fixFiles);
       const dedicated = items.add(
         rootThreadId,
         `Fix: ${result.finding.title} [${evidenceFile}] CONTEXT (audit findings: ${result.finding.id})`,
@@ -3500,7 +3527,15 @@ export default function plugin(bb: BbPluginApi) {
     running.set(thread.id, false);
     const failedChild = collab.rowOf(thread.id);
     if (failedChild && failedChild.root_thread_id !== thread.id) {
+      // A failed child is dead, and its durable row is not. Leaving it live
+      // wedges a slot two ways: as a worker it keeps consuming root capacity,
+      // and as a verifier it keeps `verifiersFor` reporting a dependant, which
+      // blocks its SOURCE worker from ever being retired. Its slice returns to
+      // the queue through the ordinary orphan reclaim.
+      collab.forget(thread.id);
       markGoalEvent(failedChild.root_thread_id);
+      void publishFresh(failedChild.root_thread_id);
+      void scheduleReady(failedChild.root_thread_id);
     }
     const goal = store.get(thread.id);
     if (!goal || !isUnfinished(goal.status)) return;
@@ -3516,6 +3551,16 @@ export default function plugin(bb: BbPluginApi) {
     if (transferLocked(thread.id)) return;
     running.delete(thread.id);
     forgetNativeScan(thread.id);
+    // A deleted child cannot come back, so its durable row is pure leak: it
+    // holds a root slot, and as a verifier row it blocks its source worker's
+    // retirement forever.
+    const deletedChild = collab.rowOf(thread.id);
+    if (deletedChild && deletedChild.root_thread_id !== thread.id) {
+      collab.forget(thread.id);
+      markGoalEvent(deletedChild.root_thread_id);
+      void publishFresh(deletedChild.root_thread_id);
+      void scheduleReady(deletedChild.root_thread_id);
+    }
     items.clear(thread.id);
     findings.clear(thread.id);
     decisions.clear(thread.id);
@@ -3779,34 +3824,37 @@ export default function plugin(bb: BbPluginApi) {
         if (workerIds.length === 0) {
           return { exitCode: 1, stderr: `No live worker holds ${target}.` };
         }
-        const released: string[] = [];
+        // Validate every target before mutating any of them; see
+        // planWorkerRelease for why a partial release is not acceptable.
+        const targets: ReleaseTarget[] = [];
         for (const workerId of workerIds) {
           const row = collab.rowOf(workerId);
-          if (!row || row.root_thread_id !== threadId) {
+          if (!row) {
             return { exitCode: 1, stderr: `${workerId} is not a live worker on ${threadId}.` };
           }
-          if (row.report_status === "done") {
-            return {
-              exitCode: 1,
-              stderr: `${workerId} reported done; let the completion path consume it rather than releasing it.`,
-            };
-          }
-          // Releasing a running worker would race its own writes. Stop it first.
+          let hostStatus: string | null = null;
           try {
-            const host = await bb.sdk.threads.get({ threadId: workerId });
-            if (host.status === "active") {
-              return {
-                exitCode: 1,
-                stderr: `${workerId} is still active; stop it before releasing its slice.`,
-              };
-            }
+            hostStatus = (await bb.sdk.threads.get({ threadId: workerId })).status ?? null;
           } catch {
             // An unreadable host is not proof of life; releasing is still correct.
           }
+          targets.push({
+            threadId: workerId,
+            rootThreadId: row.root_thread_id,
+            role: row.role ?? null,
+            itemId: row.item_id ?? null,
+            reportStatus: row.report_status ?? null,
+            hostStatus,
+          });
+        }
+        const plan = planWorkerRelease(targets, threadId);
+        if (!plan.ok) return { exitCode: 1, stderr: `${plan.reason}.` };
+        const released: string[] = [];
+        for (const { threadId: workerId, itemId } of plan.release) {
           collab.forget(workerId);
           void releaseWorkerRuntime(workerId);
-          if (row.item_id) items.setStatus(threadId, row.item_id, "pending");
-          released.push(row.item_id ? `${workerId} -> ${row.item_id}` : workerId);
+          if (itemId) items.setStatus(threadId, itemId, "pending");
+          released.push(itemId ? `${workerId} -> ${itemId}` : workerId);
         }
         markGoalEvent(threadId);
         void publishFresh(threadId);
