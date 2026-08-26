@@ -48,6 +48,11 @@ import {
 } from "./lib/native-sync.js";
 import { currentSliceTitle, shortSliceTitle } from "./lib/titles.js";
 import { createWorkerBriefStore, withStandingBrief } from "./lib/worker-brief.js";
+import {
+  createItemRequirementStore,
+  missingDeliverables,
+  parseDeliverableEvidence,
+} from "./lib/deliverables.js";
 import { projectPane } from "./lib/projection.js";
 import {
   filesOverlap,
@@ -321,6 +326,7 @@ export default function plugin(bb: BbPluginApi) {
   const linkedDefectBrief = (rootThreadId: string, itemId: string): string =>
     formatLinkedDefectBrief(linkedOpenFindings(rootThreadId, itemId));
   const workerBriefs = createWorkerBriefStore(bb.storage.database());
+  const itemRequirements = createItemRequirementStore(bb.storage.database());
 
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
@@ -738,7 +744,7 @@ export default function plugin(bb: BbPluginApi) {
   const lastStaffTry = new Map<string, number>();
   const scheduling = new Set<string>();
 
-  function itemBriefMessage(item: GoalItem, restaffed: boolean): string {
+  function itemBriefMessage(rootThreadId: string, item: GoalItem, restaffed: boolean): string {
     const lines = [`SLICE (item_id=${item.id}): ${item.step}`];
     if (restaffed) {
       lines.push(
@@ -748,6 +754,12 @@ export default function plugin(bb: BbPluginApi) {
     if (item.files.length > 0) {
       lines.push(
         `Scope: touch only files within: ${item.files.join(", ")}. If the slice requires edits outside this scope, stop and report ULTRAGOAL_BLOCKED with the reason instead of expanding scope.`,
+      );
+    }
+    const requiredPaths = itemRequirements.list(rootThreadId, item.id);
+    if (requiredPaths.length > 0) {
+      lines.push(
+        `Required outputs — this slice cannot close without them. Scope above is what you MAY touch; these are what you MUST produce: ${requiredPaths.join(", ")}. Account for each one with an exact line: DELIVERABLE: {"path":"<path>","proof":"what it does and how you verified it"}. Prose describing the work does not count, a missing line refuses the completion, and if you cannot produce one, report ULTRAGOAL_BLOCKED saying which and why.`,
       );
     }
     lines.push(
@@ -898,7 +910,7 @@ export default function plugin(bb: BbPluginApi) {
               item.step,
               agents.map((agent) => agent.nickname),
             ),
-            message: itemBriefMessage(item, restaffed),
+            message: itemBriefMessage(rootThreadId, item, restaffed),
           });
         } catch (error) {
           result = { error: error instanceof Error ? error.message : String(error) };
@@ -1517,6 +1529,19 @@ export default function plugin(bb: BbPluginApi) {
         `Rejected completion of ${itemId} on ${rootThreadId}: report omitted linked defect evidence for ${missingFindingIds.join(", ")}`,
       );
       return false;
+    }
+    // Declared outputs are a FLOOR, unlike item.files which is only the scope
+    // ceiling. Opt-in: an item with no requirements behaves exactly as before,
+    // so this cannot retroactively block work already in flight.
+    const required = itemRequirements.list(rootThreadId, itemId);
+    if (required.length > 0) {
+      const missingPaths = missingDeliverables(parseDeliverableEvidence(report), required);
+      if (missingPaths.length > 0) {
+        bb.log.warn(
+          `Rejected completion of ${itemId} on ${rootThreadId}: report omitted deliverable evidence for ${missingPaths.join(", ")}`,
+        );
+        return false;
+      }
     }
     items.setStatus(rootThreadId, itemId, "completed");
     markGoalEvent(rootThreadId);
@@ -3912,6 +3937,45 @@ export default function plugin(bb: BbPluginApi) {
         return { exitCode: 0, stdout: "Standing worker brief set; every worker spawned from now on inherits it." };
       }
 
+      if (action === "requires") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const parts = (objective ?? "").trim().split(/\s+/).filter(Boolean);
+        const itemId = parts[0];
+        if (!itemId) {
+          return { exitCode: 1, stderr: "Usage: bb ultragoal requires <item-id> <path,path> | <item-id> --clear" };
+        }
+        const item = items.list(threadId).find((row) => row.id === itemId);
+        if (!item) return { exitCode: 1, stderr: `Unknown work item: ${itemId}` };
+        const rest = parts.slice(1).join(" ").trim();
+        if (rest === "--clear") {
+          const removed = itemRequirements.clear(threadId, itemId);
+          return { exitCode: 0, stdout: removed ? `Cleared required outputs on ${itemId}.` : `${itemId} had no required outputs.` };
+        }
+        if (!rest) {
+          const current = itemRequirements.list(threadId, itemId);
+          return {
+            exitCode: 0,
+            stdout: current.length
+              ? `${itemId} cannot close without: ${current.join(", ")}`
+              : `${itemId} has no required outputs; its files are a scope ceiling only.`,
+          };
+        }
+        // Requiring an output on work already running would change the contract
+        // a worker was briefed under, mid-slice.
+        if (item.status === "in_progress") {
+          return {
+            exitCode: 1,
+            stderr: `${itemId} is in progress; its worker was briefed without these requirements. Wait for it to settle, or release the slice first.`,
+          };
+        }
+        const stored = itemRequirements.set(threadId, itemId, rest.split(",").map((entry) => entry.trim()));
+        if (stored.length === 0) return { exitCode: 1, stderr: "No usable paths given." };
+        markGoalEvent(threadId);
+        void publishFresh(threadId);
+        return { exitCode: 0, stdout: `${itemId} now requires: ${stored.join(", ")}` };
+      }
+
       if (action === "pause") {
         const goal = await pauseGoal(threadId, "Paused from the CLI.");
         return {
@@ -3952,6 +4016,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "transfer-root", summary: "Atomically transfer an unfinished UltraGoal to an idle Codex root", usage: "bb ultragoal transfer-root <source-thread-id> <target-thread-id> [--dry-run]" },
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--thread <id>]" },
       { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
+      { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },
@@ -4004,7 +4069,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "brief" | "requires" | "transfer-root";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -4028,7 +4093,8 @@ function parseCli(
   }
   if (
     action === "set" || action === "edit" || action === "workers" ||
-    action === "decide" || action === "release" || action === "brief"
+    action === "decide" || action === "release" || action === "brief" ||
+    action === "requires"
   ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }

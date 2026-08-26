@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.17.24
+
+- Work items can now declare outputs they cannot close without.
+  An item's `files` was only ever a ceiling — the scope a worker may touch —
+  and nothing was a floor, so a slice closed as soon as its linked defects were
+  attested whether or not it produced the artifact it was scoped to produce.
+  A declared audit script was never written and its slice still closed clean.
+  `bb ultragoal requires <item-id> <paths>` sets the floor: the worker's brief
+  names the paths, and completion is refused unless the report carries a
+  `DELIVERABLE:` line per path with nonempty proof, on the same terms as
+  `DEFECT_COVERAGE`. Opt-in, so an item that declares nothing behaves exactly
+  as before, and requirements are refused on an item already in progress rather
+  than changing the contract its worker was briefed under.
+
 ## 0.17.23
 
 - Removed a project-specific path from defect coalescing.
