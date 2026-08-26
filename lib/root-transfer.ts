@@ -404,15 +404,26 @@ export async function executeRootTransfer(input: {
   if (inspection.mode === "transfer" && target.status !== "idle") {
     throw new Error(`target must be idle before transfer (status=${target.status})`);
   }
-  if (
-    target.providerId !== "codex" ||
-    targetExecution?.model !== "gpt-5.6-sol" ||
-    targetExecution.reasoningLevel !== "xhigh" ||
-    targetExecution.serviceTier !== "fast" ||
-    targetExecution.permissionMode !== "full"
-  ) {
-    throw new Error(
-      `target must use codex/gpt-5.6-sol xhigh fast/full (got ${target.providerId}/${targetExecution?.model ?? "unknown"} ${targetExecution?.reasoningLevel ?? "unknown"} ${targetExecution?.serviceTier ?? "unknown"}/${targetExecution?.permissionMode ?? "unknown"})`,
+  // The target used to have to be codex/gpt-5.6-sol xhigh fast/full — one
+  // vendor and one model name, written into a plugin that is supposed to be
+  // provider-neutral. It made the transfer useless in the exact situation it
+  // exists for: when a root dies because ITS provider is unavailable, the only
+  // permitted rescue thread was one on that same provider. A goal whose root
+  // was a Codex thread became unrecoverable the moment the Codex quota ran out.
+  //
+  // What actually has to hold is that the target can BE a root: same project
+  // and environment, not a child, not archived, idle, and a different thread.
+  // Every one of those is checked above. Which model it runs is the owner's
+  // choice, and the workers' provider is pinned separately and moves with the
+  // goal.
+  if (!target.providerId) {
+    throw new Error("target has no provider configured");
+  }
+  if (targetExecution?.model && source.providerId !== target.providerId) {
+    // Not fatal — just the one thing an owner would want said out loud, since
+    // the new root reasons about the goal in a different model's voice.
+    bb.log.info(
+      `Root transfer changes the orchestrator provider: ${source.providerId} -> ${target.providerId}/${targetExecution.model}`,
     );
   }
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.20.1
+
+- Root transfer no longer demands the target run `codex/gpt-5.6-sol xhigh
+  fast/full`. One vendor and one model name were written into a plugin that is
+  meant to be provider-neutral, and it made the transfer useless in the exact
+  situation it exists for: when a root dies because ITS provider is
+  unavailable, the only permitted rescue thread was one on that same provider.
+  A goal whose root was a Codex thread became unrecoverable the moment the
+  Codex quota ran out. What has to hold is that the target can BE a root —
+  same project and environment, not a child, not archived, idle — and all of
+  that was already checked. A provider change is logged, not refused.
+
 ## 0.20.0
 
 - `bb ultragoal exec` shows and sets which provider and model workers and
