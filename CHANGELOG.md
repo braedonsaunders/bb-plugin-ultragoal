@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.23.0
+
+- A refused completion now reaches the worker, carrying the exact line that
+  would satisfy it. The deliverable floor rejected a closure and told only the
+  log: four workers finished their slices, had closure refused three times over,
+  and went idle still holding every scheduler slot while twenty-five ready items
+  waited. From the worker's side a tool call simply failed, with nothing said
+  about why or what to do. It now gets the item id, the paths it did not account
+  for, a ready-to-emit `DELIVERABLE:` line per path, and the fact that this is a
+  reporting gap rather than a request to redo the work — a worker that cannot
+  see the contract cannot meet it.
+
 ## 0.22.0
 
 - **Rotate orchestrator**, in the right-pane Settings. A root re-reads its whole

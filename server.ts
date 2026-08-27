@@ -1692,6 +1692,8 @@ export default function plugin(bb: BbPluginApi) {
       requirePass?: boolean;
       recordedClaim?: "done" | "blocked" | null;
       findingEvidence?: readonly FindingAffirmativeEvidence[];
+      /** Whose report this is, so a refusal reaches them instead of only a log. */
+      workerThreadId?: string | null;
     },
   ): boolean {
     if (!itemId) return false;
@@ -1752,6 +1754,25 @@ export default function plugin(bb: BbPluginApi) {
         bb.log.warn(
           `Rejected completion of ${itemId} on ${rootThreadId}: report omitted deliverable evidence for ${missingPaths.join(", ")}`,
         );
+        // Telling only the log is why four workers finished their work, had
+        // their closure refused, and went idle holding every scheduler slot
+        // while twenty-five items waited. The refusal has to reach whoever can
+        // act on it, and it has to carry the exact line that satisfies it —
+        // a worker that cannot see the contract cannot meet it.
+        if (options?.workerThreadId) {
+          void sendSteering(
+            options.workerThreadId,
+            [
+              `SLICE NOT CLOSED. Your work may well be done, but ${itemId} declares required outputs and your report did not account for: ${missingPaths.join(", ")}.`,
+              `This is a reporting gap, not a request to redo the work. For EACH path above, emit one line, exactly this shape, then end your report:`,
+              ...missingPaths.map(
+                (path) => `DELIVERABLE: {"path":"${path}","proof":"<what you did to it and how you know it works>"}`,
+              ),
+              `The proof must be nonempty and specific — name the assertion or the command output. Prose elsewhere in the report does not count, which is the whole reason this gate exists.`,
+            ].join("\n"),
+            "auto",
+          );
+        }
         return false;
       }
     }
@@ -1789,6 +1810,7 @@ export default function plugin(bb: BbPluginApi) {
         const claim = collab.reportOf(agent.threadId);
         if (
           completeItemFor(rootThreadId, agent.itemId, claim?.evidence ?? output, {
+            workerThreadId: agent.threadId,
             recordedClaim: claim?.status ?? null,
             findingEvidence: claim?.findingEvidence ?? [],
           })
@@ -3652,6 +3674,7 @@ export default function plugin(bb: BbPluginApi) {
         const claim = collab.reportOf(thread.id);
         if (
           completeItemFor(parentRoot, child.item_id, claim?.evidence ?? lastAssistantText, {
+            workerThreadId: child.thread_id,
             recordedClaim: claim?.status ?? null,
             findingEvidence: claim?.findingEvidence ?? [],
           })
@@ -3751,6 +3774,9 @@ export default function plugin(bb: BbPluginApi) {
           collab.setReport(thread.id, "done", lastAssistantText ?? "", verifierEvidence);
         }
         const passed = completeItemFor(parentRoot, sourceItemId, lastAssistantText, {
+          // The verifier judged someone else's slice; a refusal belongs to the
+          // worker that produced the report, not to the verifier.
+          workerThreadId: child.source_thread_id ?? thread.id,
           requirePass: true,
         });
         if (passed && child.source_thread_id) {
