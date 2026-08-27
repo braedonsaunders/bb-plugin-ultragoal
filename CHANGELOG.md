@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.25.1
+
+- An archived worker no longer blocks a root transfer. 0.24.0 started archiving
+  worker threads on retirement so their worktrees could be collected, and the
+  transfer still treated an archived thread as corruption: 415 collab rows on
+  one goal read as live while their threads were gone, and every one refused the
+  transfer with a message implying something was broken. Archived means
+  finished. The transfer now retires the stale row and carries on, rather than
+  inventing a problem out of its own bookkeeping.
+
 ## 0.25.0
 
 - Record where a slice actually landed. Nothing did: of 417 register entries a

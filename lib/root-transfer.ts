@@ -120,6 +120,11 @@ export function createRootTransferStore(bb: BbPluginApi) {
   // Historical retired workers remain under the archived source in BB. Only
   // live direct children are externally reparented and have parent metadata
   // changed; every row still moves to the target root for durable history.
+  // Retire a collab row whose thread no longer exists. Owned here because the
+  // transfer is the place that discovers the mismatch.
+  const retireChildRow = db.prepare(
+    "UPDATE collab_agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL",
+  );
   const children = db.prepare(`
     SELECT thread_id FROM collab_agents
     WHERE root_thread_id = ? AND parent_thread_id = ? AND retired_at IS NULL
@@ -306,6 +311,14 @@ export function createRootTransferStore(bb: BbPluginApi) {
     },
 
     /** Move every root-owned row and phase marker in one IMMEDIATE transaction. */
+    /**
+     * Retire a collab row whose thread no longer exists. The transfer is where
+     * that mismatch surfaces, so the transfer gets to resolve it.
+     */
+    retireMissingChild(threadId: string): void {
+      retireChildRow.run(Date.now(), threadId);
+    },
+
     commit(
       sourceThreadId: string,
       targetThreadId: string,
@@ -462,7 +475,15 @@ export async function executeRootTransfer(input: {
       throw new Error(`worker ${child.threadId} is not in the source project`);
     }
     if (thread.archivedAt || thread.deletedAt) {
-      throw new Error(`live worker ${child.threadId} is archived or deleted`);
+      // Not an error — retire the row and move on. Workers are archived when
+      // they retire, and the plugin's own row can lag behind that, so a normal
+      // fleet accumulates rows marked live whose threads are gone: 415 of them
+      // on one goal, every single one blocking the transfer with a message
+      // implying corruption. A thread that is archived or deleted is finished
+      // by definition; refusing to move a goal because a worker already ended
+      // is the transfer inventing a problem out of its own bookkeeping.
+      store.retireMissingChild(child.threadId);
+      continue;
     }
     if (
       thread.parentThreadId !== null &&

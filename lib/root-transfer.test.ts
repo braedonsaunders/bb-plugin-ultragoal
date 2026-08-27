@@ -347,3 +347,39 @@ describe("durable root transfer", () => {
     assert.equal(wakeCount, 1);
   });
 });
+
+describe("a worker that already ended", () => {
+  it("does not block a transfer just because its thread was archived", () => {
+    // Workers are archived when they retire and the plugin's row can lag, so a
+    // normal fleet accumulates rows marked live whose threads are gone — 415 on
+    // one goal, every one refusing the transfer with a message implying
+    // corruption. Archived means finished, not broken.
+    const { host, db } = migratedHost();
+    const store = createRootTransferStore(host.bb);
+    db.prepare(
+      "INSERT INTO collab_agents (thread_id, root_thread_id, parent_thread_id, task_name, created_at, role) VALUES (?,?,?,?,?,?)",
+    ).run("thr_gone", "thr_src", "thr_src", "/root/gone", 1, "worker");
+    assert.equal(
+      (db.prepare("SELECT retired_at FROM collab_agents WHERE thread_id = ?").get("thr_gone") as { retired_at: number | null }).retired_at,
+      null,
+    );
+    store.retireMissingChild("thr_gone");
+    assert.notEqual(
+      (db.prepare("SELECT retired_at FROM collab_agents WHERE thread_id = ?").get("thr_gone") as { retired_at: number | null }).retired_at,
+      null,
+    );
+  });
+
+  it("leaves an already-retired row alone rather than restamping it", () => {
+    const { host, db } = migratedHost();
+    const store = createRootTransferStore(host.bb);
+    db.prepare(
+      "INSERT INTO collab_agents (thread_id, root_thread_id, parent_thread_id, task_name, created_at, role, retired_at) VALUES (?,?,?,?,?,?,?)",
+    ).run("thr_old", "thr_src", "thr_src", "/root/old", 1, "worker", 500);
+    store.retireMissingChild("thr_old");
+    assert.equal(
+      (db.prepare("SELECT retired_at FROM collab_agents WHERE thread_id = ?").get("thr_old") as { retired_at: number | null }).retired_at,
+      500,
+    );
+  });
+});
