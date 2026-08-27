@@ -1742,6 +1742,25 @@ export default function plugin(bb: BbPluginApi) {
       bb.log.warn(
         `Rejected completion of ${itemId} on ${rootThreadId}: report omitted linked defect evidence for ${missingFindingIds.join(", ")}`,
       );
+      // The same silence that stranded the deliverable floor, and with a worse
+      // ending: a slice refused here stays in_progress, its worker is released,
+      // and the scheduler eventually re-staffs it — so a second worker redid
+      // work that was already committed and integrated, on a stale base, and
+      // was heading for a merge conflict with its own predecessor.
+      if (options?.workerThreadId) {
+        void sendSteering(
+          options.workerThreadId,
+          [
+            `SLICE NOT CLOSED. Your work may well be done and committed, but ${itemId} is linked to defects your report did not attest: ${missingFindingIds.join(", ")}.`,
+            `This is a reporting gap, not a request to redo the work — do NOT start over. Re-report with one line per defect, exactly this shape:`,
+            ...missingFindingIds.map(
+              (findingId) => `DEFECT_COVERAGE: {"finding_id":"${findingId}","status":"pass","proof":"<what you checked and how you know it holds>"}`,
+            ),
+            `Then end with ULTRAGOAL_DONE. Prose naming the defect does not count; if you use the slice_done tool instead, pass the same ids as structured finding_evidence.`,
+          ].join("\n"),
+          "auto",
+        );
+      }
       return false;
     }
     // Declared outputs are a FLOOR, unlike item.files which is only the scope

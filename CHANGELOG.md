@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.23.1
+
+- The defect-evidence refusal now reaches the worker too. 0.23.0 fixed the
+  deliverable floor and left this one logging into the void, and its ending is
+  worse: a slice refused here stays `in_progress`, its worker is released, and
+  the scheduler eventually re-staffs it. A second worker then redid work that
+  was already committed and integrated, on a stale base, heading for a merge
+  conflict with its own predecessor — which the orchestrator spotted and
+  reported as a wasted cycle. The worker now gets the finding ids it failed to
+  attest and a ready-to-emit `DEFECT_COVERAGE:` line for each, told plainly not
+  to start over.
+
 ## 0.23.0
 
 - A refused completion now reaches the worker, carrying the exact line that
