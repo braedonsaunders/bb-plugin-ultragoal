@@ -1335,7 +1335,24 @@ export default function plugin(bb: BbPluginApi) {
       await reclaimWorktree(rootThreadId, itemId, worker.environmentId, base);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (/no changes|nothing to (merge|commit)|up.to.date|already/i.test(message)) {
+      if (/no changes|nothing to (merge|commit)|up.to.date|already|nothing to squash/i.test(message)) {
+        // "Already up to date. (nothing to squash)" is git exiting non-zero
+        // because there was nothing to stage, and bb surfaces that as a 502.
+        // Recording it as a FAILED integration is worse than useless: it is the
+        // provenance table saying work did not land when it demonstrably did,
+        // in the one instrument built to answer that question. 15 of 17
+        // recorded failures on a live goal were this.
+        integrations.record(
+          rootThreadId,
+          {
+            itemId,
+            commit: null,
+            branch: null,
+            status: "integrated",
+            detail: `already present on the base branch: ${message.slice(0, 200)}`,
+          },
+          Date.now(),
+        );
         bb.log.info(`Integration skipped for slice ${itemId} on ${rootThreadId}: ${message}`);
         return;
       }

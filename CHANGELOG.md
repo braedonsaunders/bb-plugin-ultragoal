@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.25.3
+
+- A slice whose work is already on the base branch is recorded as INTEGRATED,
+  not failed. `git merge --squash` exits non-zero when there is nothing to
+  stage, and bb surfaces that as `HTTP 502: git merge --squash <branch>
+  failed` — so a no-op merge was indistinguishable from a real conflict. On a
+  live goal 15 of 17 recorded "failures" were `Already up to date. (nothing to
+  squash)`, meaning the provenance table built to answer "did this land?" was
+  reporting that work had not landed when it demonstrably had. A real conflict
+  still records as failed.
+
 ## 0.25.2
 
 - Token history now moves with the goal. `goal_session_tokens` was the fourth
