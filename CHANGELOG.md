@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.24.0
+
+- **Workers branch from where integration lands, not from the repository
+  default.** The root works on its own branch and squash-merges slices into it,
+  while every worker was cut from `default` — so a worker spawned after an
+  integration could not see any of it. Three of four live workers were
+  simultaneously on stale bases, one re-implementing a slice already merged,
+  every one heading for a conflict. A worker that starts behind the integration
+  point is wasted before it reads a line.
+- **Retiring a worker archives its thread.** Retirement was a fact known only to
+  this plugin: 201 retired workers still counted as live threads, so the
+  worktree collector — correctly refusing to delete a live thread's directory —
+  protected 135 worktrees nothing would ever use again. Saying a finished worker
+  is finished is what lets its disk come back.
+- **`release_slice` and `retire_agent`** give the orchestrator levers to match
+  what it can already see. Its only tool was `interrupt_agent`, which ends a
+  turn but keeps the slot and the assignment, so a slice it correctly judged
+  redundant stayed `in_progress` and the ready queue stayed blocked while it
+  reported the problem into the void.
+
 ## 0.23.1
 
 - The defect-evidence refusal now reaches the worker too. 0.23.0 fixed the

@@ -133,6 +133,13 @@ export function createCollabStore(
     ) => string | null;
     /** Status of a plan item, so retired workers can refuse new slices. */
     itemStatus?: (rootThreadId: string, itemId: string) => string | null;
+    /**
+     * Give a work item back to the ready queue. The orchestrator could see a
+     * redundant or stale-based worker and had no lever to stop it: interrupting
+     * ends a turn but keeps the slot and the assignment, so the slice stayed
+     * in_progress and the queue stayed blocked.
+     */
+    releaseItem?: (rootThreadId: string, itemId: string, reason: string) => void;
     /** Goal-level worker execution pin; null fields inherit the root thread. */
     workerExecution?: (rootThreadId: string) => {
       providerId: string | null;
@@ -737,6 +744,18 @@ export function createCollabStore(
     ]
       .filter(Boolean)
       .join("\n\n");
+    // Where completed slices are squash-merged. integrateWorker uses the root
+    // environment's mergeBaseBranch, falling back to its checked-out branch, so
+    // workers must be cut from the same place.
+    let integrationBranch: string | null = null;
+    if (parent.environmentId) {
+      try {
+        const rootEnv = await bb.sdk.environments.get({ environmentId: parent.environmentId });
+        integrationBranch = rootEnv.branchName ?? rootEnv.mergeBaseBranch ?? null;
+      } catch {
+        integrationBranch = null;
+      }
+    }
     const parentHostId = parent.environmentId
       ? await bb.sdk.environments
           .get({ environmentId: parent.environmentId })
@@ -778,7 +797,16 @@ export function createCollabStore(
         hostId: parentHostId,
         workspace: {
           type: "managed-worktree" as const,
-          baseBranch: { kind: "default" as const },
+          // Branch from where integration LANDS, not from the repository
+          // default. The root works on its own branch and squash-merges slices
+          // into it, so a worker cut from `default` cannot see any integrated
+          // work: three of four live workers were simultaneously on stale
+          // bases, one re-implementing a slice already merged, every one of
+          // them heading for a conflict. A worker that starts behind the
+          // integration point is wasted before it reads a line.
+          baseBranch: integrationBranch
+            ? { kind: "named" as const, name: integrationBranch }
+            : { kind: "default" as const },
         },
       },
       prompt,
@@ -1375,6 +1403,70 @@ export function createCollabStore(
           return { content: [{ type: "text", text: JSON.stringify({ previous_status }) }] };
         },
       });
+
+      bb.agents.registerTool({
+        name: "release_slice",
+        description:
+          "Stop an agent and return its work item to the ready queue, freeing its scheduler slot. Use when a worker is redundant, stuck, or working from a stale base. Its committed work is untouched — only the assignment is given up.",
+        parameters: z.object({
+          target: z
+            .string()
+            .min(1)
+            .describe("Agent id or canonical task name whose slice should be released."),
+          reason: z.string().min(1).describe("Why, in one line. Recorded for the owner."),
+        }),
+        async execute({ target, reason }, { threadId }) {
+          const agent = resolve(threadId, target);
+          if (!agent) {
+            return { content: [{ type: "text", text: `Agent not found: ${target}` }], isError: true };
+          }
+          // Stop first: releasing a slice under a running turn lets the worker
+          // keep writing to a directory nobody is watching any more.
+          await bb.sdk.threads.stop({ threadId: agent.thread_id }).catch(() => undefined);
+          const itemId = agent.item_id ?? null;
+          removeRow.run({ thread_id: agent.thread_id, retired_at: Date.now() });
+          await bb.sdk.threads.archive({ threadId: agent.thread_id }).catch(() => undefined);
+          if (itemId) hooks?.releaseItem?.(rootId(threadId), itemId, reason);
+          hooks?.onChange?.(rootId(threadId));
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ released_item: itemId, agent: agent.thread_id, reason }),
+            }],
+          };
+        },
+      });
+
+      bb.agents.registerTool({
+        name: "retire_agent",
+        description:
+          "Retire a finished agent: free its scheduler slot and archive its thread so its worktree can be reclaimed. Refuses while the agent still holds an open work item — release_slice that first.",
+        parameters: z.object({
+          target: z.string().min(1).describe("Agent id or canonical task name to retire."),
+        }),
+        async execute({ target }, { threadId }) {
+          const agent = resolve(threadId, target);
+          if (!agent) {
+            return { content: [{ type: "text", text: `Agent not found: ${target}` }], isError: true };
+          }
+          const status = agent.item_id ? hooks?.itemStatus?.(rootId(threadId), agent.item_id) : null;
+          if (agent.item_id && status && status !== "completed") {
+            return {
+              content: [{
+                type: "text",
+                text: `${target} still holds ${agent.item_id} (${status}). Use release_slice to give the work up, or let it finish.`,
+              }],
+              isError: true,
+            };
+          }
+          await bb.sdk.threads.stop({ threadId: agent.thread_id }).catch(() => undefined);
+          removeRow.run({ thread_id: agent.thread_id, retired_at: Date.now() });
+          await bb.sdk.threads.archive({ threadId: agent.thread_id }).catch(() => undefined);
+          hooks?.onChange?.(rootId(threadId));
+          return { content: [{ type: "text", text: JSON.stringify({ retired: agent.thread_id }) }] };
+        },
+      });
+
     },
   };
 }
@@ -1386,4 +1478,6 @@ export const COLLAB_TOOL_NAMES = [
   "list_agents",
   "wait_agent",
   "interrupt_agent",
+  "release_slice",
+  "retire_agent",
 ] as const;

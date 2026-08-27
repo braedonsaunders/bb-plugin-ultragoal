@@ -464,6 +464,15 @@ export default function plugin(bb: BbPluginApi) {
         linkedDefects: linkedDefectBrief(rootThreadId, itemId),
       };
     },
+    releaseItem(rootThreadId, itemId, reason) {
+      // Same effect as `bb ultragoal release`, reachable by the orchestrator
+      // that can actually see a worker is redundant.
+      items.setStatus(rootThreadId, itemId, "pending");
+      markGoalEvent(rootThreadId);
+      bb.log.info(`Orchestrator released ${itemId} on ${rootThreadId}: ${reason}`);
+      void publishFresh(rootThreadId);
+      void scheduleReady(rootThreadId);
+    },
     workerPermissionMode: () => snapshotDefaults.workerPermissionMode,
     onRejectedChild(rootThreadId, childThreadId, itemId) {
       if (itemId) {
@@ -1394,6 +1403,15 @@ export default function plugin(bb: BbPluginApi) {
         firstSeenIdle.delete(workerThreadId);
         retired.add(workerThreadId);
         void releaseWorkerRuntime(workerThreadId);
+        // Archive it as well, so the rest of the system can tell it is done.
+        // Retirement was a fact known only to this plugin: 201 retired workers
+        // still counted as live threads, which made the worktree collector —
+        // correctly refusing to delete a live thread's directory — protect 135
+        // worktrees that nothing would ever use again. A retired worker is
+        // finished; saying so is what lets its disk be reclaimed.
+        void bb.sdk.threads
+          .archive({ threadId: workerThreadId })
+          .catch(() => undefined);
         bb.log.info(
           `Retired finished worker ${workerThreadId} on ${rootThreadId} (host ${hostStatus}): its slice is closed; released its scheduler slot`,
         );

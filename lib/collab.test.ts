@@ -5,7 +5,7 @@ import {
   makeThreadResponse,
   type FakePluginHost,
 } from "@get-bb/plugin-sdk/testing";
-import { createCollabStore } from "./collab.ts";
+import { COLLAB_TOOL_NAMES, createCollabStore } from "./collab.ts";
 
 const hosts: FakePluginHost[] = [];
 
@@ -321,5 +321,23 @@ describe("scheduler-strict collaboration spawns", () => {
 
     await collab.listForRoot("thr_root", { discover: true, refreshLimit: 8 });
     assert.deepEqual(state.stopped, ["thr_legacy_b"], "the tombstone prevents repeated adoption");
+  });
+});
+
+describe("fleet management tool surface", () => {
+  it("exposes the levers an orchestrator needs to act on what it can see", () => {
+    // It could describe a redundant worker on a stale base and had only
+    // interrupt_agent, which ends a turn while keeping the slot and the
+    // assignment — so the slice stayed in_progress and the queue stayed blocked.
+    for (const name of ["release_slice", "retire_agent"]) {
+      assert.ok(
+        (COLLAB_TOOL_NAMES as readonly string[]).includes(name),
+        `${name} must be registered for the orchestrator`,
+      );
+    }
+  });
+
+  it("keeps interrupt_agent, which is a different thing from giving work up", () => {
+    assert.ok((COLLAB_TOOL_NAMES as readonly string[]).includes("interrupt_agent"));
   });
 });
