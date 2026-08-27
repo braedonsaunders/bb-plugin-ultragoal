@@ -249,6 +249,23 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: z.object({ goal: goalSnapshotSchema.nullable() }),
   },
+  /**
+   * Hand the goal to a fresh orchestrator thread.
+   *
+   * A root accumulates its whole conversation and re-reads it on every request
+   * — one measured at 520,000 cached tokens per turn. Every durable thing the
+   * goal owns lives in the plugin's tables, so a new root loses nothing but the
+   * transcript, and gets its cost back to zero.
+   */
+  rotateRoot: {
+    input: z.object({ threadId: z.string().min(1) }),
+    output: z.object({
+      rotated: z.boolean(),
+      targetThreadId: z.string().nullable(),
+      /** Why it declined, when it did. */
+      reason: z.string().nullable(),
+    }),
+  },
   updateSettings: {
     input: z
       .object({

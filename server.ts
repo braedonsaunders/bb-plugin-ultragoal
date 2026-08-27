@@ -1154,6 +1154,88 @@ export default function plugin(bb: BbPluginApi) {
    * failure to reclaim disk must never turn a successful integration into a
    * failed one.
    */
+  /**
+   * One transfer implementation for both entry points.
+   *
+   * The CLI grew this first and rotateRoot needs the identical sequence. Two
+   * copies of a journalled, resumable state machine is how the two drift, and a
+   * half-applied transfer is the worst state this plugin can be left in.
+   */
+  async function runRootTransfer(
+    sourceThreadId: string,
+    targetThreadId: string,
+    dryRun: boolean,
+  ) {
+            const report = await executeRootTransfer({
+              bb,
+              store: rootTransfers,
+              sourceThreadId,
+              targetThreadId,
+              dryRun,
+              async targetIntakeRowId() {
+                const rows = await readTimeline(targetThreadId);
+                const last = rows.at(-1) as { id?: unknown } | undefined;
+                const id = String(last?.id ?? "").trim();
+                return id || null;
+              },
+              workerExecution() {
+                const sourceGoal = store.get(sourceThreadId);
+                if (!sourceGoal) throw new Error("source goal disappeared before worker pin snapshot");
+                const settings = view(sourceGoal).settings;
+                if (!settings.workerProvider || !settings.workerModel) {
+                  throw new Error("source worker execution is inherited; set explicit worker provider/model before transfer");
+                }
+                return {
+                  providerId: settings.workerProvider,
+                  model: settings.workerModel,
+                  reasoningLevel: settings.workerReasoning || null,
+                  serviceTier: settings.workerServiceTier,
+                };
+              },
+              async finalAccount() {
+                await account(sourceThreadId, { evenIfIdle: true, force: true, scan: true });
+              },
+              async wakeSeen(id, marker) {
+                const rows = await readTimeline(id);
+                return rows.some((row) => JSON.stringify(row).includes(marker));
+              },
+              async wakeTarget(id, marker) {
+                const goal = store.get(id);
+                if (!goal) throw new Error("transferred target goal is missing before wake");
+                const snap = await viewFresh(goal);
+                const sent = await sendSteering(
+                  id,
+                  [
+                    marker,
+                    "CONTROLLED ROOT TAKEOVER COMPLETE. You are now the UltraGoal orchestrator. Existing remediation state, work items, counters, and provider-pinned workers were transferred durably. Continue from this bounded handoff; do not replay the old startup prompt.",
+                    continuationPrompt(snap),
+                  ].join("\n\n"),
+                  "start",
+                );
+                if (!sent) throw new Error("target rejected the takeover handoff");
+              },
+              onDatabaseCommitted() {
+                agentCache.delete(sourceThreadId);
+                agentCache.delete(targetThreadId);
+                liveTaskCounts.delete(sourceThreadId);
+                liveTaskCounts.delete(targetThreadId);
+                rootActivity.delete(sourceThreadId);
+                rootReviveState.delete(sourceThreadId);
+                forgetNativeScan(sourceThreadId);
+                publish(sourceThreadId, null);
+              },
+            });
+    const targetGoal = store.get(targetThreadId);
+    if (!dryRun && targetGoal) {
+      await refreshRunning(targetThreadId);
+      publish(targetThreadId, await viewFresh(targetGoal));
+      reconcileFindingBacklog(targetThreadId);
+      void ensureCrew(targetThreadId);
+      void scheduleReady(targetThreadId);
+    }
+    return report;
+  }
+
   async function reclaimWorktree(
     rootThreadId: string,
     itemId: string,
@@ -2557,6 +2639,74 @@ export default function plugin(bb: BbPluginApi) {
       if (next) publish(threadId, next);
       return { goal: next };
     },
+    /**
+     * Move the goal onto a fresh orchestrator thread.
+     *
+     * A root re-reads its entire conversation on every request — one measured
+     * at 520,000 cached tokens per turn, which is most of what a long goal
+     * spends. Plan, findings, decisions, workers, the standing brief and the
+     * completion floors all live in this plugin's tables, so a new root starts
+     * at zero context and loses only the transcript.
+     */
+    async rotateRoot({ threadId }) {
+      const goal = store.get(threadId);
+      if (!goal) return { rotated: false, targetThreadId: null, reason: "no UltraGoal on this thread" };
+      const settings = view(goal).settings;
+      if (!settings.workerProvider || !settings.workerModel) {
+        // executeRootTransfer refuses to guess a worker pin, and inheriting one
+        // silently is how a fleet ended up on an unintended provider.
+        return {
+          rotated: false,
+          targetThreadId: null,
+          reason: "set an explicit worker provider and model before rotating",
+        };
+      }
+      let source;
+      try {
+        source = await bb.sdk.threads.get({ threadId });
+      } catch {
+        return { rotated: false, targetThreadId: null, reason: "could not read the current root" };
+      }
+      try {
+        const spawned = await bb.sdk.threads.spawn({
+          projectId: source.projectId,
+          providerId: source.providerId,
+          executionInputSources: { providerId: "explicit" as const },
+          permissionMode: snapshotDefaults.workerPermissionMode,
+          environment: source.environmentId
+            ? { type: "reuse" as const, environmentId: source.environmentId }
+            : { type: "project-default" as const },
+          title: `${source.title ?? "UltraGoal"} (rotated)`,
+          input: [{
+            type: "text" as const,
+            text: "[ultragoal] Stand by for a controlled root rotation. Do not start work, do not plan, do not spawn agents. Acknowledge in one short line and wait.",
+            mentions: [],
+          }],
+        });
+        const targetThreadId = (spawned as { threadId?: string; id?: string }).threadId
+          ?? (spawned as { id?: string }).id
+          ?? "";
+        if (!targetThreadId) {
+          return { rotated: false, targetThreadId: null, reason: "spawned thread returned no id" };
+        }
+        await bb.sdk.threads.wait({
+          threadId: targetThreadId,
+          status: "idle",
+          timeoutMs: 120_000,
+          pollIntervalMs: 500,
+        }).catch(() => undefined);
+        await runRootTransfer(threadId, targetThreadId, false);
+        bb.log.info(`Rotated the orchestrator for ${threadId} onto ${targetThreadId}`);
+        return { rotated: true, targetThreadId, reason: null };
+      } catch (error) {
+        return {
+          rotated: false,
+          targetThreadId: null,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+
     async updateSettings({
       threadId,
       verifyEnabled,
@@ -3782,73 +3932,7 @@ export default function plugin(bb: BbPluginApi) {
         }
         const [sourceThreadId, targetThreadId] = ids as [string, string];
         try {
-          const report = await executeRootTransfer({
-            bb,
-            store: rootTransfers,
-            sourceThreadId,
-            targetThreadId,
-            dryRun,
-            async targetIntakeRowId() {
-              const rows = await readTimeline(targetThreadId);
-              const last = rows.at(-1) as { id?: unknown } | undefined;
-              const id = String(last?.id ?? "").trim();
-              return id || null;
-            },
-            workerExecution() {
-              const sourceGoal = store.get(sourceThreadId);
-              if (!sourceGoal) throw new Error("source goal disappeared before worker pin snapshot");
-              const settings = view(sourceGoal).settings;
-              if (!settings.workerProvider || !settings.workerModel) {
-                throw new Error("source worker execution is inherited; set explicit worker provider/model before transfer");
-              }
-              return {
-                providerId: settings.workerProvider,
-                model: settings.workerModel,
-                reasoningLevel: settings.workerReasoning || null,
-                serviceTier: settings.workerServiceTier,
-              };
-            },
-            async finalAccount() {
-              await account(sourceThreadId, { evenIfIdle: true, force: true, scan: true });
-            },
-            async wakeSeen(id, marker) {
-              const rows = await readTimeline(id);
-              return rows.some((row) => JSON.stringify(row).includes(marker));
-            },
-            async wakeTarget(id, marker) {
-              const goal = store.get(id);
-              if (!goal) throw new Error("transferred target goal is missing before wake");
-              const snap = await viewFresh(goal);
-              const sent = await sendSteering(
-                id,
-                [
-                  marker,
-                  "CONTROLLED ROOT TAKEOVER COMPLETE. You are now the UltraGoal orchestrator. Existing remediation state, work items, counters, and provider-pinned workers were transferred durably. Continue from this bounded handoff; do not replay the old startup prompt.",
-                  continuationPrompt(snap),
-                ].join("\n\n"),
-                "start",
-              );
-              if (!sent) throw new Error("target rejected the takeover handoff");
-            },
-            onDatabaseCommitted() {
-              agentCache.delete(sourceThreadId);
-              agentCache.delete(targetThreadId);
-              liveTaskCounts.delete(sourceThreadId);
-              liveTaskCounts.delete(targetThreadId);
-              rootActivity.delete(sourceThreadId);
-              rootReviveState.delete(sourceThreadId);
-              forgetNativeScan(sourceThreadId);
-              publish(sourceThreadId, null);
-            },
-          });
-          const targetGoal = store.get(targetThreadId);
-          if (!dryRun && targetGoal) {
-            await refreshRunning(targetThreadId);
-            publish(targetThreadId, await viewFresh(targetGoal));
-            reconcileFindingBacklog(targetThreadId);
-            void ensureCrew(targetThreadId);
-            void scheduleReady(targetThreadId);
-          }
+          const report = await runRootTransfer(sourceThreadId, targetThreadId, dryRun);
           return {
             exitCode: 0,
             stdout: JSON.stringify(

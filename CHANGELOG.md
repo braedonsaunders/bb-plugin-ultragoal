@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.22.0
+
+- **Rotate orchestrator**, in the right-pane Settings. A root re-reads its whole
+  conversation on every request — one measured at 520,000 cached tokens per
+  turn, which is most of what a long goal spends, and the plugin's own injected
+  plan block is only about 3,700 of them. Everything durable the goal owns lives
+  in this plugin's tables, so handing the goal to a fresh thread costs the
+  transcript and nothing else, and takes the orchestrator's per-request cost
+  back to zero.
+- The CLI's `transfer-root` and the new rotation now run the SAME journalled
+  transfer, rather than a second copy of it. A resumable state machine with two
+  implementations drifts, and a half-applied transfer is the worst state this
+  plugin can be left in.
+
 ## 0.21.0
 
 - A slice minted by `--own-slice` now describes its own contract. The step was

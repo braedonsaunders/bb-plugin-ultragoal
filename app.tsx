@@ -1089,6 +1089,8 @@ function GoalSettingsPanel({
   const [budget, setBudget] = useState(goal.tokenBudget == null ? "" : String(goal.tokenBudget));
   const [progressMinutes, setProgressMinutes] = useState(String(goal.settings.progressUpdateMinutes));
   const [workers, setWorkers] = useState(String(goal.settings.maxWorkers));
+  const [rotating, setRotating] = useState(false);
+  const [rotateNote, setRotateNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const settings = goal.settings;
 
@@ -1292,6 +1294,46 @@ function GoalSettingsPanel({
               Scheduler keeps up to this many workers on ready work items. 0 turns it off. Default 5.
             </span>
           </label>
+          <div className="rounded-md border border-border px-2 py-2">
+            <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+              Orchestrator context
+            </span>
+            <button
+              type="button"
+              className="w-full rounded-md border border-border px-2 py-1.5 text-sm outline-none hover:bg-muted focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              disabled={saving || rotating}
+              onClick={() => {
+                void (async () => {
+                  setRotating(true);
+                  setRotateNote(null);
+                  try {
+                    const result = await rpc.call("rotateRoot", { threadId });
+                    setRotateNote(
+                      result.rotated
+                        ? `Handed over to ${result.targetThreadId}. This thread is now retired.`
+                        : result.reason ?? "Rotation declined.",
+                    );
+                  } catch (error) {
+                    setRotateNote(error instanceof Error ? error.message : String(error));
+                  } finally {
+                    setRotating(false);
+                  }
+                })();
+              }}
+            >
+              {rotating ? "Rotating…" : "Rotate orchestrator"}
+            </button>
+            <span className="mt-1 block text-[11px] text-muted-foreground">
+              A root re-reads its whole conversation every request — one measured at 520,000
+              cached tokens per turn, which is most of what a long goal spends. The plan,
+              findings, workers, standing brief and completion floors all live in the
+              plugin&rsquo;s own tables, so a fresh root starts at zero context and loses only
+              the transcript.
+            </span>
+            {rotateNote ? (
+              <span className="mt-1 block text-[11px] text-foreground">{rotateNote}</span>
+            ) : null}
+          </div>
           <label className="flex items-center justify-between gap-3 text-[13px] text-foreground">
             <span>Auto-continue</span>
             <input
