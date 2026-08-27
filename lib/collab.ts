@@ -1,4 +1,5 @@
 import type { AgentPermissionMode } from "./goal-settings.js";
+import { immediateSendMode } from "./scheduler.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { isPromptLikeTitle, shortSliceTitle } from "./titles.js";
 import { z } from "zod";
@@ -894,6 +895,20 @@ export function createCollabStore(
     }
   }
 
+  async function deliverImmediately(threadId: string, text: string): Promise<void> {
+    const thread = await bb.sdk.threads.get({ threadId });
+    const mode = immediateSendMode(thread);
+    if (!mode) {
+      throw new Error(`Thread ${threadId} cannot accept an immediate message (${thread.status ?? "unavailable"})`);
+    }
+    await bb.sdk.threads.send({
+      threadId,
+      mode,
+      permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
+      input: [{ type: "text", text, mentions: [] }],
+    });
+  }
+
   return {
     rootId,
     rowOf,
@@ -1225,13 +1240,13 @@ export function createCollabStore(
       bb.agents.registerTool({
         name: "send_message",
         description:
-          "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+          "Deliver a message to an existing agent immediately: steer it into the live turn, or start a new turn if the agent is idle. Never uses the composer queue.",
         parameters: z.object({
           target: z
             .string()
             .min(1)
             .describe("Relative or canonical task name to message (from spawn_agent)."),
-          message: z.string().min(1).describe("Message text to queue on the target agent."),
+          message: z.string().min(1).describe("Message text to deliver immediately to the target agent."),
         }),
         async execute({ target, message }, { threadId }) {
           const trimmed = message.trim();
@@ -1242,11 +1257,18 @@ export function createCollabStore(
           if (!agent) {
             return { content: [{ type: "text", text: `Agent not found: ${target}` }], isError: true };
           }
-          await bb.sdk.threads.queuedMessages.create({
-            threadId: agent.thread_id,
-            permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
-            input: [{ type: "text", text: trimmed, mentions: [] }],
-          });
+          try {
+            await deliverImmediately(agent.thread_id, trimmed);
+          } catch (error) {
+            return {
+              content: [{
+                type: "text",
+                text: error instanceof Error ? error.message : String(error),
+              }],
+              isError: true,
+            };
+          }
+          hooks?.onChange?.(rootId(threadId));
           return "";
         },
       });
@@ -1254,7 +1276,7 @@ export function createCollabStore(
       bb.agents.registerTool({
         name: "followup_task",
         description:
-          "Steer an existing agent about the ONE slice it was spawned for (clarify, unblock, course-correct). One agent = one slice: a worker whose slice is finished is retired and cannot take new work — spawn a fresh agent with spawn_agent instead.",
+          "Steer an existing agent immediately about the ONE slice it was spawned for (clarify, unblock, course-correct). Delivers into the live turn, or starts a new turn if idle — never the composer queue. One agent = one slice: a worker whose slice is finished is retired and cannot take new work — spawn a fresh agent with spawn_agent instead.",
         parameters: z.object({
           target: z
             .string()
@@ -1294,12 +1316,17 @@ export function createCollabStore(
               };
             }
           }
-          await bb.sdk.threads.send({
-            threadId: agent.thread_id,
-            mode: "auto",
-            permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
-            input: [{ type: "text", text: trimmed, mentions: [] }],
-          });
+          try {
+            await deliverImmediately(agent.thread_id, trimmed);
+          } catch (error) {
+            return {
+              content: [{
+                type: "text",
+                text: error instanceof Error ? error.message : String(error),
+              }],
+              isError: true,
+            };
+          }
           hooks?.onChange?.(rootThreadId);
           return "";
         },
@@ -1333,7 +1360,7 @@ export function createCollabStore(
       bb.agents.registerTool({
         name: "wait_agent",
         description:
-          "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+          "Wait for a mailbox update from any live agent, including immediately delivered follow-ups and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
         parameters: z.object({
           timeout_ms: z
             .number()

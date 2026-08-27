@@ -55,6 +55,7 @@ import {
 } from "./lib/deliverables.js";
 import { remediationItemRetirement } from "./lib/remediation-retirement.js";
 import { createStaffingHoldStore } from "./lib/staffing-hold.js";
+import { createIntegrationRecordStore } from "./lib/integration-record.js";
 import { hostContract } from "./host-contract.js";
 import { projectPane } from "./lib/projection.js";
 import {
@@ -74,6 +75,7 @@ import {
   type ReleaseTarget,
   threadAcceptsStart,
   threadAcceptsSteer,
+  immediateSendMode,
   threadIsSettledForSubmit,
   verifierStillDeciding,
 } from "./lib/scheduler.js";
@@ -368,6 +370,7 @@ export default function plugin(bb: BbPluginApi) {
   const workerBriefs = createWorkerBriefStore(bb.storage.database());
   const itemRequirements = createItemRequirementStore(bb.storage.database());
   const staffingHolds = createStaffingHoldStore(bb.storage.database());
+  const integrations = createIntegrationRecordStore(bb.storage.database());
 
   const collab = createCollabStore(bb, {
     onChange: (rootThreadId) => {
@@ -1053,7 +1056,7 @@ export default function plugin(bb: BbPluginApi) {
     await sendSteering(
       rootThreadId,
       `OWNER DECISION ANSWERED (${decisionId}): "${resolved.question}" -> ${answer}. Act on this now and resolve any dependent work.`,
-      (await threadIsRunning(bb, rootThreadId)) ? "auto" : "start",
+      (await threadIsRunning(bb, rootThreadId)) ? "steer" : "start",
     );
     return true;
   }
@@ -1309,6 +1312,20 @@ export default function plugin(bb: BbPluginApi) {
         mergeBaseBranch: base,
       });
       markGoalEvent(rootThreadId);
+      // Record WHERE it landed. Nothing did, so 256 of 417 register entries had
+      // no commit attribution at all and "fixed" could not be checked against
+      // the tree by anyone, including the reviewers whose job that is.
+      integrations.record(
+        rootThreadId,
+        {
+          itemId,
+          commit: null,
+          branch: environment.branchName ?? null,
+          status: "integrated",
+          detail: `squash-merged into ${base}`,
+        },
+        Date.now(),
+      );
       bb.log.info(
         `Integrated slice ${itemId}: squash-merged ${environment.branchName ?? worker.environmentId} into ${base} on ${rootThreadId}`,
       );
@@ -1322,6 +1339,14 @@ export default function plugin(bb: BbPluginApi) {
         bb.log.info(`Integration skipped for slice ${itemId} on ${rootThreadId}: ${message}`);
         return;
       }
+      // A finding is closed on the worker's report BEFORE this runs, so a failed
+      // merge previously left the register asserting a fix that is provably not
+      // in the tree, with nothing recording the contradiction. Write it down.
+      integrations.record(
+        rootThreadId,
+        { itemId, commit: null, branch: null, status: "failed", detail: message },
+        Date.now(),
+      );
       bb.log.warn(`Integration failed for slice ${itemId} (${workerThreadId}) on ${rootThreadId}: ${message}`);
       // One escalation per goal per cooldown window: twelve identical
       // dirty-checkout steers in ninety minutes is noise, not urgency.
@@ -1331,7 +1356,7 @@ export default function plugin(bb: BbPluginApi) {
       await sendSteering(
         rootThreadId,
         `INTEGRATION CONFLICT: completed slice ${itemId} (worker ${workerThreadId}) could not be squash-merged into the default branch automatically: ${message}. Merge that worker's branch manually (rebase-train: merge, run gates, push) before anything else — a completed slice that is not on the default branch does not exist.`,
-        "auto",
+        "steer",
       );
     }
   }
@@ -1465,8 +1490,11 @@ export default function plugin(bb: BbPluginApi) {
         // Cooldown reads the durable row, not an in-memory map that resets on
         // every plugin reload.
         if (now - (row?.last_nudge_at ?? 0) < STALL_NUDGE_COOLDOWN_MS) continue;
+        // Declared out here: the send below needs this thread's status to pick
+        // its mode, and a const inside the try block is not in scope there.
+        let workerThread: Awaited<ReturnType<typeof bb.sdk.threads.get>> | null = null;
         try {
-          const workerThread = await bb.sdk.threads.get({ threadId: agent.threadId });
+          workerThread = await bb.sdk.threads.get({ threadId: agent.threadId });
           if (!threadAcceptsSteer(workerThread)) continue;
         } catch {
           continue;
@@ -1478,7 +1506,7 @@ export default function plugin(bb: BbPluginApi) {
             : "";
           await bb.sdk.threads.send({
             threadId: agent.threadId,
-            mode: "auto",
+            mode: (workerThread ? immediateSendMode(workerThread) : null) ?? "steer",
             permissionMode: snapshotDefaults.workerPermissionMode,
             input: [
               {
@@ -1776,7 +1804,7 @@ export default function plugin(bb: BbPluginApi) {
             ),
             `Then end with ULTRAGOAL_DONE. Prose naming the defect does not count; if you use the slice_done tool instead, pass the same ids as structured finding_evidence.`,
           ].join("\n"),
-          "auto",
+          "steer",
         );
       }
       return false;
@@ -1807,7 +1835,7 @@ export default function plugin(bb: BbPluginApi) {
               ),
               `The proof must be nonempty and specific — name the assertion or the command output. Prose elsewhere in the report does not count, which is the whole reason this gate exists.`,
             ].join("\n"),
-            "auto",
+            "steer",
           );
         }
         return false;
@@ -2298,7 +2326,7 @@ export default function plugin(bb: BbPluginApi) {
   async function submitGoalTurn(
     threadId: string,
     text: string,
-    mode: "start" | "auto",
+    mode: "start" | "steer",
   ): Promise<void> {
     await bb.sdk.threads.send({
       threadId,
@@ -2311,7 +2339,7 @@ export default function plugin(bb: BbPluginApi) {
   async function sendSteering(
     threadId: string,
     text: string,
-    mode: "start" | "auto",
+    mode: "start" | "steer",
   ): Promise<boolean> {
     if (inflight.has(threadId)) return false;
     if (mode === "start" && (starting.get(threadId) ?? 0) > Date.now()) {
@@ -2384,7 +2412,7 @@ export default function plugin(bb: BbPluginApi) {
     const sent = await sendSteering(
       threadId,
       progressPrompt(snap),
-      runningNow ? "auto" : "start",
+      runningNow ? "steer" : "start",
     );
     if (!sent) return false;
     store.update(threadId, {
@@ -2589,7 +2617,7 @@ export default function plugin(bb: BbPluginApi) {
         await sendSteering(
           threadId,
           objectiveUpdatedPrompt(view(result)),
-          "auto",
+          "steer",
         );
       } else if (
         threadAcceptsStart(thread) &&
@@ -3779,7 +3807,7 @@ export default function plugin(bb: BbPluginApi) {
           try {
             await bb.sdk.threads.send({
               threadId: thread.id,
-              mode: "auto",
+              mode: immediateSendMode(thread) ?? "start",
               permissionMode: snapshotDefaults.workerPermissionMode,
               input: [{
                 type: "text",
@@ -3840,7 +3868,7 @@ export default function plugin(bb: BbPluginApi) {
             try {
               await bb.sdk.threads.send({
                 threadId: child.source_thread_id,
-                mode: "auto",
+                mode: "start",
                 permissionMode: snapshotDefaults.workerPermissionMode,
                 input: [
                   {

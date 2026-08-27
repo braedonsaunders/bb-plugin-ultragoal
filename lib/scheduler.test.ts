@@ -20,6 +20,7 @@ import {
   itemContextDeclaresFinding,
   threadAcceptsStart,
   threadAcceptsSteer,
+  immediateSendMode,
   threadIsSettledForSubmit,
   verifierStillDeciding,
 } from "./scheduler.ts";
@@ -715,6 +716,16 @@ describe("liveVerifierCount / threadAcceptsSteer / orphanInProgressIds", () => {
     assert.equal(threadAcceptsStart({ status: "stopping" }), false);
     assert.equal(threadAcceptsStart({ status: "idle", archivedAt: 1 }), false);
     assert.equal(threadAcceptsStart({ status: "error", deletedAt: 1 }), false);
+  });
+
+  it("picks start for idle threads and steer for live ones, never a queue path", () => {
+    assert.equal(immediateSendMode({ status: "idle" }), "start");
+    assert.equal(immediateSendMode({ status: "error" }), "start");
+    assert.equal(immediateSendMode({ status: "stopped" }), "start");
+    assert.equal(immediateSendMode({ status: "active" }), "steer");
+    assert.equal(immediateSendMode({ status: "starting" }), "steer");
+    assert.equal(immediateSendMode({ status: "stopping" }), null);
+    assert.equal(immediateSendMode({ status: "idle", archivedAt: 1 }), null);
   });
 
   it("treats only non-running statuses as settled for submit", () => {

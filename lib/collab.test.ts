@@ -19,6 +19,8 @@ function collabHost(options?: {
 }) {
   const stopped: string[] = [];
   const prompts: string[] = [];
+  const queued: unknown[] = [];
+  const sent: Array<{ threadId?: string; mode?: string }> = [];
   let spawnCalls = 0;
   const host = createFakePluginHost({
     pluginId: `collab-strict-${hosts.length}`,
@@ -50,6 +52,16 @@ function collabHost(options?: {
             environmentId: null,
             status: "active",
           });
+        },
+        send: (args) => {
+          sent.push({ threadId: args.threadId, mode: args.mode });
+          return { ok: true };
+        },
+        queuedMessages: {
+          create: (args: unknown) => {
+            queued.push(args);
+            return { id: "qmsg_test" };
+          },
         },
         stop: ({ threadId }) => {
           stopped.push(threadId);
@@ -117,7 +129,7 @@ function collabHost(options?: {
         SELECT RAISE(ABORT, 'root worker capacity is full');
       END;
   `);
-  return { host, stopped, prompts, spawnCalls: () => spawnCalls };
+  return { host, stopped, prompts, queued, sent, spawnCalls: () => spawnCalls };
 }
 
 describe("scheduler-strict collaboration spawns", () => {
@@ -339,5 +351,63 @@ describe("fleet management tool surface", () => {
 
   it("keeps interrupt_agent, which is a different thing from giving work up", () => {
     assert.ok((COLLAB_TOOL_NAMES as readonly string[]).includes("interrupt_agent"));
+  });
+});
+
+describe("immediate agent messaging", () => {
+  function seedWorker(state: ReturnType<typeof collabHost>, itemId = "itm_live") {
+    state.host.bb.storage.database().prepare(`
+      INSERT INTO collab_agents (
+        thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+        display_name, item_id, role
+      ) VALUES ('thr_worker', 'thr_root', 'thr_root', '/root/worker', 1,
+        'Live worker', ?, 'worker')
+    `).run(itemId);
+  }
+
+  it("send_message steers a live worker and never touches the composer queue", async () => {
+    const state = collabHost();
+    seedWorker(state);
+    const collab = createCollabStore(state.host.bb, {
+      itemStatus: () => "in_progress",
+    });
+    collab.registerTools();
+
+    const result = await state.host.harness.behavior.callAgentTool(
+      "send_message",
+      { target: "worker", message: "Stop gold-plating and finish the slice." },
+      { threadId: "thr_root", projectId: "proj" },
+    );
+    assert.equal(
+      typeof result === "object" && result !== null && "isError" in result
+        ? (result as { isError?: boolean }).isError
+        : false,
+      false,
+    );
+    assert.equal(state.queued.length, 0);
+    assert.deepEqual(state.sent, [{ threadId: "thr_worker", mode: "steer" }]);
+  });
+
+  it("followup_task uses the same immediate send path", async () => {
+    const state = collabHost();
+    seedWorker(state);
+    const collab = createCollabStore(state.host.bb, {
+      itemStatus: () => "in_progress",
+    });
+    collab.registerTools();
+
+    const result = await state.host.harness.behavior.callAgentTool(
+      "followup_task",
+      { target: "worker", message: "Use the existing helper instead of a new one." },
+      { threadId: "thr_root", projectId: "proj" },
+    );
+    assert.equal(
+      typeof result === "object" && result !== null && "isError" in result
+        ? (result as { isError?: boolean }).isError
+        : false,
+      false,
+    );
+    assert.equal(state.queued.length, 0);
+    assert.deepEqual(state.sent, [{ threadId: "thr_worker", mode: "steer" }]);
   });
 });

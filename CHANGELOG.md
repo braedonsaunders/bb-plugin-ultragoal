@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.25.0
+
+- Record where a slice actually landed. Nothing did: of 417 register entries a
+  reachability audit could attribute only 76 to a commit on main, 75 named a fix
+  that is not an ancestor of main, and 256 had no commit attribution at all.
+  "Fixed" meant "a worker said so", which is a claim rather than a fact.
+  Worse, the claim is written BEFORE the merge is attempted — completion closes
+  the finding and integration is queued afterwards — so a failed squash-merge
+  left the register asserting a fix provably absent from the tree, and nothing
+  recorded the contradiction. Three council reviewers found this independently;
+  one noted that a launch decision made from the register alone would have
+  shipped a statutory segregation-of-duties bypass believing it closed.
+  Integration outcome is now written down either way, so a failed merge is
+  visible and the reachability gate has something to check.
+
+## 0.24.1
+
+- **Agent-to-agent messages deliver immediately.** `send_message` used the
+  human composer queue, so a follow-up sat until the target went idle and
+  looked like a person typed it. Both `send_message` and `followup_task` now
+  use `threads.send`: steer a live turn, start a new one if idle. Plugin
+  nudges, verifier retries, and root steers use the same path — never
+  `queuedMessages.create` or `mode: "auto"`.
+
 ## 0.24.0
 
 - **Workers branch from where integration lands, not from the repository

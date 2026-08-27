@@ -386,6 +386,19 @@ export function threadAcceptsStart(thread: {
   return status !== "active" && status !== "starting" && status !== "stopping";
 }
 
+/** Immediate agent-to-agent delivery: start a turn when idle, steer when
+ * live. Never `auto` or the composer queue — those sit until the target is
+ * free and look like a human follow-up. */
+export function immediateSendMode(thread: {
+  status?: string | null;
+  archivedAt?: number | null;
+  deletedAt?: number | null;
+}): "start" | "steer" | null {
+  if (threadAcceptsStart(thread)) return "start";
+  if (threadAcceptsSteer(thread)) return "steer";
+  return null;
+}
+
 export function threadIsSettledForSubmit(status: string | null | undefined): boolean {
   const value = status ?? "";
   return value !== "active" && value !== "starting" && value !== "stopping";
