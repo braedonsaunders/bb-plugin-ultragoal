@@ -55,6 +55,7 @@ import {
 } from "./lib/deliverables.js";
 import { remediationItemRetirement } from "./lib/remediation-retirement.js";
 import { createStaffingHoldStore } from "./lib/staffing-hold.js";
+import { parseAttribution, type CommitLookup, type CommitResolver } from "./lib/attribution.js";
 import { createIntegrationRecordStore } from "./lib/integration-record.js";
 import { hostContract } from "./host-contract.js";
 import { projectPane } from "./lib/projection.js";
@@ -1812,6 +1813,50 @@ export default function plugin(bb: BbPluginApi) {
       findingEvidence,
       linkedOpenFindings(rootThreadId, itemId),
     );
+  }
+
+  /**
+   * Verify commits cited in a resolution note, against a repository the caller
+   * NAMES. Evidence legitimately points at other repositories — the fix for a
+   * plugin defect lives in the plugin, not in the product — so validating
+   * against the goal's own checkout would reject correct citations. A token
+   * nobody could check is reported as unchecked, never as present.
+   */
+  async function attributionResolver(
+    threadId: string,
+    repository: string | null | undefined,
+  ): Promise<{ resolve: CommitResolver; searched: string | null }> {
+    let checkoutPath: string | null = repository?.trim() || null;
+    let envHostId: string | null = null;
+    try {
+      const thread = await bb.sdk.threads.get({ threadId });
+      const env = thread.environmentId
+        ? await bb.sdk.environments.get({ environmentId: thread.environmentId })
+        : null;
+      envHostId = (env as { hostId?: string | null } | null)?.hostId ?? null;
+      if (!checkoutPath) checkoutPath = (env as { path?: string | null } | null)?.path ?? null;
+    } catch {
+      // fall through: an unknown environment means an unchecked citation
+    }
+    if (!checkoutPath || !envHostId) {
+      return { resolve: () => "unknown", searched: checkoutPath };
+    }
+    const looked = new Map<string, CommitLookup>();
+    return {
+      searched: checkoutPath,
+      resolve: (token) => looked.get(token) ?? "unknown",
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      ...({
+        prime: async (tokens: readonly string[]) => {
+          for (const token of tokens) {
+            const verdict = await hostClient
+              .call("commitExists", { checkoutPath: checkoutPath!, token }, { hostId: envHostId! })
+              .catch(() => null);
+            looked.set(token, verdict ? (verdict.exists ? "present" : "absent") : "unknown");
+          }
+        },
+      } as { prime: (tokens: readonly string[]) => Promise<void> }),
+    } as { resolve: CommitResolver; searched: string | null; prime: (t: readonly string[]) => Promise<void> };
   }
 
   function completeItemFor(
@@ -3608,14 +3653,57 @@ export default function plugin(bb: BbPluginApi) {
         .string()
         .min(1)
         .describe("Proof: commit SHA / passing check output, or why it is not a real defect."),
+      repository: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path of the repository your cited commits live in. Evidence often points at another repo — a plugin fix lives in the plugin, not the product — and a commit checked against the wrong checkout is reported as unresolvable. Omit only when the commits are in this goal's own checkout.",
+        ),
     }),
-    async execute({ finding, resolution, evidence }, { threadId }) {
+    async execute({ finding, resolution, evidence, repository }, { threadId }) {
       const rootThreadId = collab.rootId(threadId);
+      // The tool is the path agents actually use. Validating only in the CLI
+      // left this one unguarded, which is how a nonexistent commit was accepted
+      // as a fix and recorded without objection.
+      const attribution = await attributionResolver(rootThreadId, repository);
+      const cited = parseAttribution(evidence).commits;
+      await (attribution as { prime?: (t: readonly string[]) => Promise<void> }).prime?.(cited);
+      const absent = cited.filter((token) => attribution.resolve(token) === "absent");
+      // Unknown fails closed too. "I looked and it is not there" and "I could
+      // not look" are different reasons, but neither is evidence, and letting
+      // the second one through is how an unverified citation becomes a fixed
+      // finding — the exact defect this guard exists for.
+      const unchecked = cited.filter((token) => attribution.resolve(token) === "unknown");
+      if (absent.length === 0 && unchecked.length > 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `Refusing to resolve ${finding}: the evidence cites ${unchecked.join(", ")} but no repository was reachable to check ${unchecked.length === 1 ? "it" : "them"}${attribution.searched ? ` (${attribution.searched} was not searchable)` : ""}. The finding is unchanged. Pass "repository" with the absolute path of the checkout holding those commits, or resolve with prose evidence that cites no SHA.`,
+          }],
+          isError: true,
+        };
+      }
+      if (absent.length > 0) {
+        // Fail closed, and change nothing. A citation that names a commit the
+        // repository does not contain is not evidence, and recording the
+        // closure with a warning attached still leaves a fixed finding behind
+        // for anyone reading the count. The caller is the only one who knows
+        // the real SHA, so send them back to find it.
+        return {
+          content: [{
+            type: "text",
+            text: `Refusing to resolve ${finding}: the evidence cites ${absent.join(", ")}, which ${absent.length === 1 ? "does" : "do"} not exist in ${attribution.searched ?? "the repository searched"}. The finding is unchanged. Re-read the SHA from git rather than from memory, and if the fix lives in another repository pass its path as "repository".`,
+          }],
+          isError: true,
+        };
+      }
       const resolved = findings.resolve(
         rootThreadId,
         finding,
         resolution === "fixed" ? "fixed" : "dismissed",
         evidence,
+        attribution.resolve,
+        attribution.searched,
       );
       if (!resolved) {
         return {
@@ -4548,10 +4636,14 @@ export default function plugin(bb: BbPluginApi) {
         const findingId = tokens[0] ?? "";
         let as = "";
         let evidence = "";
+        // Evidence may legitimately cite another repository — a plugin fix
+        // lives in the plugin — so the caller names where to look.
+        let repository = "";
         for (let i = 1; i < tokens.length; i += 1) {
           const token = tokens[i];
           if (token === "--as") { as = (tokens[++i] ?? "").trim(); continue; }
           if (token === "--evidence") { evidence = (tokens[++i] ?? "").trim(); continue; }
+          if (token === "--repository") { repository = (tokens[++i] ?? "").trim(); continue; }
           return { exitCode: 1, stderr: `Unknown option: ${token}` };
         }
         const resolution = as === "fixed" ? "fixed" : as === "not-a-defect" || as === "not_a_defect" ? "dismissed" : null;
@@ -4561,7 +4653,31 @@ export default function plugin(bb: BbPluginApi) {
             stderr: 'Usage: bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence "<proof>"',
           };
         }
-        const resolved = findings.resolve(threadId, findingId, resolution, evidence);
+        const attribution = await attributionResolver(threadId, repository);
+        const citedCommits = parseAttribution(evidence).commits;
+        await (attribution as { prime?: (t: readonly string[]) => Promise<void> }).prime?.(citedCommits);
+        const absentCommits = citedCommits.filter((token) => attribution.resolve(token) === "absent");
+        const uncheckedCommits = citedCommits.filter((token) => attribution.resolve(token) === "unknown");
+        if (absentCommits.length === 0 && uncheckedCommits.length > 0) {
+          return {
+            exitCode: 1,
+            stderr: `Refusing to resolve ${findingId}: the evidence cites ${uncheckedCommits.join(", ")} but no repository was reachable to check. The finding is unchanged. Pass --repository, or use prose evidence citing no SHA.`,
+          };
+        }
+        if (absentCommits.length > 0) {
+          return {
+            exitCode: 1,
+            stderr: `Refusing to resolve ${findingId}: the evidence cites ${absentCommits.join(", ")}, not present in ${attribution.searched ?? "the repository searched"}. The finding is unchanged. Pass --repository if the fix lives elsewhere.`,
+          };
+        }
+        const resolved = findings.resolve(
+          threadId,
+          findingId,
+          resolution,
+          evidence,
+          attribution.resolve,
+          attribution.searched,
+        );
         if (!resolved) return { exitCode: 1, stderr: `Finding not found: ${findingId}` };
         const retired = retireOrphanedRemediationItem(threadId, resolved.itemId);
         reconcileFindingBacklog(threadId);
@@ -4657,7 +4773,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "brief", summary: "Set the standing rules every worker on this goal inherits", usage: "bb ultragoal brief [<rules> | --clear] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
       { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] [--unhold] | bb ultragoal item --new --step \"<text>\" [--files a,b] [--check \"<cmd>\"] [--thread <id>]" },
-      { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--thread <id>]" },
+      { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--repository <path>] [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
       { name: "clear", summary: "Clear the UltraGoal", usage: "bb ultragoal clear [--thread <id>]" },

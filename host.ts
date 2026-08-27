@@ -122,6 +122,17 @@ export default experimental_defineHostEntry({
       return { removed: true, freedBytes, reason: null };
     },
 
+    async commitExists({ checkoutPath, token }) {
+      try {
+        // ^{commit} refuses a tag or tree that merely shares the prefix, so a
+        // citation only passes if it names an actual commit.
+        await git(checkoutPath, "rev-parse", "--verify", "--quiet", `${token}^{commit}`);
+        return { exists: true };
+      } catch {
+        return { exists: false };
+      }
+    },
+
     async branchAddsWork({ checkoutPath, branch, base }) {
       try {
         // Three dots: diff from where the branch and base parted company, so a

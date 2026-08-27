@@ -908,3 +908,132 @@ describe("large-plan agent tool contracts", () => {
     );
   });
 });
+
+describe("resolve_finding end to end", () => {
+  const PLUGIN_REPO = "/Users/braedonsaunders/Documents/bb-plugin-ultragoal";
+
+  function e2eHost() {
+    // Stub the world the tool actually consults: a thread with an environment,
+    // an environment with a host and a path, and a host RPC that knows exactly
+    // one commit. d29990c is the commit that carried the fix; 2e4f7dd is the
+    // token typed from memory that never existed.
+    const host = createFakePluginHost({
+      pluginId: `ultragoal-e2e-${hosts.length}`,
+      agentSkillIds: ["ultragoal"],
+      sdk: {
+        threads: { get: async () => makeThreadResponse({ id: "thr_root", environmentId: "env_1" }) },
+        environments: { get: async () => ({ id: "env_1", hostId: "host_1", path: PLUGIN_REPO }) },
+      },
+      // Top level, not inside sdk: this is the host entry the plugin asks.
+      experimental_callHostRpc: (call: { input?: unknown }) => ({
+        exists: (call.input as { token?: string } | undefined)?.token === "d29990c",
+      }),
+    } as never);
+    hosts.push(host);
+    host.bb.storage.database().exec(`
+      CREATE TABLE goals (
+        thread_id TEXT PRIMARY KEY, objective TEXT NOT NULL, status TEXT NOT NULL, reason TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, started_at INTEGER NOT NULL,
+        turn_count INTEGER NOT NULL, max_turns INTEGER NOT NULL, max_minutes INTEGER NOT NULL,
+        last_continue_at INTEGER, last_assistant_hash TEXT
+      );
+      INSERT INTO goals VALUES ('thr_sentinel', 'test', 'complete', NULL, 1, 1, 1, 0, 0, 0, NULL, NULL);
+    `);
+    plugin(host.bb);
+    const findings = createFindingStore(host.bb);
+    return { host, findings };
+  }
+
+  it("refuses a nonexistent commit and leaves the finding untouched", async () => {
+    const { host, findings } = e2eHost();
+    const rec = findings.report("thr_root", { title: "t", file: "a.ts:1", evidence: "e" });
+
+    const result = await host.harness.behavior.callAgentTool(
+      "resolve_finding",
+      {
+        finding: rec.finding.id,
+        resolution: "fixed",
+        evidence: "resolved against 2e4f7dd",
+        repository: PLUGIN_REPO,
+      },
+      { threadId: "thr_root" },
+    );
+
+    const refused = result as { isError?: boolean; content?: unknown };
+    assert.equal(refused.isError, true, "an unresolvable citation must fail closed");
+    assert.match(JSON.stringify(refused.content), /2e4f7dd/);
+    assert.equal(
+      findings.get("thr_root", rec.finding.id)!.status,
+      "open",
+      "the finding must not change: a refused closure that still closes is no refusal",
+    );
+  });
+
+  it("closes on a commit the named repository really contains", async () => {
+    const { host, findings } = e2eHost();
+    const rec = findings.report("thr_root", { title: "t", file: "b.ts:1", evidence: "e" });
+
+    const result = await host.harness.behavior.callAgentTool(
+      "resolve_finding",
+      {
+        finding: rec.finding.id,
+        resolution: "fixed",
+        evidence: "fixed in d29990c, tagged v0.26.0",
+        repository: PLUGIN_REPO,
+      },
+      { threadId: "thr_root" },
+    );
+
+    assert.notEqual((result as { isError?: boolean }).isError, true, JSON.stringify(result));
+    assert.equal(findings.get("thr_root", rec.finding.id)!.status, "fixed");
+  });
+
+  it("still closes when no commit is cited at all", async () => {
+    // Plenty of legitimate resolutions are prose — "not a defect because…".
+    // The guard must bite on bad citations, not on their absence.
+    const { host, findings } = e2eHost();
+    const rec = findings.report("thr_root", { title: "t", file: "c.ts:1", evidence: "e" });
+    const result = await host.harness.behavior.callAgentTool(
+      "resolve_finding",
+      { finding: rec.finding.id, resolution: "not_a_defect", evidence: "the guard already covers this path" },
+      { threadId: "thr_root" },
+    );
+    assert.notEqual((result as { isError?: boolean }).isError, true, JSON.stringify(result));
+    assert.equal(findings.get("thr_root", rec.finding.id)!.status, "dismissed");
+  });
+
+  it("refuses when no repository was reachable to check the citation", async () => {
+    // Not the same reason as "absent", but the same conclusion: an unchecked
+    // SHA is not evidence, and letting it through is how an unverified
+    // citation becomes a fixed finding.
+    const host = createFakePluginHost({
+      pluginId: `ultragoal-e2e-unreachable-${hosts.length}`,
+      agentSkillIds: ["ultragoal"],
+      sdk: {
+        threads: { get: async () => makeThreadResponse({ id: "thr_root", environmentId: null }) },
+      },
+    } as never);
+    hosts.push(host);
+    host.bb.storage.database().exec(`
+      CREATE TABLE goals (
+        thread_id TEXT PRIMARY KEY, objective TEXT NOT NULL, status TEXT NOT NULL, reason TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, started_at INTEGER NOT NULL,
+        turn_count INTEGER NOT NULL, max_turns INTEGER NOT NULL, max_minutes INTEGER NOT NULL,
+        last_continue_at INTEGER, last_assistant_hash TEXT
+      );
+      INSERT INTO goals VALUES ('thr_sentinel', 'test', 'complete', NULL, 1, 1, 1, 0, 0, 0, NULL, NULL);
+    `);
+    plugin(host.bb);
+    const findings = createFindingStore(host.bb);
+    const rec = findings.report("thr_root", { title: "t", file: "d.ts:1", evidence: "e" });
+
+    const result = await host.harness.behavior.callAgentTool(
+      "resolve_finding",
+      { finding: rec.finding.id, resolution: "fixed", evidence: "fixed in d29990c" },
+      { threadId: "thr_root" },
+    );
+
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.equal(findings.get("thr_root", rec.finding.id)!.status, "open");
+  });
+});

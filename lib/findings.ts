@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { verifyAttribution, type CommitResolver } from "./attribution.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GoalFinding, GoalFindingStatus } from "../contract.js";
 
@@ -258,14 +259,28 @@ export function createFindingStore(bb: BbPluginApi) {
       ref: string,
       status: Exclude<GoalFindingStatus, "open">,
       note: string,
+      /**
+       * Answers whether a commit-like token exists in the repository. Optional
+       * because the server side of a plugin has no git; when it is absent the
+       * note is stored as given, exactly as before.
+       */
+      resolvesCommit?: CommitResolver,
+      /** Which repository was searched, so the note can say. */
+      repository?: string | null,
     ): GoalFinding | null {
       const finding = this.get(threadId, ref);
       if (!finding) return null;
+      // A finding was closed citing 2e4f7dd, which does not exist. The register
+      // accepted it and nothing objected — the same class the reachability
+      // audit counts, created by the API that was supposed to prevent it.
+      const checked = resolvesCommit
+        ? verifyAttribution(note, resolvesCommit, repository)
+        : { unresolved: [] as string[], unverified: [] as string[], note };
       setStatus.run({
         thread_id: threadId,
         id: finding.id,
         status,
-        resolution_note: note.trim() || null,
+        resolution_note: checked.note.trim() || null,
         updated_at: Date.now(),
       });
       return this.get(threadId, finding.id);

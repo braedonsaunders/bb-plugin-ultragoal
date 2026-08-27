@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.27.0
+
+- `resolve_finding` fails closed on a commit citation it cannot verify, and
+  changes nothing when it does. A finding was closed citing `2e4f7dd`, a commit
+  that does not exist — typed from memory rather than read back — and the
+  register accepted it without objection. That is the same class the
+  reachability audit counts, manufactured by the API meant to prevent it.
+  The tool now extracts commit-like tokens from the evidence and asks the
+  repository. A token the repository does not contain, OR one that no reachable
+  repository could check, refuses the call and leaves the finding untouched:
+  neither is evidence, and a closure recorded with a warning attached still
+  leaves a fixed finding behind for anyone reading the count.
+  Evidence legitimately cites other repositories — the fix for a plugin defect
+  lives in the plugin, not the product — so `resolve_finding` takes an explicit
+  `repository`, and the CLI a `--repository`. Validating against the goal's own
+  checkout would reject correct citations.
+  Prose evidence citing no SHA still closes; the guard bites on bad citations,
+  not on their absence.
+
 ## 0.26.1
 
 - Ask the repository whether a slice's branch still adds work, instead of

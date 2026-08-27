@@ -37,6 +37,14 @@ export const hostContract = defineRpcContract({
    * for "already up to date" — which is what 0.25.3 did — can never work. Only
    * the repository can answer, so ask it.
    */
+  /** Does this commit-like token resolve to an object in the repository? */
+  commitExists: {
+    input: z.object({
+      checkoutPath: z.string().min(1),
+      token: z.string().min(1),
+    }),
+    output: z.object({ exists: z.boolean() }),
+  },
   branchAddsWork: {
     input: z.object({
       checkoutPath: z.string().min(1),
