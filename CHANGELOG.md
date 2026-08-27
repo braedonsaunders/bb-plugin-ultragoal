@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.26.1
+
+- Ask the repository whether a slice's branch still adds work, instead of
+  reading it out of an error message. 0.25.3 tried to spot an already-merged
+  slice by matching "already up to date" in the failure text, and bb never
+  passes git's own words through — it reports `HTTP 502: git merge --squash
+  <branch> failed` and nothing more. So that fix was inert: 22 no-op merges in
+  one hour were still recorded as failures, and after 0.26.0 they would have
+  reopened findings whose work was demonstrably already on the branch, undoing
+  correct closures. The host entry now runs `git diff --quiet base...branch` and
+  the answer comes from the tree. A branch that genuinely adds work still
+  records as failed and still reopens its findings.
+
 ## 0.26.0
 
 - A finding no longer stays fixed when its fix never reached the base branch.

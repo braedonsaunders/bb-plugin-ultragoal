@@ -30,6 +30,26 @@ export const hostContract = defineRpcContract({
     }),
   },
   /**
+   * Does this branch still add anything the base lacks?
+   *
+   * bb reports a failed squash as `HTTP 502: git merge --squash <branch>
+   * failed` and does not pass git's own words through, so matching the message
+   * for "already up to date" — which is what 0.25.3 did — can never work. Only
+   * the repository can answer, so ask it.
+   */
+  branchAddsWork: {
+    input: z.object({
+      checkoutPath: z.string().min(1),
+      branch: z.string().min(1),
+      base: z.string().min(1),
+    }),
+    output: z.object({
+      adds: z.boolean(),
+      /** Null when the question could not be answered; treat that as "adds". */
+      reason: z.string().nullable(),
+    }),
+  },
+  /**
    * Replace a checkout's node_modules with a reference-clone of a store copy.
    * Thirteen worktrees each installed the same 1.1 GB tree because one agent =
    * one slice means one worktree per slice.

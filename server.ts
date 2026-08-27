@@ -1300,15 +1300,21 @@ export default function plugin(bb: BbPluginApi) {
     itemId: string,
   ): Promise<void> {
     let strandedBranch: string | null = null;
+    let integrationCheckout: string | null = null;
+    let integrationHostId: string | null = null;
+    let integrationBase: string | null = null;
     try {
       const worker = await bb.sdk.threads.get({ threadId: workerThreadId });
       if (!worker.environmentId) return;
       const environment = await bb.sdk.environments.get({ environmentId: worker.environmentId });
       if (!environment.isWorktree || !environment.managed) return;
       strandedBranch = environment.branchName ?? null;
+      integrationCheckout = (environment as { path?: string | null }).path ?? null;
+      integrationHostId = (environment as { hostId?: string | null }).hostId ?? null;
       const base =
         environment.mergeBaseBranch ?? environment.defaultBranch ?? environment.baseBranch;
       if (!base) return;
+      integrationBase = base;
       await bb.sdk.environments.squashMerge({
         environmentId: worker.environmentId,
         mergeBaseBranch: base,
@@ -1337,6 +1343,38 @@ export default function plugin(bb: BbPluginApi) {
       await reclaimWorktree(rootThreadId, itemId, worker.environmentId, base);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // Ask the REPOSITORY whether the branch still adds anything. Matching the
+      // error text cannot work: bb reports `HTTP 502: git merge --squash
+      // <branch> failed` and does not pass git's own words through, so 0.25.3's
+      // message match was inert and 22 no-op merges in one hour were still
+      // recorded as failures — and, after 0.26.0, would have reopened findings
+      // whose work was already on the branch.
+      let addsWork = true;
+      if (strandedBranch && integrationCheckout && integrationHostId && integrationBase) {
+        const verdict = await hostClient
+          .call(
+            "branchAddsWork",
+            { checkoutPath: integrationCheckout, branch: strandedBranch, base: integrationBase },
+            { hostId: integrationHostId },
+          )
+          .catch(() => null);
+        if (verdict && !verdict.adds) addsWork = false;
+      }
+      if (!addsWork) {
+        integrations.record(
+          rootThreadId,
+          {
+            itemId,
+            commit: null,
+            branch: strandedBranch,
+            status: "integrated",
+            detail: "already present on the base branch (verified by diff, not by message)",
+          },
+          Date.now(),
+        );
+        bb.log.info(`Integration skipped for slice ${itemId} on ${rootThreadId}: already on the base branch`);
+        return;
+      }
       if (/no changes|nothing to (merge|commit)|up.to.date|already|nothing to squash/i.test(message)) {
         // "Already up to date. (nothing to squash)" is git exiting non-zero
         // because there was nothing to stage, and bb surfaces that as a 502.

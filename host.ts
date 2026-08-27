@@ -122,6 +122,23 @@ export default experimental_defineHostEntry({
       return { removed: true, freedBytes, reason: null };
     },
 
+    async branchAddsWork({ checkoutPath, branch, base }) {
+      try {
+        // Three dots: diff from where the branch and base parted company, so a
+        // base that has moved on does not read as a difference.
+        await git(checkoutPath, "diff", "--quiet", `${base}...${branch}`);
+        return { adds: false, reason: null };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // git diff --quiet exits 1 for "there is a difference" and >1 for a
+        // real error. Only the first means the branch genuinely adds work.
+        if (/exit code 1\b|Command failed.*exit code 1/i.test(message)) {
+          return { adds: true, reason: null };
+        }
+        return { adds: true, reason: message.slice(0, 200) };
+      }
+    },
+
     async shareNodeModules({ checkoutPath, storeDir, seedIfEmpty }, context) {
       const key = await lockKey(checkoutPath);
       if (!key) return { shared: false, seeded: false, key: null, reason: "no lockfile or package.json" };
