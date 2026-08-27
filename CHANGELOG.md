@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.25.2
+
+- Token history now moves with the goal. `goal_session_tokens` was the fourth
+  goal-scoped table this transfer forgot, after the standing brief, the
+  completion floors and the staffing holds. Leaving it behind freezes the
+  counter rather than resetting it, which is worse: the total is floored at its
+  previous high-water mark, so a new root starting from zero recorded sessions
+  keeps reporting the OLD number until it independently exceeds it. On a live
+  goal that meant 3.38B sitting motionless while 2.48B of real work went
+  unattributed. The rows are MERGED rather than moved, because a session can
+  already exist under the target and a provider's cumulative counter only rises,
+  so the larger reading wins.
+
 ## 0.25.1
 
 - An archived worker no longer blocks a root transfer. 0.24.0 started archiving

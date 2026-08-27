@@ -172,6 +172,33 @@ export function createRootTransferStore(bb: BbPluginApi) {
       return null;
     }
   };
+  // Token history is keyed by goal thread too, and was the fourth table this
+  // transfer forgot. Leaving it behind froze the counter: the goal's total is
+  // floored at its previous high-water mark, so a new root that starts from
+  // zero recorded sessions reports the OLD number until it independently
+  // exceeds it — 3.38B sitting still while 2.48B of real work went unattributed.
+  // MERGE rather than move: a session can already exist under the target, and
+  // the provider's cumulative counter only rises, so the larger reading wins.
+  const mergeSessionTokens = (() => {
+    try {
+      return db.prepare(`
+        INSERT INTO goal_session_tokens (goal_thread_id, session_id, tokens, updated_at)
+        SELECT ?, session_id, tokens, updated_at FROM goal_session_tokens WHERE goal_thread_id = ?
+        ON CONFLICT(goal_thread_id, session_id) DO UPDATE SET
+          tokens = MAX(goal_session_tokens.tokens, excluded.tokens),
+          updated_at = excluded.updated_at
+      `);
+    } catch {
+      return null;
+    }
+  })();
+  const dropSessionTokens = (() => {
+    try {
+      return db.prepare("DELETE FROM goal_session_tokens WHERE goal_thread_id = ?");
+    } catch {
+      return null;
+    }
+  })();
   const updateWorkerBrief = moveGoalScoped("goal_worker_briefs");
   const updateItemRequirements = moveGoalScoped("goal_item_requirements");
   const updateStaffingHolds = moveGoalScoped("goal_item_staffing_holds");
@@ -339,6 +366,12 @@ export function createRootTransferStore(bb: BbPluginApi) {
         const itemChanges = updateItems.run(targetThreadId, sourceThreadId).changes;
         const findingChanges = updateFindings.run(targetThreadId, sourceThreadId).changes;
         const decisionChanges = updateDecisions.run(targetThreadId, sourceThreadId).changes;
+        try {
+          mergeSessionTokens?.run(targetThreadId, sourceThreadId);
+          dropSessionTokens?.run(sourceThreadId);
+        } catch {
+          // A database that predates the token table has nothing to merge.
+        }
         for (const move of [updateWorkerBrief, updateItemRequirements, updateStaffingHolds]) {
           try {
             move?.run(targetThreadId, sourceThreadId);
