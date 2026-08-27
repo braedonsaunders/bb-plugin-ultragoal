@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.26.0
+
+- A finding no longer stays fixed when its fix never reached the base branch.
+  `completeItemFor` marks linked findings fixed from the worker's report, and
+  `queueIntegration` runs afterwards — so a genuine merge failure left the
+  register asserting a fix that exists nowhere main will ship, and nothing ever
+  rechecked it. A reviewer put the consequence plainly: a launch decision made
+  from the register alone would have shipped a recorded-as-fixed
+  segregation-of-duties bypass believing it closed.
+  A failed integration now reopens exactly the findings that slice closed and
+  returns the slice to the queue, naming the stranded branch in its step so the
+  next worker RECOVERS the commits rather than starting over — one slice was
+  previously re-implemented against an already-merged predecessor.
+  Two things are deliberately left alone: a dismissal is a human judgement
+  about the defect and no merge outcome overturns it, and an already-present
+  slice ("nothing to squash", 0.25.3) counts as integrated, so this path never
+  runs for it.
+
 ## 0.25.3
 
 - A slice whose work is already on the base branch is recorded as INTEGRATED,

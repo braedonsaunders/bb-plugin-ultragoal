@@ -1299,11 +1299,13 @@ export default function plugin(bb: BbPluginApi) {
     workerThreadId: string,
     itemId: string,
   ): Promise<void> {
+    let strandedBranch: string | null = null;
     try {
       const worker = await bb.sdk.threads.get({ threadId: workerThreadId });
       if (!worker.environmentId) return;
       const environment = await bb.sdk.environments.get({ environmentId: worker.environmentId });
       if (!environment.isWorktree || !environment.managed) return;
+      strandedBranch = environment.branchName ?? null;
       const base =
         environment.mergeBaseBranch ?? environment.defaultBranch ?? environment.baseBranch;
       if (!base) return;
@@ -1361,9 +1363,36 @@ export default function plugin(bb: BbPluginApi) {
       // in the tree, with nothing recording the contradiction. Write it down.
       integrations.record(
         rootThreadId,
-        { itemId, commit: null, branch: null, status: "failed", detail: message },
+        { itemId, commit: null, branch: strandedBranch, status: "failed", detail: message },
         Date.now(),
       );
+      // Closure happened on the worker's report, before this merge was even
+      // attempted. The merge has now genuinely failed, so the fix is provably
+      // not on the base branch and the register must stop claiming otherwise.
+      // Reopen the defects and return the slice to the queue.
+      const reopened = findings.reopenForFailedIntegration(
+        rootThreadId,
+        itemId,
+        `Reopened: integration of ${strandedBranch ?? "the slice branch"} failed — ${message.slice(0, 200)}`,
+      );
+      if (reopened > 0) {
+        // Name the branch in the step. The work is committed and recoverable;
+        // a re-staffed worker that starts over instead of recovering it is how
+        // one slice got re-implemented against an already-merged predecessor.
+        const current = items.list(rootThreadId).find((row) => row.id === itemId);
+        if (current && current.status === "completed") {
+          items.patch(rootThreadId, [{
+            id: itemId,
+            status: "pending",
+            step: strandedBranch && !current.step.includes(strandedBranch)
+              ? `${current.step} STRANDED WORK: this slice was completed and its integration FAILED, so its defects are open again. The commits are on ${strandedBranch} — recover them and resolve the conflict; do not start over.`
+              : current.step,
+          }], []);
+        }
+        bb.log.warn(
+          `Reopened ${reopened} finding(s) and requeued ${itemId} on ${rootThreadId}: its fix is not on the base branch`,
+        );
+      }
       bb.log.warn(`Integration failed for slice ${itemId} (${workerThreadId}) on ${rootThreadId}: ${message}`);
       // One escalation per goal per cooldown window: twelve identical
       // dirty-checkout steers in ninety minutes is noise, not urgency.

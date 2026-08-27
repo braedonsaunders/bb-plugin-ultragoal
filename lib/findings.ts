@@ -271,6 +271,33 @@ export function createFindingStore(bb: BbPluginApi) {
       return this.get(threadId, finding.id);
     },
 
+    /**
+     * Put a finding back in play because its fix is provably not on the base
+     * branch. Closure happens on a worker's report, before the merge is even
+     * attempted, so a genuine integration failure previously left the register
+     * asserting a fix that does not exist. Only entries closed by THIS item are
+     * reopened, and only from a fixed state — a dismissal was a human judgement
+     * about the defect itself and no merge outcome should overturn it.
+     */
+    reopenForFailedIntegration(threadId: string, itemId: string, note: string): number {
+      const rows = (byItem.all(threadId, itemId) as FindingRow[]).filter(
+        (row) => row.status === "fixed",
+      );
+      db.transaction(() => {
+        const updatedAt = Date.now();
+        for (const row of rows) {
+          setStatus.run({
+            thread_id: threadId,
+            id: row.id,
+            status: "open",
+            resolution_note: note.trim().slice(0, 400) || null,
+            updated_at: updatedAt,
+          });
+        }
+      })();
+      return rows.length;
+    },
+
     /** A completed fix slice closes every finding that spawned it. */
     markFixedByItem(threadId: string, itemId: string, note: string): number {
       const rows = (byItem.all(threadId, itemId) as FindingRow[]).filter(
