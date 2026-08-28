@@ -1296,7 +1296,7 @@ function GoalSettingsPanel({
           </label>
           <div className="rounded-md border border-border px-2 py-2">
             <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-              Orchestrator context
+              Fresh coordinating thread
             </span>
             <button
               type="button"
@@ -1310,8 +1310,8 @@ function GoalSettingsPanel({
                     const result = await rpc.call("rotateRoot", { threadId });
                     setRotateNote(
                       result.rotated
-                        ? `Handed over to ${result.targetThreadId}. This thread is now retired.`
-                        : result.reason ?? "Rotation declined.",
+                        ? "Goal moved to a fresh coordinating thread. This thread is no longer coordinating it."
+                        : result.reason ?? "Couldn’t move the goal.",
                     );
                   } catch (error) {
                     setRotateNote(error instanceof Error ? error.message : String(error));
@@ -1321,14 +1321,12 @@ function GoalSettingsPanel({
                 })();
               }}
             >
-              {rotating ? "Rotating…" : "Rotate orchestrator"}
+              {rotating ? "Moving…" : "Move goal to fresh thread"}
             </button>
             <span className="mt-1 block text-[11px] text-muted-foreground">
-              A root re-reads its whole conversation every request — one measured at 520,000
-              cached tokens per turn, which is most of what a long goal spends. The plan,
-              findings, workers, standing brief and completion floors all live in the
-              plugin&rsquo;s own tables, so a fresh root starts at zero context and loses only
-              the transcript.
+              Move this goal to a fresh thread while preserving its plan, findings, workers,
+              and completion requirements. Use this when the current thread has become long
+              or slow.
             </span>
             {rotateNote ? (
               <span className="mt-1 block text-[11px] text-foreground">{rotateNote}</span>
