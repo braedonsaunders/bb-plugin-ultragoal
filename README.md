@@ -15,7 +15,7 @@ bb plugin install ultragoal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.17.15'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.28.0'
 ```
 
 Or from a local checkout:
@@ -56,7 +56,7 @@ bb ultragoal resume
 bb ultragoal clear
 ```
 
-The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked work gets a chip), and **Previous**. Its headline metrics distinguish **Work items** from **Defects** because related defects can share one repair item. The plan is read-only in the pane; the agent updates it. Settings control verification, verifier and worker models, progress-chat interval, worker slots, auto-continue, remediation capacity, and the token budget.
+The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked work gets a chip), and **Previous**. Its headline metrics distinguish **Work items** from **Defects** because related defects can share one repair item. The plan is read-only in the pane; the agent updates it. Settings control verification, verifier and worker models, progress-chat interval, worker slots, auto-continue, remediation capacity, repository integration, local provider accounting, standing worker rules, and the token budget.
 
 The only root agent controls are `ultragoal_start`, `ultragoal_state`, `ultragoal_patch`, and `ultragoal_finish` on every provider. They operate on UltraGoal's durable plugin state; provider-native goal state is unrelated.
 
@@ -70,6 +70,24 @@ The split follows the research in [docs/architecture-research.md](docs/architect
 4. Workers stay hidden and implement only their item, reporting evidence (commit SHAs, check output). Every brief carries a generalized quality bar ([templates/goals/worker_brief.md](templates/goals/worker_brief.md)) — reuse-first, complete production-grade work, clean cutover, honest gates, crew-safe atomic commits — with the repo's own AGENTS.md taking precedence. They do not call `ultragoal_finish` or rewrite the parent plan.
 5. When verification is on (default), a second model audits each finished worker. The orchestrator should not mark that work item complete until `VERIFY_PASS`.
 6. If several minutes pass with no visible main-thread update, the plugin nudges the orchestrator to post one.
+
+## Data access and repository effects
+
+UltraGoal makes no direct outbound network requests of its own. It never pushes a Git remote from a background timer or from automatic slice integration.
+
+Safety-sensitive behavior is off by default and shown in each goal's pane:
+
+- **Automatic slice integration** optionally squash-merges a completed managed worker branch into the goal's base branch. With it off, completed work remains on its worker branch for manual integration.
+- **Merged worktree cleanup** optionally removes a clean managed worktree and force-deletes its worker branch, but only after the branch's work is represented on the base branch. It does nothing unless automatic integration is enabled.
+- **Local provider session accounting** optionally reads Claude Code JSONL files under `~/.claude/projects`, Codex JSONL files under `~/.codex/sessions`, Cursor's `state.vscdb` and session `store.db` files, and OpenCode's `opencode.db`. UltraGoal extracts token totals and native-child session metadata, stores only aggregate metadata in its own database, and transmits none of the source data.
+
+Automatic approval of agent requests is separately off by default. Workers use BB's normal approval mode and verifiers are hardcoded to that mode. Standing worker rules can be activated, edited, or cleared only by a user action in the UltraGoal pane; the agent-facing CLI cannot write them. The pane records when the rules were saved and that they came from a user action. Agent-authored work-item and finding `check` strings remain visible as plan metadata but are never inserted into another agent's prompt; workers choose verification independently from trusted repository instructions, and linked finding evidence is explicitly labeled untrusted data.
+
+Every durable UltraGoal root carries exactly one UltraGoal pill beside its title in BB's thread list until the goal is cleared. A lifecycle-scoped content-script stylesheet targets only those root row IDs; it installs no observer, mutates no host nodes, and does not replace the user's chosen thread list. Workers and verifiers are created with BB's supported hidden-thread visibility, so the left sidebar stays at one root row. Subagents belonging to ordinary non-UltraGoal threads remain visible.
+
+## Plugin compatibility
+
+Do not install UltraGoal alongside the separate `goal` plugin. Both contribute orchestration instructions to the same thread lifecycle, so enabling both can produce competing control systems. UltraGoal does not inspect, hide, or modify threads owned by `goal`.
 
 `ultragoal_patch` is the only plan source: there is no provider-native todo mirror, prose report parsing, or legacy staffing path. It atomically patches only supplied rows, so a one-item status change never retransmits a 1,000-item UltraGoal. Every ready item is the scheduler's to staff.
 

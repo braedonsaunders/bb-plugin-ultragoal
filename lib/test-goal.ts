@@ -69,7 +69,11 @@ export function makeLargeGoal(count = 1_000): GoalSnapshot {
       workerModel: "",
       workerReasoning: "",
       workerServiceTier: null,
+      autoIntegrateCompletedSlices: false,
+      reclaimMergedWorktrees: false,
+      readLocalProviderData: false,
     },
+    standingBrief: null,
     findings: {
       open: 137,
       fixed: 159,

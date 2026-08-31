@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.28.0
+
+- Repository mutation is explicit per goal and off by default. Automatic
+  squash integration and post-integration worktree/branch reclamation are
+  separate pane settings. Timer-driven progress passes no longer merge or
+  push; UltraGoal never publishes a remote without direct user authorization.
+- Reading provider-owned local data now requires per-goal consent. When
+  enabled, UltraGoal reads Claude Code and Codex JSONL plus Cursor and OpenCode
+  SQLite stores for token totals and native-child metadata, stores only
+  aggregate metadata, and sends none of it over the network.
+- Standing worker rules are user-owned. The agent-facing CLI write path is
+  gone; the pane visibly edits and clears the active rules and stores their
+  user-pane provenance and timestamp. Agent-authored work-item and finding
+  check strings remain owner-visible metadata but are no longer injected into
+  worker or verifier prompts; finding evidence is explicitly marked untrusted.
+- Collaboration tools are fully namespaced (`ultragoal_spawn_agent`,
+  `ultragoal_send_message`, `ultragoal_followup_task`, and the corresponding
+  list/wait/interrupt/release/retire controls), avoiding silent collisions
+  with other plugins.
+- The sidebar DOM observer and exclusive thread-list wrapper are gone.
+  A lifecycle-scoped stylesheet gives durable UltraGoal roots an always-present
+  pill beside the thread title without mutating host nodes; the selector
+  guarantees one pill per root across live reloads. UltraGoal workers and
+  verifiers are created with BB's supported hidden-thread visibility,
+  while ordinary non-UltraGoal subagents remain in the standard thread tree.
+- The pane action uses the valid `ListTodo` host icon. Documentation now
+  discloses repository effects, local data access, approval defaults, and the
+  incompatibility with the overlapping `goal` plugin.
+
 ## 0.27.0
 
 - `resolve_finding` fails closed on a commit citation it cannot verify, and

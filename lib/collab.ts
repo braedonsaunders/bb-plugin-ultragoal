@@ -15,7 +15,7 @@ const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_WAIT_TIMEOUT_MS = 600_000;
 
 const SPAWN_AGENT_DESCRIPTION = `
-        Spawns an agent to work on the specified task. If your current task is \`/root/task1\` and you spawn_agent with task_name "task_3" the agent will have canonical task name \`/root/task1/task_3\`.
+        Spawns an agent to work on the specified task. If your current task is \`/root/task1\` and you call ultragoal_spawn_agent with task_name "task_3" the agent will have canonical task name \`/root/task1/task_3\`.
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 This is the default way UltraGoal work gets done. The root thread is the orchestrator; spawn one worker per in-progress slice, several in one turn. Do not implement those slices on the root.
@@ -127,7 +127,7 @@ export function createCollabStore(
         message: string;
         workerThreadId?: string;
         createIfMissing?: boolean;
-        /** "tool": spawn_agent message (first line is the task). "prompt": a
+        /** "tool": ultragoal_spawn_agent message (first line is the task). "prompt": a
          * discovered thread's spawn prompt (only SLICE markers are trusted). */
         source?: "tool" | "prompt";
       },
@@ -152,7 +152,7 @@ export function createCollabStore(
     itemBrief?: (
       rootThreadId: string,
       itemId: string,
-    ) => { files: string[]; check: string | null; linkedDefects?: string } | null;
+    ) => { files: string[]; linkedDefects?: string } | null;
     /**
      * Permission mode for spawned workers. Defaults to "auto" so a worker's
      * risky actions still reach the normal approval gate; an operator raises it
@@ -560,7 +560,7 @@ export function createCollabStore(
       }),
     );
 
-    // Children spawned outside spawn_agent carry their slice in the spawn
+    // Children spawned outside ultragoal_spawn_agent carry their slice in the spawn
     // prompt ("SLICE (item_id=itm_...): ..."). Claim it once so the Now row
     // shows the task, the plan item leaves Next, and idle completion works.
     if (hooks?.claimItem) {
@@ -612,7 +612,7 @@ export function createCollabStore(
     return agents.sort((a, b) => rank[a.status] - rank[b.status] || a.nickname.localeCompare(b.nickname));
   }
 
-  // The one spawn path, shared by the spawn_agent tool and the plugin's own
+  // The one spawn path, shared by ultragoal_spawn_agent and the plugin's own
   // recovery staffing.
   async function spawnAgent(args: {
     threadId: string;
@@ -718,11 +718,6 @@ export function createCollabStore(
         role === "verifier"
           ? `Verification scope: inspect the work item and these owned files: ${brief.files.join(", ")}.`
           : `Scope: touch only files within: ${brief.files.join(", ")}. If the slice requires edits outside this scope, stop and call slice_blocked with the reason instead of expanding scope.`,
-      );
-    }
-    if (brief?.check) {
-      briefLines.push(
-        `Done-check: \`${brief.check}\` must pass. Run it yourself and include its result in your final report.`,
       );
     }
     if (brief?.linkedDefects) briefLines.push(brief.linkedDefects);
@@ -1132,7 +1127,7 @@ export function createCollabStore(
       return { threadId: child.id, nickname: displayName };
     },
 
-    // Programmatic spawn with the exact same machinery as the spawn_agent
+    // Programmatic spawn with the exact same machinery as ultragoal_spawn_agent
     // tool, for the plugin's own recovery staffing (rescuing a slice whose
     // worker died while the root turn is blocked and cannot re-staff it).
     async spawnWorker(args: {
@@ -1164,7 +1159,7 @@ export function createCollabStore(
 
     registerTools() {
       bb.agents.registerTool({
-        name: "spawn_agent",
+        name: "ultragoal_spawn_agent",
         description: SPAWN_AGENT_DESCRIPTION,
         parameters: z.object({
           task_name: z
@@ -1238,14 +1233,14 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "send_message",
+        name: "ultragoal_send_message",
         description:
           "Deliver a message to an existing agent immediately: steer it into the live turn, or start a new turn if the agent is idle. Never uses the composer queue.",
         parameters: z.object({
           target: z
             .string()
             .min(1)
-            .describe("Relative or canonical task name to message (from spawn_agent)."),
+            .describe("Relative or canonical task name to message (from ultragoal_spawn_agent)."),
           message: z.string().min(1).describe("Message text to deliver immediately to the target agent."),
         }),
         async execute({ target, message }, { threadId }) {
@@ -1274,14 +1269,14 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "followup_task",
+        name: "ultragoal_followup_task",
         description:
-          "Steer an existing agent immediately about the ONE slice it was spawned for (clarify, unblock, course-correct). Delivers into the live turn, or starts a new turn if idle — never the composer queue. One agent = one slice: a worker whose slice is finished is retired and cannot take new work — spawn a fresh agent with spawn_agent instead.",
+          "Steer an existing agent immediately about the ONE slice it was spawned for (clarify, unblock, course-correct). Delivers into the live turn, or starts a new turn if idle — never the composer queue. One agent = one slice: a worker whose slice is finished is retired and cannot take new work — spawn a fresh agent with ultragoal_spawn_agent instead.",
         parameters: z.object({
           target: z
             .string()
             .min(1)
-            .describe("Agent id or canonical task name to send a follow-up task to (from spawn_agent)."),
+            .describe("Agent id or canonical task name to send a follow-up task to (from ultragoal_spawn_agent)."),
           message: z.string().min(1).describe("Message text to send to the target agent."),
         }),
         async execute({ target, message }, { threadId }) {
@@ -1309,7 +1304,7 @@ export function createCollabStore(
                 content: [
                   {
                     type: "text",
-                    text: `${agent.task_name} is retired: its slice is completed. One agent = one slice. Spawn a fresh agent with spawn_agent for new work.`,
+                    text: `${agent.task_name} is retired: its slice is completed. One agent = one slice. Spawn a fresh agent with ultragoal_spawn_agent for new work.`,
                   },
                 ],
                 isError: true,
@@ -1333,7 +1328,7 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "list_agents",
+        name: "ultragoal_list_agents",
         description: "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
         parameters: z.object({
           path_prefix: z
@@ -1358,7 +1353,7 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "wait_agent",
+        name: "ultragoal_wait_agent",
         description:
           "Wait for a mailbox update from any live agent, including immediately delivered follow-ups and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
         parameters: z.object({
@@ -1411,14 +1406,14 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "interrupt_agent",
+        name: "ultragoal_interrupt_agent",
         description:
           "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
         parameters: z.object({
           target: z
             .string()
             .min(1)
-            .describe("Agent id or canonical task name to interrupt (from spawn_agent)."),
+            .describe("Agent id or canonical task name to interrupt (from ultragoal_spawn_agent)."),
         }),
         async execute({ target }, { threadId }) {
           const agent = resolve(threadId, target);
@@ -1432,7 +1427,7 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "release_slice",
+        name: "ultragoal_release_slice",
         description:
           "Stop an agent and return its work item to the ready queue, freeing its scheduler slot. Use when a worker is redundant, stuck, or working from a stale base. Its committed work is untouched — only the assignment is given up.",
         parameters: z.object({
@@ -1465,9 +1460,9 @@ export function createCollabStore(
       });
 
       bb.agents.registerTool({
-        name: "retire_agent",
+        name: "ultragoal_retire_agent",
         description:
-          "Retire a finished agent: free its scheduler slot and archive its thread so its worktree can be reclaimed. Refuses while the agent still holds an open work item — release_slice that first.",
+          "Retire a finished agent: free its scheduler slot and archive its thread so its worktree can be reclaimed. Refuses while the agent still holds an open work item — ultragoal_release_slice that first.",
         parameters: z.object({
           target: z.string().min(1).describe("Agent id or canonical task name to retire."),
         }),
@@ -1481,7 +1476,7 @@ export function createCollabStore(
             return {
               content: [{
                 type: "text",
-                text: `${target} still holds ${agent.item_id} (${status}). Use release_slice to give the work up, or let it finish.`,
+                text: `${target} still holds ${agent.item_id} (${status}). Use ultragoal_release_slice to give the work up, or let it finish.`,
               }],
               isError: true,
             };
@@ -1499,12 +1494,12 @@ export function createCollabStore(
 }
 
 export const COLLAB_TOOL_NAMES = [
-  "spawn_agent",
-  "send_message",
-  "followup_task",
-  "list_agents",
-  "wait_agent",
-  "interrupt_agent",
-  "release_slice",
-  "retire_agent",
+  "ultragoal_spawn_agent",
+  "ultragoal_send_message",
+  "ultragoal_followup_task",
+  "ultragoal_list_agents",
+  "ultragoal_wait_agent",
+  "ultragoal_interrupt_agent",
+  "ultragoal_release_slice",
+  "ultragoal_retire_agent",
 ] as const;

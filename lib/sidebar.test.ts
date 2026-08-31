@@ -4,7 +4,7 @@ import type { GoalAgent, GoalStatus } from "../contract.ts";
 import { projectSidebarCrew } from "./sidebar.ts";
 
 describe("projectSidebarCrew", () => {
-  it("keeps the chip for every durable goal status", () => {
+  it("keeps the pill for every durable goal status", () => {
     const statuses: GoalStatus[] = [
       "active",
       "paused",
@@ -20,7 +20,7 @@ describe("projectSidebarCrew", () => {
     }
   });
 
-  it("clears the chip but retains cached workers after the goal is cleared", () => {
+  it("clears the pill but retains cached workers after the goal is cleared", () => {
     const cached = [{ threadId: "thr_worker" }] as GoalAgent[];
     const crew = projectSidebarCrew("thr_goal", null, cached, ["thr_worker"]);
 

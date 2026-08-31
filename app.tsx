@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Markdown,
   definePluginApp,
@@ -136,181 +136,30 @@ function useThreadMeta(threadId: string | null) {
   };
 }
 
-const GOAL_MARK_STYLE =
-  "display:inline-flex;align-items:center;flex:0 0 auto;height:14px;padding:0 4px;border:1px solid currentColor;border-radius:3px;font-size:9px;font-weight:600;letter-spacing:.04em;line-height:1;opacity:.55";
+interface SidebarCrewPayload {
+  threadId: string;
+  active: boolean;
+}
 
-function injectGoalSidebarMarks(
-  crews: Array<{ threadId: string; active?: boolean; agents: GoalAgent[]; workerIds?: string[] }>,
-  extraHideIds?: ReadonlySet<string>,
-) {
-  // Workers of any crew — active or cleared — stay hidden. The pill marks
-  // every durable goal until it is explicitly cleared.
-  const goalIds = new Set(crews.map((crew) => crew.threadId));
-  const markIds = new Set(crews.filter((crew) => crew.active !== false).map((crew) => crew.threadId));
-  const workerIds = new Set(
-    crews.flatMap((crew) => [
-      ...(crew.workerIds ?? []),
-      ...crew.agents.map((agent) => agent.threadId),
-    ]),
+async function fetchSidebarCrews(pluginId: string, signal: AbortSignal): Promise<SidebarCrewPayload[]> {
+  const response = await fetch(
+    `/api/v1/plugins/${encodeURIComponent(pluginId)}/rpc/listCrews`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal,
+    },
   );
-  for (const id of extraHideIds ?? []) workerIds.add(id);
-  for (const id of goalIds) workerIds.delete(id);
-
-  for (const stale of Array.from(document.querySelectorAll("[data-goal-crew]"))) {
-    stale.remove();
-  }
-
-  for (const target of Array.from(document.querySelectorAll("[data-sidebar-thread-id]"))) {
-    const id = target.getAttribute("data-sidebar-thread-id");
-    const row = target.parentElement as HTMLElement | null;
-    if (!id || !row) continue;
-
-    if (workerIds.has(id)) {
-      row.dataset.goalWorkerHidden = "1";
-      row.style.display = "none";
-      continue;
-    }
-    // An empty crew cache after reload used to unhide every worker. Only
-    // restore a row when we positively know the active Goal set and this
-    // thread is not one of its children.
-    if (row.dataset.goalWorkerHidden === "1" && goalIds.size > 0) {
-      delete row.dataset.goalWorkerHidden;
-      row.style.display = "";
-    }
-
-    const container = row.querySelector(":scope > span") as HTMLElement | null;
-    if (!container) continue;
-    const caret = container.querySelector("button[aria-expanded]") as HTMLElement | null;
-    if (caret) {
-      if (goalIds.has(id)) {
-        caret.dataset.goalCaretHidden = "1";
-        caret.style.display = "none";
-      } else if (caret.dataset.goalCaretHidden === "1") {
-        delete caret.dataset.goalCaretHidden;
-        caret.style.display = "";
-      }
-    }
-    let mark = container.querySelector("[data-goal-mark]") as HTMLElement | null;
-    if (!markIds.has(id)) {
-      mark?.remove();
-      continue;
-    }
-    if (!mark) {
-      mark = document.createElement("span");
-      mark.dataset.goalMark = "1";
-      mark.style.cssText = GOAL_MARK_STYLE;
-      mark.textContent = "UltraGoal";
-      mark.title = "UltraGoal thread";
-      container.appendChild(mark);
-    }
-  }
-}
-
-function descendantWorkerIds(
-  threads: readonly { id: string; parentThreadId: string | null; originPluginId?: string | null }[],
-  goalIds: ReadonlySet<string>,
-): Set<string> {
-  const byParent = new Map<string, string[]>();
-  for (const thread of threads) {
-    if (!thread.parentThreadId) continue;
-    const list = byParent.get(thread.parentThreadId) ?? [];
-    list.push(thread.id);
-    byParent.set(thread.parentThreadId, list);
-  }
-  const hide = new Set<string>();
-  const walk = (id: string) => {
-    for (const child of byParent.get(id) ?? []) {
-      if (goalIds.has(child) || hide.has(child)) continue;
-      hide.add(child);
-      walk(child);
-    }
+  const envelope = await response.json() as {
+    ok?: boolean;
+    result?: { crews?: SidebarCrewPayload[] };
   };
-  for (const goalId of goalIds) walk(goalId);
-  for (const thread of threads) {
-    if (
-      (thread.originPluginId === "ultragoal" || thread.originPluginId === "goal") &&
-      thread.parentThreadId &&
-      !goalIds.has(thread.id)
-    ) {
-      hide.add(thread.id);
-    }
+  if (!response.ok || envelope.ok !== true || !Array.isArray(envelope.result?.crews)) {
+    throw new Error(`Could not load UltraGoal sidebar state (${response.status})`);
   }
-  return hide;
-}
-
-function SidebarGoalMarks() {
-  const rpc = useRpc<typeof rpcContract>();
-  const { threads } = experimental_useSidebarThreads();
-  const threadsRef = useRef(threads);
-  threadsRef.current = threads;
-  const threadTree = threads
-    .map((thread) => `${thread.id}:${thread.parentThreadId ?? ""}:${thread.originPluginId ?? ""}`)
-    .join(",");
-  const [crews, setCrews] = useState<
-    Array<{ threadId: string; active?: boolean; agents: GoalAgent[]; workerIds: string[] }>
-  >([]);
-
-  const load = useCallback(async () => {
-    try {
-      const next = await rpc.call("listCrews", {});
-      setCrews(
-        next.crews.map((crew) => ({
-          threadId: crew.threadId,
-          active: crew.active,
-          agents: crew.agents,
-          workerIds: crew.workerIds ?? crew.agents.map((agent) => agent.threadId),
-        })),
-      );
-    } catch {
-      // Keep the last known crew so a failed poll cannot unhide workers.
-    }
-  }, [rpc]);
-
-  useEffect(() => {
-    void load();
-    const id = window.setInterval(() => {
-      void load();
-    }, 4000);
-    return () => window.clearInterval(id);
-  }, [load]);
-
-  useRealtime("ultragoal", () => {
-    void load();
-  });
-
-  useEffect(() => {
-    let frame = 0;
-    let disposed = false;
-    const options: MutationObserverInit = { childList: true, subtree: true };
-    const apply = () => {
-      frame = 0;
-      if (disposed) return;
-      observer.disconnect();
-      try {
-        injectGoalSidebarMarks(
-          crews,
-          descendantWorkerIds(
-            threadsRef.current,
-            new Set(crews.map((crew) => crew.threadId)),
-          ),
-        );
-      } finally {
-        if (!disposed) observer.observe(document.body, options);
-      }
-    };
-    const observer = new MutationObserver(() => {
-      if (frame || disposed) return;
-      frame = window.requestAnimationFrame(apply);
-    });
-    apply();
-    return () => {
-      disposed = true;
-      if (frame) window.cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, [crews, threadTree]);
-
-  return null;
+  return envelope.result.crews;
 }
 
 function ThreadProviderHeader({ threadId }: { threadId: string }) {
@@ -389,12 +238,7 @@ function useGoal(threadId: string | null) {
 }
 
 function GoalChrome() {
-  return (
-    <>
-      <GoalPaneOpener />
-      <SidebarGoalMarks />
-    </>
-  );
+  return <GoalPaneOpener />;
 }
 
 function GoalPaneOpener() {
@@ -1089,6 +933,8 @@ function GoalSettingsPanel({
   const [budget, setBudget] = useState(goal.tokenBudget == null ? "" : String(goal.tokenBudget));
   const [progressMinutes, setProgressMinutes] = useState(String(goal.settings.progressUpdateMinutes));
   const [workers, setWorkers] = useState(String(goal.settings.maxWorkers));
+  const [briefDraft, setBriefDraft] = useState(goal.standingBrief?.text ?? "");
+  const [briefNote, setBriefNote] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
   const [rotateNote, setRotateNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -1105,6 +951,11 @@ function GoalSettingsPanel({
   useEffect(() => {
     setWorkers(String(goal.settings.maxWorkers));
   }, [goal.settings.maxWorkers]);
+
+  useEffect(() => {
+    setBriefDraft(goal.standingBrief?.text ?? "");
+    setBriefNote(null);
+  }, [goal.standingBrief?.text, goal.standingBrief?.updatedAt]);
 
   useEffect(() => {
     void rpc
@@ -1128,6 +979,9 @@ function GoalSettingsPanel({
     workerModel?: string | null;
     workerReasoning?: ReasoningLevel | null;
     workerServiceTier?: ExecutionSelection["serviceTier"];
+    autoIntegrateCompletedSlices?: boolean;
+    reclaimMergedWorktrees?: boolean;
+    readLocalProviderData?: boolean;
     tokenBudget?: number | null;
   }) => {
     setSaving(true);
@@ -1294,6 +1148,130 @@ function GoalSettingsPanel({
               Scheduler keeps up to this many workers on ready work items. 0 turns it off. Default 5.
             </span>
           </label>
+          <div className="rounded-md border border-border px-2 py-2">
+            <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+              Standing worker rules
+            </span>
+            <textarea
+              className="min-h-24 w-full resize-y rounded-md border border-border bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              maxLength={4000}
+              value={briefDraft}
+              disabled={saving}
+              placeholder="Repository-specific rules every future worker should inherit"
+              onChange={(event) => {
+                setBriefDraft(event.target.value);
+                setBriefNote(null);
+              }}
+            />
+            <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+              <span>
+                {goal.standingBrief
+                  ? `${goal.standingBrief.provenance === "user-pane" ? "Saved by a user in this pane" : "Legacy value"} · ${new Date(goal.standingBrief.updatedAt).toLocaleString()}`
+                  : "No active standing rules"}
+              </span>
+              <span>{briefDraft.length}/4000</span>
+            </div>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-50"
+                disabled={saving || !briefDraft.trim() || briefDraft.trim() === (goal.standingBrief?.text ?? "")}
+                onClick={() => {
+                  void (async () => {
+                    setSaving(true);
+                    try {
+                      const next = await rpc.call("setStandingBriefFromPane", {
+                        threadId,
+                        text: briefDraft,
+                      });
+                      onApply(next.goal);
+                      setBriefNote("Standing rules saved for future workers.");
+                    } finally {
+                      setSaving(false);
+                    }
+                  })();
+                }}
+              >
+                Save rules
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-border px-2 py-1 text-[11px] hover:bg-muted disabled:opacity-50"
+                disabled={saving || !goal.standingBrief}
+                onClick={() => {
+                  void (async () => {
+                    setSaving(true);
+                    try {
+                      const next = await rpc.call("setStandingBriefFromPane", {
+                        threadId,
+                        text: null,
+                      });
+                      setBriefDraft("");
+                      onApply(next.goal);
+                      setBriefNote("Standing rules cleared.");
+                    } finally {
+                      setSaving(false);
+                    }
+                  })();
+                }}
+              >
+                Clear
+              </button>
+            </div>
+            <span className="mt-1 block text-[11px] text-muted-foreground">
+              Only an explicit action in this pane can activate these rules. Agents and the bb ultragoal CLI cannot write them.
+            </span>
+            {briefNote ? <span className="mt-1 block text-[11px] text-foreground">{briefNote}</span> : null}
+          </div>
+          <div className="rounded-md border border-border px-2 py-2">
+            <span className="mb-2 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+              Repository changes
+            </span>
+            <label className="flex items-start justify-between gap-3 text-[13px] text-foreground">
+              <span>
+                Automatically squash-merge completed slices
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  Off by default. Changes this goal's base branch; never pushes a remote.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={settings.autoIntegrateCompletedSlices}
+                disabled={saving}
+                onChange={(event) => void save({ autoIntegrateCompletedSlices: event.target.checked })}
+              />
+            </label>
+            <label className="mt-2 flex items-start justify-between gap-3 text-[13px] text-foreground">
+              <span>
+                Delete integrated worktrees and branches
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  Off by default. Only clean managed worktrees already represented on the base branch qualify.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={settings.reclaimMergedWorktrees}
+                disabled={saving}
+                onChange={(event) => void save({ reclaimMergedWorktrees: event.target.checked })}
+              />
+            </label>
+          </div>
+          <div className="rounded-md border border-border px-2 py-2">
+            <label className="flex items-start justify-between gap-3 text-[13px] text-foreground">
+              <span>
+                Read local provider session stores
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  Off by default. Reads Claude Code and Codex JSONL plus Cursor and OpenCode SQLite stores for token totals and native-child metadata. Only aggregate metadata is stored; nothing is sent over the network.
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={settings.readLocalProviderData}
+                disabled={saving}
+                onChange={(event) => void save({ readLocalProviderData: event.target.checked })}
+              />
+            </label>
+          </div>
           <div className="rounded-md border border-border px-2 py-2">
             <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
               Fresh coordinating thread
@@ -1941,6 +1919,63 @@ function OwnerDecisionCard({
 }
 
 export default definePluginApp((app) => {
+  app.contentScripts.register({
+    id: "ultragoal-thread-badges",
+    mount({ pluginId, signal }) {
+      // A thread-row status glyph is displaced by BB's live running/error
+      // indicator, so it cannot be the always-present product pill. A scoped
+      // stylesheet targets BB's documented thread-row id attribute instead:
+      // no observer, no host node mutation, and no sidebar replacement.
+      const style = document.createElement("style");
+      style.dataset.ultragoalThreadBadges = "1";
+      document.head.appendChild(style);
+      let syncing = false;
+      const sync = async () => {
+        if (signal.aborted || syncing) return;
+        syncing = true;
+        try {
+          const crews = await fetchSidebarCrews(pluginId, signal);
+          const next = new Set(
+            crews.filter((crew) => crew.active).map((crew) => crew.threadId),
+          );
+          const selectors = [...next]
+            .map(
+              (threadId) =>
+                `a[data-sidebar-thread-id="${CSS.escape(threadId)}"] + span:not(:has([data-ultragoal-mark]))::after`,
+            )
+            .join(",\n");
+          style.textContent = selectors
+            ? `${selectors} {
+                content: "UltraGoal";
+                display: inline-flex;
+                align-items: center;
+                flex: 0 0 auto;
+                height: 14px;
+                padding: 0 4px;
+                border: 1px solid currentColor;
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: 600;
+                letter-spacing: .04em;
+                line-height: 1;
+                opacity: .55;
+                pointer-events: none;
+              }`
+            : "";
+        } catch (error) {
+          if (!signal.aborted) console.warn("UltraGoal pill sync failed", error);
+        } finally {
+          syncing = false;
+        }
+      };
+      void sync();
+      const timer = window.setInterval(() => void sync(), 4000);
+      return () => {
+        window.clearInterval(timer);
+        style.remove();
+      };
+    },
+  });
   app.slots.pendingInteraction({
     id: "owner-decision",
     component: OwnerDecisionCard,
@@ -1950,26 +1985,10 @@ export default definePluginApp((app) => {
     title: "Provider",
     component: ThreadProviderHeader,
   });
-  app.slots.experimental_threadList({
-    id: "ultragoal-thread-list",
-    title: "Threads",
-    description: "Built-in list with UltraGoal marks on goal threads.",
-    component: (props) => {
-      // The SDK types experimental_Original as a bare ComponentType; it does
-      // accept the slot props at runtime.
-      const Original = props.experimental_Original as ComponentType<typeof props>;
-      return (
-        <>
-          <SidebarGoalMarks />
-          <Original {...props} />
-        </>
-      );
-    },
-  });
   app.slots.threadPanelAction({
     id: PLAN_ACTION_ID,
     title: "UltraGoal",
-    icon: "ListChecks",
+    icon: "ListTodo",
     layout: "flush",
     component: GoalPlanPanel,
     run: ({ openPanel }) => {

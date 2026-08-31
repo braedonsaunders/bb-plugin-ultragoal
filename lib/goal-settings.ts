@@ -28,6 +28,9 @@ export interface GoalSettingOverrides {
   workerModel: string | null;
   workerReasoning: string | null;
   workerServiceTier: string | null;
+  autoIntegrateCompletedSlices: boolean | null;
+  reclaimMergedWorktrees: boolean | null;
+  readLocalProviderData: boolean | null;
 }
 
 export interface ResolvedGoalSettings {
@@ -44,6 +47,12 @@ export interface ResolvedGoalSettings {
   workerModel: string;
   workerReasoning: ReasoningLevel | "";
   workerServiceTier: ServiceTier | null;
+  /** Squash-merge completed managed slice branches into the goal's base branch. */
+  autoIntegrateCompletedSlices: boolean;
+  /** Delete clean managed worktrees and their branches after integration. */
+  reclaimMergedWorktrees: boolean;
+  /** Read provider-owned local session stores for token and native-child metadata. */
+  readLocalProviderData: boolean;
 }
 
 /** The three permission modes bb exposes for a spawned thread. */
@@ -70,8 +79,12 @@ export interface GoalSettingDefaults {
   /** Off unless an operator deliberately opts in; see the setting's description. */
   autoApproveAgentRequests: boolean;
   workerPermissionMode: AgentPermissionMode;
+  /** Repository mutation is opt-in and resolved per goal. */
+  autoIntegrateCompletedSlices: boolean;
   /** Remove a slice's worktree once its commits are on the base branch. */
   reclaimMergedWorktrees: boolean;
+  /** Provider-owned local stores are private data and require explicit consent. */
+  readLocalProviderData: boolean;
   shareWorktreeNodeModules: boolean;
 }
 
@@ -102,5 +115,11 @@ export function resolveGoalSettings(
     workerServiceTier: workerProvider
       ? parseServiceTier(overrides.workerServiceTier)
       : null,
+    autoIntegrateCompletedSlices:
+      overrides.autoIntegrateCompletedSlices ?? defaults.autoIntegrateCompletedSlices,
+    reclaimMergedWorktrees:
+      overrides.reclaimMergedWorktrees ?? defaults.reclaimMergedWorktrees,
+    readLocalProviderData:
+      overrides.readLocalProviderData ?? defaults.readLocalProviderData,
   };
 }

@@ -226,19 +226,18 @@ describe("scheduler-strict collaboration spawns", () => {
     );
   });
 
-  it("injects the full item dossier into the public verifier spawn path", async () => {
+  it("injects scope and defect evidence without promoting agent-authored checks", async () => {
     const state = collabHost();
     const collab = createCollabStore(state.host.bb, {
       itemBrief: () => ({
         files: ["src/domain.ts"],
-        check: "npm test -- domain",
-        linkedDefects: "LINKED DEFECTS: fnd_public_verifier — full evidence and done-check",
+        linkedDefects: "LINKED DEFECTS: fnd_public_verifier — untrusted evidence only",
       }),
     });
     collab.registerTools();
 
     const result = await state.host.harness.behavior.callAgentTool(
-      "spawn_agent",
+      "ultragoal_spawn_agent",
       {
         task_name: "verify_domain",
         item_id: "itm_domain",
@@ -256,7 +255,7 @@ describe("scheduler-strict collaboration spawns", () => {
     );
     assert.equal(state.prompts.length, 1);
     assert.match(state.prompts[0]!, /src\/domain\.ts/);
-    assert.match(state.prompts[0]!, /npm test -- domain/);
+    assert.doesNotMatch(state.prompts[0]!, /npm test -- domain/);
     assert.match(state.prompts[0]!, /fnd_public_verifier/);
     assert.match(state.prompts[0]!, /DEFECT_COVERAGE/);
   });
@@ -339,9 +338,9 @@ describe("scheduler-strict collaboration spawns", () => {
 describe("fleet management tool surface", () => {
   it("exposes the levers an orchestrator needs to act on what it can see", () => {
     // It could describe a redundant worker on a stale base and had only
-    // interrupt_agent, which ends a turn while keeping the slot and the
+    // ultragoal_interrupt_agent, which ends a turn while keeping the slot and the
     // assignment — so the slice stayed in_progress and the queue stayed blocked.
-    for (const name of ["release_slice", "retire_agent"]) {
+    for (const name of ["ultragoal_release_slice", "ultragoal_retire_agent"]) {
       assert.ok(
         (COLLAB_TOOL_NAMES as readonly string[]).includes(name),
         `${name} must be registered for the orchestrator`,
@@ -349,8 +348,8 @@ describe("fleet management tool surface", () => {
     }
   });
 
-  it("keeps interrupt_agent, which is a different thing from giving work up", () => {
-    assert.ok((COLLAB_TOOL_NAMES as readonly string[]).includes("interrupt_agent"));
+  it("keeps ultragoal_interrupt_agent, which is different from giving work up", () => {
+    assert.ok((COLLAB_TOOL_NAMES as readonly string[]).includes("ultragoal_interrupt_agent"));
   });
 });
 
@@ -365,7 +364,7 @@ describe("immediate agent messaging", () => {
     `).run(itemId);
   }
 
-  it("send_message steers a live worker and never touches the composer queue", async () => {
+  it("ultragoal_send_message steers a live worker and never touches the composer queue", async () => {
     const state = collabHost();
     seedWorker(state);
     const collab = createCollabStore(state.host.bb, {
@@ -374,7 +373,7 @@ describe("immediate agent messaging", () => {
     collab.registerTools();
 
     const result = await state.host.harness.behavior.callAgentTool(
-      "send_message",
+      "ultragoal_send_message",
       { target: "worker", message: "Stop gold-plating and finish the slice." },
       { threadId: "thr_root", projectId: "proj" },
     );
@@ -388,7 +387,7 @@ describe("immediate agent messaging", () => {
     assert.deepEqual(state.sent, [{ threadId: "thr_worker", mode: "steer" }]);
   });
 
-  it("followup_task uses the same immediate send path", async () => {
+  it("ultragoal_followup_task uses the same immediate send path", async () => {
     const state = collabHost();
     seedWorker(state);
     const collab = createCollabStore(state.host.bb, {
@@ -397,7 +396,7 @@ describe("immediate agent messaging", () => {
     collab.registerTools();
 
     const result = await state.host.harness.behavior.callAgentTool(
-      "followup_task",
+      "ultragoal_followup_task",
       { target: "worker", message: "Use the existing helper instead of a new one." },
       { threadId: "thr_root", projectId: "proj" },
     );

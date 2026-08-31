@@ -3,6 +3,12 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 /** A goal's standing worker brief: house rules every slice inherits. */
 export const MAX_WORKER_BRIEF_CHARS = 4000;
 
+export interface StandingWorkerBrief {
+  text: string;
+  provenance: "user-pane" | "legacy";
+  updatedAt: number;
+}
+
 /**
  * Rules that must reach EVERY worker, held by the goal rather than retyped into
  * each slice.
@@ -24,29 +30,59 @@ export function createWorkerBriefStore(db: ReturnType<BbPluginApi["storage"]["da
     CREATE TABLE IF NOT EXISTS goal_worker_briefs (
       thread_id TEXT PRIMARY KEY,
       brief TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      provenance TEXT NOT NULL DEFAULT 'legacy'
     )
   `);
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(goal_worker_briefs)").all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    ),
+  );
+  if (!columns.has("provenance")) {
+    db.exec("ALTER TABLE goal_worker_briefs ADD COLUMN provenance TEXT NOT NULL DEFAULT 'legacy'");
+  }
   const write = db.prepare(`
-    INSERT INTO goal_worker_briefs (thread_id, brief, updated_at)
-    VALUES (@thread_id, @brief, @updated_at)
-    ON CONFLICT(thread_id) DO UPDATE SET brief = excluded.brief, updated_at = excluded.updated_at
+    INSERT INTO goal_worker_briefs (thread_id, brief, updated_at, provenance)
+    VALUES (@thread_id, @brief, @updated_at, @provenance)
+    ON CONFLICT(thread_id) DO UPDATE SET
+      brief = excluded.brief,
+      updated_at = excluded.updated_at,
+      provenance = excluded.provenance
   `);
-  const read = db.prepare("SELECT brief FROM goal_worker_briefs WHERE thread_id = ?");
+  const read = db.prepare(
+    "SELECT brief, updated_at, provenance FROM goal_worker_briefs WHERE thread_id = ?",
+  );
   const remove = db.prepare("DELETE FROM goal_worker_briefs WHERE thread_id = ?");
   return {
     /** Returns an error message, or null when stored. */
-    set(threadId: string, brief: string): string | null {
+    setFromPane(threadId: string, brief: string): string | null {
       const text = brief.trim();
-      if (!text) return "worker brief must not be empty; use --clear to remove it";
+      if (!text) return "worker brief must not be empty; clear it from the pane instead";
       if (text.length > MAX_WORKER_BRIEF_CHARS) {
         return `worker brief is too long: ${text.length} characters. Limit: ${MAX_WORKER_BRIEF_CHARS}. Put the long form in a repository file and point workers at it.`;
       }
-      write.run({ thread_id: threadId, brief: text, updated_at: Date.now() });
+      write.run({
+        thread_id: threadId,
+        brief: text,
+        updated_at: Date.now(),
+        provenance: "user-pane",
+      });
       return null;
     },
     get(threadId: string): string | null {
       return (read.get(threadId) as { brief: string } | undefined)?.brief ?? null;
+    },
+    getRecord(threadId: string): StandingWorkerBrief | null {
+      const row = read.get(threadId) as
+        | { brief: string; updated_at: number; provenance: string }
+        | undefined;
+      if (!row) return null;
+      return {
+        text: row.brief,
+        provenance: row.provenance === "user-pane" ? "user-pane" : "legacy",
+        updatedAt: row.updated_at,
+      };
     },
     clear(threadId: string): boolean {
       return remove.run(threadId).changes > 0;

@@ -44,12 +44,15 @@ interface GoalRow {
   intake_row_id: string | null;
   completion_summary: string | null;
   accounting_thread_ids: string | null;
+  auto_integrate_completed_slices: number | null;
+  reclaim_merged_worktrees: number | null;
+  read_local_provider_data: number | null;
 }
 
 // The persistent record. Live fields (agentRunning, items, agents, now, next)
 // are computed per snapshot in server.ts, never stored.
 export interface StoredGoal
-  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings" | "decisions" | "completionSummary"> {
+  extends Omit<GoalSnapshot, "agentRunning" | "items" | "agents" | "now" | "next" | "findings" | "decisions" | "completionSummary" | "standingBrief"> {
   lastSeenTokens: number | null;
   lastAccountedAt: number | null;
   lastContinueWasAutomatic: boolean;
@@ -68,6 +71,9 @@ export interface StoredGoal
   workerServiceTierOverride: string | null;
   verifyReasoningOverride: string | null;
   verifyServiceTierOverride: string | null;
+  autoIntegrateCompletedSlicesOverride: boolean | null;
+  reclaimMergedWorktreesOverride: boolean | null;
+  readLocalProviderDataOverride: boolean | null;
   intakeRowId: string | null;
   completionSummary: string | null;
   /** Prior root sessions that remain part of cumulative goal accounting. */
@@ -131,6 +137,9 @@ function rowToGoal(row: GoalRow): StoredGoal {
       workerServiceTier: null,
       verifyReasoning: "medium",
       verifyServiceTier: null,
+      autoIntegrateCompletedSlices: false,
+      reclaimMergedWorktrees: false,
+      readLocalProviderData: false,
     },
     lastProgressAt: row.last_progress_at,
     verifyEnabledOverride: row.verify_enabled == null ? null : row.verify_enabled === 1,
@@ -145,6 +154,14 @@ function rowToGoal(row: GoalRow): StoredGoal {
     workerServiceTierOverride: row.worker_service_tier,
     verifyReasoningOverride: row.verify_reasoning,
     verifyServiceTierOverride: row.verify_service_tier,
+    autoIntegrateCompletedSlicesOverride:
+      row.auto_integrate_completed_slices == null
+        ? null
+        : row.auto_integrate_completed_slices === 1,
+    reclaimMergedWorktreesOverride:
+      row.reclaim_merged_worktrees == null ? null : row.reclaim_merged_worktrees === 1,
+    readLocalProviderDataOverride:
+      row.read_local_provider_data == null ? null : row.read_local_provider_data === 1,
     intakeRowId: row.intake_row_id ?? null,
     completionSummary: row.completion_summary ?? null,
     accountingThreadIds: parseStringList(row.accounting_thread_ids),
@@ -420,6 +437,11 @@ export function createGoalStore(bb: BbPluginApi) {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (goal_thread_id, session_id)
     )`,
+    // Safety-sensitive behavior is captured per goal. All three fields are
+    // nullable overrides so new and existing goals inherit fail-safe defaults.
+    `ALTER TABLE goals ADD COLUMN auto_integrate_completed_slices INTEGER`,
+    `ALTER TABLE goals ADD COLUMN reclaim_merged_worktrees INTEGER`,
+    `ALTER TABLE goals ADD COLUMN read_local_provider_data INTEGER`,
   ]);
 
   const select = db.prepare("SELECT * FROM goals WHERE thread_id = ?");
@@ -437,7 +459,8 @@ export function createGoalStore(bb: BbPluginApi) {
       last_progress_at, progress_update_minutes, max_workers,
       worker_provider, worker_model, worker_reasoning, worker_service_tier,
       verify_reasoning, verify_service_tier, intake_row_id, completion_summary,
-      accounting_thread_ids
+      accounting_thread_ids, auto_integrate_completed_slices,
+      reclaim_merged_worktrees, read_local_provider_data
     ) VALUES (
       @thread_id, @objective, @status, @reason, @created_at, @updated_at, @started_at,
       @token_budget, @tokens_used, @time_used_seconds, @last_continue_at,
@@ -447,7 +470,8 @@ export function createGoalStore(bb: BbPluginApi) {
       @last_progress_at, @progress_update_minutes, @max_workers,
       @worker_provider, @worker_model, @worker_reasoning, @worker_service_tier,
       @verify_reasoning, @verify_service_tier, @intake_row_id, @completion_summary,
-      @accounting_thread_ids
+      @accounting_thread_ids, @auto_integrate_completed_slices,
+      @reclaim_merged_worktrees, @read_local_provider_data
     )
     ON CONFLICT(thread_id) DO UPDATE SET
       objective = excluded.objective,
@@ -479,7 +503,10 @@ export function createGoalStore(bb: BbPluginApi) {
       verify_service_tier = excluded.verify_service_tier,
       intake_row_id = excluded.intake_row_id,
       completion_summary = excluded.completion_summary,
-      accounting_thread_ids = excluded.accounting_thread_ids
+      accounting_thread_ids = excluded.accounting_thread_ids,
+      auto_integrate_completed_slices = excluded.auto_integrate_completed_slices,
+      reclaim_merged_worktrees = excluded.reclaim_merged_worktrees,
+      read_local_provider_data = excluded.read_local_provider_data
   `);
   const remove = db.prepare("DELETE FROM goals WHERE thread_id = ?");
   const removeWorkerCap = db.prepare(
@@ -534,6 +561,15 @@ export function createGoalStore(bb: BbPluginApi) {
         worker_service_tier: existing?.workerServiceTierOverride ?? null,
         verify_reasoning: existing?.verifyReasoningOverride ?? null,
         verify_service_tier: existing?.verifyServiceTierOverride ?? null,
+        auto_integrate_completed_slices: existing
+          ? flag(existing.autoIntegrateCompletedSlicesOverride)
+          : null,
+        reclaim_merged_worktrees: existing
+          ? flag(existing.reclaimMergedWorktreesOverride)
+          : null,
+        read_local_provider_data: existing
+          ? flag(existing.readLocalProviderDataOverride)
+          : null,
         intake_row_id: existing?.intakeRowId ?? null,
         completion_summary: existing?.completionSummary ?? null,
         accounting_thread_ids: existing?.accountingThreadIds.length
@@ -576,6 +612,9 @@ export function createGoalStore(bb: BbPluginApi) {
         worker_service_tier: null,
         verify_reasoning: null,
         verify_service_tier: null,
+        auto_integrate_completed_slices: null,
+        reclaim_merged_worktrees: null,
+        read_local_provider_data: null,
         intake_row_id: null,
         completion_summary: null,
         accounting_thread_ids: null,
@@ -613,6 +652,9 @@ export function createGoalStore(bb: BbPluginApi) {
         workerServiceTierOverride: string | null;
         verifyReasoningOverride: string | null;
         verifyServiceTierOverride: string | null;
+        autoIntegrateCompletedSlicesOverride: boolean | null;
+        reclaimMergedWorktreesOverride: boolean | null;
+        readLocalProviderDataOverride: boolean | null;
         completionSummary: string | null;
         accountingThreadIds: string[];
       }>,
@@ -704,6 +746,18 @@ export function createGoalStore(bb: BbPluginApi) {
           patch.verifyServiceTierOverride === undefined
             ? existing.verifyServiceTierOverride
             : patch.verifyServiceTierOverride,
+        auto_integrate_completed_slices:
+          patch.autoIntegrateCompletedSlicesOverride === undefined
+            ? flag(existing.autoIntegrateCompletedSlicesOverride)
+            : flag(patch.autoIntegrateCompletedSlicesOverride),
+        reclaim_merged_worktrees:
+          patch.reclaimMergedWorktreesOverride === undefined
+            ? flag(existing.reclaimMergedWorktreesOverride)
+            : flag(patch.reclaimMergedWorktreesOverride),
+        read_local_provider_data:
+          patch.readLocalProviderDataOverride === undefined
+            ? flag(existing.readLocalProviderDataOverride)
+            : flag(patch.readLocalProviderDataOverride),
         intake_row_id: existing.intakeRowId,
         completion_summary:
           patch.completionSummary === undefined

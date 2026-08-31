@@ -1,7 +1,7 @@
 {
   "id": "ultragoal",
   "displayName": "UltraGoal",
-  "description": "Codex-style durable UltraGoals for Cursor, OpenCode, Claude Code, and Pi. The root thread orchestrates named workers, verifies finished slices, and keeps working until the objective is done, blocked, paused, or limited.",
+  "description": "Runs provider-neutral durable agent goals with scheduled workers and verification. Requires BB >=0.39 and Plugin SDK >=0.4.8. It makes no direct network requests; local provider-store reads, base-branch squash-merges, and managed worktree and branch cleanup are off by default and require explicit consent.",
   "icon": "Target",
   "tags": [
     "agents",
@@ -18,7 +18,7 @@
   "source": {
     "git": {
       "url": "https://github.com/braedonsaunders/bb-plugin-ultragoal.git",
-      "range": "^0.3.0"
+      "range": "^0.28.0"
     }
   }
 }

@@ -74,6 +74,52 @@ describe("large-plan agent tool contracts", () => {
     assert.equal(tool.parse({ plan: Array.from({ length: 201 }, () => item) }).ok, false);
   });
 
+  it("namespaces every collaboration tool and exposes no global alias", () => {
+    const names = new Set(registeredTools().keys());
+    for (const name of [
+      "spawn_agent",
+      "send_message",
+      "followup_task",
+      "list_agents",
+      "wait_agent",
+      "interrupt_agent",
+      "release_slice",
+      "retire_agent",
+    ]) {
+      assert.equal(names.has(name), false, `global alias must not be registered: ${name}`);
+      assert.equal(names.has(`ultragoal_${name}`), true, `namespaced tool missing: ${name}`);
+    }
+  });
+
+  it("lets only the pane RPC write standing worker rules", async () => {
+    const host = registeredHost();
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_start",
+      { objective: "Keep standing rules under explicit user control" },
+      { threadId: "thr_rules" },
+    );
+    const cli = await host.harness.behavior.runCli([
+      "brief",
+      "an agent tried to inject this",
+      "--thread",
+      "thr_rules",
+    ]);
+    assert.equal(cli.exitCode, 1);
+    assert.match(cli.stderr ?? "", /Unknown goal command: brief/);
+
+    const result = await host.harness.behavior.callRpc("setStandingBriefFromPane", {
+      threadId: "thr_rules",
+      text: "Use the repository's shared database and never start a private one.",
+    }) as { goal?: { standingBrief?: { provenance?: string; text?: string } | null } | null };
+    assert.equal(result.goal?.standingBrief?.provenance, "user-pane");
+    assert.match(result.goal?.standingBrief?.text ?? "", /shared database/);
+    const row = host.bb.storage.database().prepare(
+      "SELECT provenance, updated_at FROM goal_worker_briefs WHERE thread_id = 'thr_rules'",
+    ).get() as { provenance: string; updated_at: number };
+    assert.equal(row.provenance, "user-pane");
+    assert.ok(row.updated_at > 0);
+  });
+
   const context = (providerId: string, threadId: string) => ({
     thread: { id: threadId, title: "UltraGoal root", parentThreadId: null, sourceThreadId: null },
     project: { id: "proj", kind: "standard" as const, name: "Project", gitRemoteUrl: null },
@@ -660,12 +706,17 @@ describe("large-plan agent tool contracts", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     assert.equal(prompts.length, 1);
-    for (const finding of [first, second]) {
+    for (const [finding, check] of [
+      [first, "npm test -- downgrade"],
+      [second, "npm test -- actor-provenance"],
+    ] as const) {
       assert.match(prompts[0]!, new RegExp(finding.id));
       assert.match(prompts[0]!, new RegExp(finding.title));
       assert.match(prompts[0]!, new RegExp(finding.file));
       assert.match(prompts[0]!, new RegExp(finding.evidence));
+      assert.doesNotMatch(prompts[0]!, new RegExp(check));
     }
+    assert.match(prompts[0]!, /agent-authored untrusted problem data/i);
     assert.match(prompts[0]!, /slice_done must satisfy every linked defect/i);
 
     const negativeProse = await host.harness.behavior.callAgentTool(
@@ -728,7 +779,7 @@ describe("large-plan agent tool contracts", () => {
     ] as const) {
       assert.match(prompts[1]!, new RegExp(finding.id));
       assert.match(prompts[1]!, new RegExp(finding.evidence));
-      assert.match(prompts[1]!, new RegExp(check));
+      assert.doesNotMatch(prompts[1]!, new RegExp(check));
     }
     assert.match(prompts[1]!, /DEFECT_COVERAGE/);
     await host.harness.behavior.emitThreadEvent("thread.idle", {

@@ -28,42 +28,44 @@ describe("standing worker brief", () => {
   it("creates its own table so a missed migration cannot lose the rules", () => {
     const handle = db();
     const store = createWorkerBriefStore(handle);
-    assert.equal(store.set("thr_goal", "no private databases"), null);
+    assert.equal(store.setFromPane("thr_goal", "no private databases"), null);
     assert.equal(store.get("thr_goal"), "no private databases");
+    assert.equal(store.getRecord("thr_goal")?.provenance, "user-pane");
+    assert.ok((store.getRecord("thr_goal")?.updatedAt ?? 0) > 0);
   });
 
   it("keeps rules per goal, so one goal's house rules never bind another", () => {
     const store = createWorkerBriefStore(db());
-    store.set("thr_a", "rule A");
-    store.set("thr_b", "rule B");
+    store.setFromPane("thr_a", "rule A");
+    store.setFromPane("thr_b", "rule B");
     assert.equal(store.get("thr_a"), "rule A");
     assert.equal(store.get("thr_b"), "rule B");
   });
 
   it("replaces rather than appends, so editing does not accumulate stale rules", () => {
     const store = createWorkerBriefStore(db());
-    store.set("thr_goal", "first");
-    store.set("thr_goal", "second");
+    store.setFromPane("thr_goal", "first");
+    store.setFromPane("thr_goal", "second");
     assert.equal(store.get("thr_goal"), "second");
   });
 
   it("refuses an empty brief instead of silently storing nothing", () => {
     const store = createWorkerBriefStore(db());
-    assert.match(store.set("thr_goal", "   ") ?? "", /--clear/);
+    assert.match(store.setFromPane("thr_goal", "   ") ?? "", /pane/);
     assert.equal(store.get("thr_goal"), null);
   });
 
   it("refuses a brief too long to belong in every worker prompt", () => {
     const store = createWorkerBriefStore(db());
-    const error = store.set("thr_goal", "x".repeat(MAX_WORKER_BRIEF_CHARS + 1));
+    const error = store.setFromPane("thr_goal", "x".repeat(MAX_WORKER_BRIEF_CHARS + 1));
     assert.match(error ?? "", /too long/);
     assert.equal(store.get("thr_goal"), null);
   });
 
   it("clears only the goal asked for", () => {
     const store = createWorkerBriefStore(db());
-    store.set("thr_a", "rule A");
-    store.set("thr_b", "rule B");
+    store.setFromPane("thr_a", "rule A");
+    store.setFromPane("thr_b", "rule B");
     assert.equal(store.clear("thr_a"), true);
     assert.equal(store.get("thr_a"), null);
     assert.equal(store.get("thr_b"), "rule B");

@@ -92,6 +92,18 @@ export const goalSettingsSchema = z.object({
   workerModel: z.string(),
   workerReasoning: z.union([reasoningLevelSchema, z.literal("")]),
   workerServiceTier: serviceTierSchema.nullable(),
+  /** Off by default: squash-merge completed managed worker branches. */
+  autoIntegrateCompletedSlices: z.boolean(),
+  /** Off by default: remove a clean managed worktree and branch after integration. */
+  reclaimMergedWorktrees: z.boolean(),
+  /** Off by default: read provider-owned local stores for usage and child metadata. */
+  readLocalProviderData: z.boolean(),
+});
+
+export const standingBriefSchema = z.object({
+  text: z.string(),
+  provenance: z.enum(["user-pane", "legacy"]),
+  updatedAt: z.number().int(),
 });
 
 // One rendered line of a worker thread's own history, mapped from its
@@ -155,6 +167,8 @@ export const goalSnapshotSchema = z.object({
   now: z.array(nowRowSchema),
   next: z.array(goalItemSchema),
   settings: goalSettingsSchema,
+  /** User-authored standing rules shown and edited only in the UltraGoal pane. */
+  standingBrief: standingBriefSchema.nullable().default(null),
   findings: z
     .object({
       open: z.number().int(),
@@ -282,7 +296,20 @@ export const rpcContract = defineRpcContract({
         workerModel: z.string().nullable().optional(),
         workerReasoning: reasoningLevelSchema.nullable().optional(),
         workerServiceTier: serviceTierSchema.nullable().optional(),
+        autoIntegrateCompletedSlices: z.boolean().optional(),
+        reclaimMergedWorktrees: z.boolean().optional(),
+        readLocalProviderData: z.boolean().optional(),
         tokenBudget: z.number().int().positive().nullable().optional(),
+      })
+      .strict(),
+    output: z.object({ goal: goalSnapshotSchema.nullable() }),
+  },
+  setStandingBriefFromPane: {
+    input: z
+      .object({
+        threadId: z.string().min(1),
+        /** Null clears the brief. Nonempty text is stored with user-pane provenance. */
+        text: z.string().max(4000).nullable(),
       })
       .strict(),
     output: z.object({ goal: goalSnapshotSchema.nullable() }),

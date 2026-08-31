@@ -5,6 +5,7 @@ import {
   MAX_PLAN_INSTRUCTION_CHARS,
   planInstruction,
   progressPrompt,
+  workerQualityBrief,
 } from "./prompts.ts";
 import { makeLargeGoal } from "./test-goal.ts";
 
@@ -27,6 +28,10 @@ describe("bounded UltraGoal prompts", () => {
     assert.ok(progress.length < 8_000, `progress was ${progress.length} chars`);
     assert.doesNotMatch(continuation, /COMPLETED_BODY_/);
     assert.doesNotMatch(progress, /COMPLETED_BODY_/);
+    assert.doesNotMatch(progress, /PUSH the remote/i);
+    assert.match(progress, /does not merge branches or push remotes/i);
+    assert.match(workerQualityBrief(), /Workers never push/);
+    assert.doesNotMatch(workerQualityBrief(), /pushing origin is solely/i);
     assert.match(continuation, /compact wake-up, not a new goal/);
   });
 });

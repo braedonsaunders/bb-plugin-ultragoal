@@ -16,7 +16,7 @@ Do not create or update provider-native goal state for UltraGoal work. It is unr
 - `ultragoal_patch` — atomically patch the dependency plan. Send only new or changed work items, at most 200 per call; omitted work remains durable. Each row is `{ id?, step, status, deps?, files?, check? }`. Pass an existing `id` from `ultragoal_state` when updating it. Use `remove_item_ids` only for obsolete, unstaffed work; unknown IDs and partial patches are rejected.
 - `ultragoal_finish` — mark an UltraGoal `complete` or genuinely `blocked`. Completion requires a substantive delivery summary and no remaining work, open defects, or owner decisions. It cannot pause, resume, clear, or budget-limit an UltraGoal.
 
-Supporting controls are `report_finding`, `resolve_finding`, `request_decision`, and `resolve_decision`. Collaboration tools (`send_message`, `followup_task`) deliver immediately into the target turn; do not use `bb thread queue` to talk to a worker. Scheduled work items are staffed by UltraGoal itself.
+Supporting controls are `report_finding`, `resolve_finding`, `request_decision`, and `resolve_decision`. Collaboration tools (`ultragoal_send_message`, `ultragoal_followup_task`) deliver immediately into the target turn; do not use `bb thread queue` to talk to a worker. Scheduled work items are staffed by UltraGoal itself.
 
 ## Start and user commands
 

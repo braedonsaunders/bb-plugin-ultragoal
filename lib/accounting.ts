@@ -169,13 +169,17 @@ async function officialTokensIfCheap(bb: BbPluginApi, threadId: string): Promise
 export async function readThreadTokens(
   bb: BbPluginApi,
   threadId: string,
-  options?: { allowScan?: boolean },
+  options?: { allowScan?: boolean; allowLocalProviderData?: boolean },
 ): Promise<number | null> {
   const sessionId = await sessionIdForThread(bb, threadId);
-  if (sessionId && options?.allowScan === false) {
+  if (
+    sessionId &&
+    options?.allowLocalProviderData === true &&
+    options?.allowScan === false
+  ) {
     return peekCursorSessionTokens(sessionId);
   }
-  if (sessionId) {
+  if (sessionId && options?.allowLocalProviderData === true) {
     // Whichever provider ran this session (Cursor, OpenCode, Claude Code,
     // Codex) left cumulative usage in its own store; try them all.
     const stored = readCursorSessionTokens(sessionId) ?? readProviderSessionTokens(sessionId);
@@ -211,6 +215,8 @@ export async function accountGoalProgress(
     historicalThreadIds?: string[];
     force?: boolean;
     scan?: boolean;
+    /** Explicit consent to read provider-owned local session files/databases. */
+    allowLocalProviderData?: boolean;
     sessionTokens?: SessionTokenStore;
   },
 ): Promise<StoredGoal | null> {
@@ -235,7 +241,10 @@ export async function accountGoalProgress(
   for (const id of ids) {
     const sessionId = await sessionIdForThread(bb, id);
     if (!sessionId) continue;
-    const tokens = await readThreadTokens(bb, id, { allowScan: true });
+    const tokens = await readThreadTokens(bb, id, {
+      allowScan: true,
+      allowLocalProviderData: options?.allowLocalProviderData === true,
+    });
     if (tokens == null) continue;
     sessions.record(threadId, sessionId, tokens);
     sawTokens = true;
@@ -253,7 +262,10 @@ export async function accountGoalProgress(
       const sessionId = await sessionIdForThread(bb, id);
       if (!sessionId || recorded.has(sessionId)) continue;
       scansLeft -= 1;
-      const tokens = await readThreadTokens(bb, id, { allowScan: true });
+      const tokens = await readThreadTokens(bb, id, {
+        allowScan: true,
+        allowLocalProviderData: options?.allowLocalProviderData === true,
+      });
       if (tokens == null) continue;
       sessions.record(threadId, sessionId, tokens);
       recorded.add(sessionId);

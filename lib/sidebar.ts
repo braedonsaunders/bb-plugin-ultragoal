@@ -9,7 +9,7 @@ export interface SidebarCrew {
 
 /**
  * Project the lightweight sidebar contract. A goal's workflow status does not
- * control its chip: the chip follows the durable record and disappears only
+ * control its pill: the pill follows the durable record and disappears only
  * after that record is cleared.
  */
 export function projectSidebarCrew(
