@@ -327,11 +327,46 @@ describe("finishedWorkerRetirementCandidates", () => {
     assert.deepEqual(retire, []);
   });
 
-  it("never retires verifiers or itemless crew", () => {
+  it("retires an inactive legacy itemless worker candidate", () => {
+    const retire = finishedWorkerRetirementCandidates(
+      [{ role: "worker", itemId: null, threadId: "thr_legacy_itemless" }],
+      items,
+      noVerifier,
+    );
+    assert.deepEqual(retire, ["thr_legacy_itemless"]);
+    assert.equal(retirementPermittedByHost("stopped"), true);
+  });
+
+  it("preserves a genuinely live itemless worker", () => {
+    const retire = finishedWorkerRetirementCandidates(
+      [{ role: "worker", itemId: null, threadId: "thr_live_itemless" }],
+      items,
+      noVerifier,
+    );
+    assert.deepEqual(retire, ["thr_live_itemless"]);
+    assert.equal(retirementPermittedByHost("running"), false);
+  });
+
+  it("does not select an already-retired legacy itemless worker again", () => {
+    const durableRows = [
+      { role: "worker", itemId: null, threadId: "thr_legacy_itemless" },
+    ];
+    const first = finishedWorkerRetirementCandidates(durableRows, items, noVerifier);
+    assert.deepEqual(first, ["thr_legacy_itemless"]);
+
+    // collab.forget tombstones the row, so durableRowsForRoot excludes it from
+    // every later reconciliation pass.
+    const stillActiveRows = durableRows.filter((row) => !first.includes(row.threadId));
+    assert.deepEqual(
+      finishedWorkerRetirementCandidates(stillActiveRows, items, noVerifier),
+      [],
+    );
+  });
+
+  it("never retires verifiers", () => {
     const retire = finishedWorkerRetirementCandidates(
       [
         { role: "verifier", itemId: "itm_done", threadId: "thr_verifier" },
-        { role: "worker", itemId: null, threadId: "thr_itemless" },
       ],
       items,
       noVerifier,
