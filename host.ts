@@ -1,7 +1,7 @@
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, rm, rename, stat, readdir, mkdir } from "node:fs/promises";
+import { readFile, realpath, rm, rename, stat, readdir, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { hostContract } from "./host-contract.ts";
@@ -20,6 +20,63 @@ const run = promisify(execFile);
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await run("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
   return stdout.trim();
+}
+
+export type CommitResolution =
+  | { status: "valid"; commit: string; repository: string }
+  | { status: "invalid"; repository: string }
+  | { status: "operational_error"; repository: string; reason: string };
+
+function invalidCommitish(error: unknown): boolean {
+  const detail = error as { code?: unknown; stderr?: unknown; message?: unknown };
+  if (detail.code === 1 && !String(detail.stderr ?? "").trim()) return true;
+  const message = `${String(detail.stderr ?? "")} ${String(detail.message ?? "")}`;
+  return /unknown revision|bad object|not a valid object name|needed a single revision|expected commit type|does not point to a commit/i.test(
+    message,
+  );
+}
+
+/** Resolve only commit-ish input, while keeping host/repository failures retryable. */
+export async function resolveCommit(
+  checkoutPath: string,
+  requestedRef: string,
+): Promise<CommitResolution> {
+  let repository: string;
+  try {
+    const topLevel = await git(checkoutPath, "rev-parse", "--show-toplevel");
+    repository = await realpath(topLevel);
+  } catch (error) {
+    return {
+      status: "operational_error",
+      repository: checkoutPath,
+      reason: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+    };
+  }
+
+  try {
+    const commit = await git(
+      repository,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${requestedRef}^{commit}`,
+    );
+    if (/^[0-9a-f]{40,64}$/.test(commit)) {
+      return { status: "valid", commit, repository };
+    }
+    return {
+      status: "operational_error",
+      repository,
+      reason: "git returned an unexpected commit identifier",
+    };
+  } catch (error) {
+    if (invalidCommitish(error)) return { status: "invalid", repository };
+    return {
+      status: "operational_error",
+      repository,
+      reason: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+    };
+  }
 }
 
 async function directoryBytes(path: string): Promise<number> {
@@ -64,6 +121,9 @@ async function cloneTree(from: string, to: string): Promise<boolean> {
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    resolveCommit({ checkoutPath, requestedRef }) {
+      return resolveCommit(checkoutPath, requestedRef);
+    },
     async reclaimWorktree({ checkoutPath, mergedInto, force }) {
       const keep = (reason: string) => ({ removed: false, freedBytes: 0, reason });
       try {

@@ -55,6 +55,7 @@ import {
 } from "./lib/deliverables.js";
 import { remediationItemRetirement } from "./lib/remediation-retirement.js";
 import { createStaffingHoldStore } from "./lib/staffing-hold.js";
+import { createInvalidBaseSuppressionStore } from "./lib/invalid-base-suppressions.js";
 import { parseAttribution, type CommitLookup, type CommitResolver } from "./lib/attribution.js";
 import { createIntegrationRecordStore } from "./lib/integration-record.js";
 import { hostContract } from "./host-contract.js";
@@ -394,6 +395,30 @@ export default function plugin(bb: BbPluginApi) {
   const workerBriefs = createWorkerBriefStore(bb.storage.database());
   const itemRequirements = createItemRequirementStore(bb.storage.database());
   const staffingHolds = createStaffingHoldStore(bb.storage.database());
+  const invalidBaseSuppressions = createInvalidBaseSuppressionStore(bb.storage.database());
+
+  function invalidBaseStatus(rootThreadId: string) {
+    return invalidBaseSuppressions.list(rootThreadId).map((entry) => ({
+      item_id: entry.itemId,
+      repository: entry.repository,
+      requested_ref: entry.requestedRef,
+      diagnostic: entry.diagnostic,
+      suppressed_at: entry.suppressedAt,
+      corrective_action: `bb ultragoal revalidate ${entry.itemId} --thread ${rootThreadId}`,
+    }));
+  }
+
+  function formatInvalidBaseStatus(rootThreadId: string): string {
+    const entries = invalidBaseStatus(rootThreadId);
+    if (entries.length === 0) return "";
+    return [
+      "Invalid base suppressions:",
+      ...entries.map(
+        (entry) =>
+          `- ${entry.item_id}: ${entry.diagnostic} Corrective action: ${entry.corrective_action}`,
+      ),
+    ].join("\n");
+  }
   const integrations = createIntegrationRecordStore(bb.storage.database());
 
   const collab = createCollabStore(bb, {
@@ -883,6 +908,55 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  type SchedulerBase =
+    | {
+        status: "valid";
+        hostId: string;
+        repository: string;
+        requestedRef: string;
+        commit: string;
+      }
+    | {
+        status: "invalid";
+        hostId: string;
+        repository: string;
+        requestedRef: string;
+      }
+    | { status: "operational_error"; reason: string };
+
+  async function resolveSchedulerBase(rootThreadId: string): Promise<SchedulerBase> {
+    try {
+      const root = await bb.sdk.threads.get({ threadId: rootThreadId });
+      if (!root.environmentId) {
+        return { status: "operational_error", reason: "root thread has no environment" };
+      }
+      const environment = await bb.sdk.environments.get({ environmentId: root.environmentId });
+      const hostId = environment.hostId;
+      const checkoutPath = environment.path;
+      const requestedRef = environment.branchName ?? environment.mergeBaseBranch ?? "HEAD";
+      if (!hostId || !checkoutPath) {
+        return {
+          status: "operational_error",
+          reason: "root environment has no host or repository path",
+        };
+      }
+      const resolved = await hostClient.call(
+        "resolveCommit",
+        { checkoutPath, requestedRef },
+        { hostId },
+      );
+      if (resolved.status === "operational_error") {
+        return { status: "operational_error", reason: resolved.reason };
+      }
+      return { ...resolved, hostId, requestedRef };
+    } catch (error) {
+      return {
+        status: "operational_error",
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async function scheduleReady(rootThreadId: string): Promise<void> {
     if (transferLocked(rootThreadId)) return;
     const goal = store.get(rootThreadId);
@@ -980,7 +1054,6 @@ export default function plugin(bb: BbPluginApi) {
           for (const holder of holders) collab.forget(holder.threadId);
           restaffed = true;
         }
-        lastStaffTry.set(item.id, now);
         const still = store.get(rootThreadId);
         if (
           !still ||
@@ -988,6 +1061,42 @@ export default function plugin(bb: BbPluginApi) {
         ) {
           return;
         }
+        const base = await resolveSchedulerBase(rootThreadId);
+        if (base.status === "operational_error") {
+          // Host/provider/repository availability is transient. Do not persist
+          // an invalid-input suppression or consume the five-minute spawn gate.
+          bb.log.warn(
+            `Scheduler could not validate the base for ${item.id} on ${rootThreadId}; will retry: ${base.reason}`,
+          );
+          continue;
+        }
+        const suppressed = invalidBaseSuppressions.get(
+          rootThreadId,
+          item.id,
+          base.repository,
+          base.requestedRef,
+        );
+        if (suppressed) continue;
+        if (base.status === "invalid") {
+          const diagnostic = [
+            `Base ref ${JSON.stringify(base.requestedRef)} is missing or does not peel to a commit in ${base.repository}.`,
+            "The work item and goal remain open; no worker or worktree was allocated.",
+            `Correct the repository/ref tuple, or explicitly retry the unchanged tuple with bb ultragoal revalidate ${item.id} --thread ${rootThreadId}.`,
+          ].join(" ");
+          invalidBaseSuppressions.suppress({
+            rootThreadId,
+            itemId: item.id,
+            repository: base.repository,
+            requestedRef: base.requestedRef,
+            diagnostic,
+            suppressedAt: now,
+          });
+          markGoalEvent(rootThreadId);
+          bb.log.warn(`Scheduler suppressed invalid base for ${item.id} on ${rootThreadId}: ${diagnostic}`);
+          void publishFresh(rootThreadId);
+          continue;
+        }
+        lastStaffTry.set(item.id, now);
         let result: Awaited<ReturnType<typeof collab.spawnWorker>>;
         try {
           result = await collab.spawnWorker({
@@ -999,6 +1108,12 @@ export default function plugin(bb: BbPluginApi) {
               agents.map((agent) => agent.nickname),
             ),
             message: itemBriefMessage(rootThreadId, item, restaffed),
+            validatedBase: {
+              hostId: base.hostId,
+              repository: base.repository,
+              requestedRef: base.requestedRef,
+              commit: base.commit,
+            },
           });
         } catch (error) {
           result = { error: error instanceof Error ? error.message : String(error) };
@@ -2427,6 +2542,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
     }
     const goal =
       !existing || existing.status === "complete"
@@ -2823,6 +2939,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
       if (store.clear(threadId)) publish(threadId, null);
       return true;
     }
@@ -2861,6 +2978,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
       const cleared = store.clear(threadId);
       if (cleared) publish(threadId, null);
       return { cleared };
@@ -3174,12 +3292,14 @@ export default function plugin(bb: BbPluginApi) {
       await refreshRunning(rootThreadId);
       const accounted = await account(rootThreadId);
       const goal = accounted ?? store.get(rootThreadId);
-      return goalToolResponse(
+      const response = JSON.parse(goalToolResponse(
         goal ? await viewFresh(goal) : null,
         false,
         findings.list(rootThreadId, "open"),
         { planStatus: plan_status, planCursor: plan_cursor, planLimit: plan_limit },
-      );
+      )) as Record<string, unknown>;
+      response.invalidBaseSuppressions = invalidBaseStatus(rootThreadId);
+      return JSON.stringify(response, null, 2);
     },
   });
 
@@ -4233,6 +4353,7 @@ export default function plugin(bb: BbPluginApi) {
     items.clear(thread.id);
     findings.clear(thread.id);
     decisions.clear(thread.id);
+    invalidBaseSuppressions.clear(thread.id);
     if (store.clear(thread.id)) publish(thread.id, null);
   });
 
@@ -4281,9 +4402,12 @@ export default function plugin(bb: BbPluginApi) {
       if (action === "status") {
         await account(threadId);
         const latest = store.get(threadId);
+        const invalidBases = formatInvalidBaseStatus(threadId);
         return {
           exitCode: 0,
-          stdout: latest ? formatGoalCard(view(latest)) : "No UltraGoal is set on this thread.",
+          stdout: latest
+            ? [formatGoalCard(view(latest)), invalidBases].filter(Boolean).join("\n\n")
+            : "No UltraGoal is set on this thread.",
         };
       }
 
@@ -4614,6 +4738,7 @@ export default function plugin(bb: BbPluginApi) {
           };
         }
         if (step === undefined && files === undefined && check === undefined) {
+          const invalidBases = invalidBaseSuppressions.listForItem(threadId, itemId);
           return {
             exitCode: 0,
             stdout: [
@@ -4621,6 +4746,7 @@ export default function plugin(bb: BbPluginApi) {
               `  step:  ${item.step}`,
               `  files: ${item.files.length > 0 ? item.files.join(", ") : "(none)"}`,
               `  check: ${item.check ?? "(none)"}`,
+              ...invalidBases.map((entry) => `  INVALID BASE: ${entry.diagnostic}`),
             ].join("\n"),
           };
         }
@@ -4662,6 +4788,32 @@ export default function plugin(bb: BbPluginApi) {
             `  files: ${next.files.length > 0 ? next.files.join(", ") : "(none)"}`,
             `  check: ${next.check ?? "(none)"}`,
           ].join("\n"),
+        };
+      }
+
+      if (action === "revalidate") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const itemId = (objective ?? "").trim();
+        if (!itemId) {
+          return {
+            exitCode: 1,
+            stderr: "Usage: bb ultragoal revalidate <item-id> [--thread <id>]",
+          };
+        }
+        const item = items.list(threadId).find((row) => row.id === itemId);
+        if (!item) return { exitCode: 1, stderr: `Unknown work item: ${itemId}` };
+        const removed = invalidBaseSuppressions.revalidate(threadId, itemId);
+        if (removed > 0) {
+          markGoalEvent(threadId);
+          void publishFresh(threadId);
+          void scheduleReady(threadId);
+        }
+        return {
+          exitCode: 0,
+          stdout: removed > 0
+            ? `Cleared ${removed} invalid-base suppression(s) for ${itemId}; the unchanged request will be validated again.`
+            : `${itemId} has no invalid-base suppression to revalidate.`,
         };
       }
 
@@ -4787,6 +4939,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
       store.clear(threadId);
       publish(threadId, null);
       return { exitCode: 0, stdout: "UltraGoal cleared." };
@@ -4808,6 +4961,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--hold] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
       { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] [--unhold] | bb ultragoal item --new --step \"<text>\" [--files a,b] [--check \"<cmd>\"] [--thread <id>]" },
+      { name: "revalidate", summary: "Explicitly retry an unchanged invalid base tuple", usage: "bb ultragoal revalidate <item-id> [--thread <id>]" },
       { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--repository <path>] [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
@@ -4861,7 +5015,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "requires" | "item" | "resolve" | "exec" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "requires" | "item" | "resolve" | "exec" | "transfer-root" | "revalidate";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -4886,7 +5040,7 @@ function parseCli(
   if (
     action === "set" || action === "edit" || action === "workers" ||
     action === "decide" || action === "release" ||
-    action === "requires"
+    action === "requires" || action === "revalidate"
   ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
   }

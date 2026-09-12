@@ -17,11 +17,15 @@ afterEach(async () => {
   while (hosts.length > 0) await hosts.pop()!.harness.lifecycle.dispose();
 });
 
-function registeredHost(sdk?: CreateFakePluginHostOptions["sdk"]) {
+function registeredHost(
+  sdk?: CreateFakePluginHostOptions["sdk"],
+  experimentalCallHostRpc?: CreateFakePluginHostOptions["experimental_callHostRpc"],
+) {
   const host = createFakePluginHost({
     pluginId: `ultragoal-tools-${hosts.length}`,
     agentSkillIds: ["ultragoal"],
     sdk,
+    experimental_callHostRpc: experimentalCallHostRpc,
   });
   hosts.push(host);
   // Keep this registration test isolated from the developer machine's
@@ -416,7 +420,7 @@ describe("large-plan agent tool contracts", () => {
           id: threadId,
           projectId: "proj",
           providerId: "acp-opencode",
-          environmentId: null,
+          environmentId: "env_spawn_fail",
           status: "idle",
         }),
         list: () => [],
@@ -426,7 +430,10 @@ describe("large-plan agent tool contracts", () => {
         },
         update: ({ threadId }) => makeThreadResponse({ id: threadId }),
       },
-    });
+      environments: {
+        get: async () => ({ id: "env_spawn_fail", hostId: "host_spawn_fail", path: "/srv/spawn-fail", branchName: "main" }),
+      },
+    }, () => ({ status: "valid", repository: "/srv/spawn-fail", commit: "c".repeat(40) }));
     const db = host.bb.storage.database();
     db.prepare(
       "UPDATE goals SET thread_id='thr_spawn_fail', status='active', max_workers=1 WHERE thread_id='thr_sentinel'",
@@ -468,6 +475,197 @@ describe("large-plan agent tool contracts", () => {
       ).get() as { n: number }).n,
       0,
     );
+  });
+
+  it("durably suppresses an invalid tuple across duplicate ticks and reload until explicit revalidation", async () => {
+    let resolution: "invalid" | "valid" = "invalid";
+    let spawnCalls = 0;
+    let validationCalls = 0;
+    const spawnArgs: unknown[] = [];
+    const commit = "a".repeat(40);
+    let refNowPointsTo = commit;
+    let validCalls = 0;
+    const sdk = {
+      threads: {
+        get: ({ threadId }: { threadId: string }) => makeThreadResponse({
+          id: threadId,
+          projectId: "proj",
+          providerId: "acp-opencode",
+          environmentId: "env_invalid",
+          status: "idle",
+        }),
+        list: () => [],
+        spawn: (args: unknown) => {
+          spawnCalls += 1;
+          spawnArgs.push(args);
+          return makeThreadResponse({ id: `thr_invalid_worker_${spawnCalls}` });
+        },
+        update: ({ threadId }: { threadId: string }) => makeThreadResponse({ id: threadId }),
+      },
+      environments: {
+        get: async () => ({
+          id: "env_invalid",
+          hostId: "host_source",
+          path: "/srv/project",
+          branchName: "release",
+          mergeBaseBranch: "main",
+        }),
+      },
+    } as CreateFakePluginHostOptions["sdk"];
+    const host = registeredHost(sdk, () => {
+      validationCalls += 1;
+      if (resolution === "valid") {
+        validCalls += 1;
+        const peeled = refNowPointsTo;
+        // Simulate the named ref moving after validation but before allocation.
+        if (validCalls > 1) refNowPointsTo = "e".repeat(40);
+        return { status: "valid", repository: "/srv/project", commit: peeled };
+      }
+      return { status: "invalid", repository: "/srv/project" };
+    });
+    const db = host.bb.storage.database();
+    db.prepare(
+      "UPDATE goals SET thread_id='thr_invalid', status='active', max_workers=1 WHERE thread_id='thr_sentinel'",
+    ).run();
+
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ step: "Invalid-base slice", status: "pending", deps: [], files: ["src/base.ts"] }] },
+      { threadId: "thr_invalid" },
+    );
+    for (let index = 0; index < 10; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    const item = db.prepare(
+      "SELECT id, status FROM goal_items WHERE thread_id='thr_invalid'",
+    ).get() as { id: string; status: string };
+    assert.equal(item.status, "pending");
+    assert.equal(spawnCalls, 0);
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM invalid_base_suppressions").get() as { n: number }).n,
+      1,
+    );
+    const state = await host.harness.behavior.callAgentTool(
+      "ultragoal_state",
+      {},
+      { threadId: "thr_invalid" },
+    );
+    assert.match(JSON.stringify(state), /missing or does not peel to a commit/);
+    assert.match(JSON.stringify(state), new RegExp(`ultragoal revalidate ${item.id}`));
+
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ id: item.id, step: "Invalid-base slice", status: "pending", deps: [], files: ["src/base.ts"] }] },
+      { threadId: "thr_invalid" },
+    );
+    for (let index = 0; index < 8; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 0, "a duplicate scheduler tick must stay suppressed");
+
+    const reloaded = await host.harness.lifecycle.reload(plugin);
+    hosts.push(reloaded);
+    await reloaded.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ id: item.id, step: "Invalid-base slice", status: "pending", deps: [], files: ["src/base.ts"] }] },
+      { threadId: "thr_invalid" },
+    );
+    for (let index = 0; index < 8; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 0, "plugin reload must not forget the invalid tuple");
+
+    resolution = "valid";
+    await reloaded.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ id: item.id, step: "Invalid-base slice", status: "pending", deps: [], files: ["src/base.ts"] }] },
+      { threadId: "thr_invalid" },
+    );
+    for (let index = 0; index < 8; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 0, "an unchanged tuple needs explicit operator revalidation");
+
+    const retried = await reloaded.harness.behavior.runCli([
+      "revalidate",
+      item.id,
+      "--thread",
+      "thr_invalid",
+    ]);
+    assert.equal(retried.exitCode, 0, retried.stderr);
+    for (let index = 0; index < 10; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 1);
+    const args = spawnArgs[0] as {
+      environment?: { hostId?: string; workspace?: { baseBranch?: { name?: string } } };
+    };
+    assert.equal(args.environment?.hostId, "host_source");
+    assert.equal(args.environment?.workspace?.baseBranch?.name, commit);
+    assert.equal(refNowPointsTo, "e".repeat(40));
+    assert.ok(validationCalls >= 4, "each request is checked in the exact repository before suppression lookup");
+  });
+
+  it("retries operational validation failures and automatically admits a changed ref", async () => {
+    let requestedRef = "broken";
+    let phase: "operational" | "invalid" | "valid" = "operational";
+    let spawnCalls = 0;
+    const commit = "b".repeat(40);
+    const host = registeredHost(
+      {
+        threads: {
+          get: ({ threadId }) => makeThreadResponse({
+            id: threadId,
+            projectId: "proj",
+            providerId: "acp-opencode",
+            environmentId: "env_retry",
+            status: "idle",
+          }),
+          list: () => [],
+          spawn: () => {
+            spawnCalls += 1;
+            return makeThreadResponse({ id: `thr_retry_worker_${spawnCalls}` });
+          },
+          update: ({ threadId }) => makeThreadResponse({ id: threadId }),
+        },
+        environments: {
+          get: async () => ({
+            id: "env_retry",
+            hostId: "host_retry",
+            path: "/srv/retry-project",
+            branchName: requestedRef,
+            mergeBaseBranch: "main",
+          }),
+        },
+      } as CreateFakePluginHostOptions["sdk"],
+      () => phase === "operational"
+        ? { status: "operational_error", repository: "/srv/retry-project", reason: "host temporarily unavailable" }
+        : phase === "invalid"
+          ? { status: "invalid", repository: "/srv/retry-project" }
+          : { status: "valid", repository: "/srv/retry-project", commit },
+    );
+    const db = host.bb.storage.database();
+    db.prepare(
+      "UPDATE goals SET thread_id='thr_retry', status='active', max_workers=1 WHERE thread_id='thr_sentinel'",
+    ).run();
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ step: "Retry validation", status: "pending", deps: [], files: ["src/retry.ts"] }] },
+      { threadId: "thr_retry" },
+    );
+    for (let index = 0; index < 8; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    const item = db.prepare("SELECT id FROM goal_items WHERE thread_id='thr_retry'").get() as { id: string };
+    assert.equal(spawnCalls, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM invalid_base_suppressions").get() as { n: number }).n, 0);
+
+    phase = "invalid";
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ id: item.id, step: "Retry validation", status: "pending", deps: [], files: ["src/retry.ts"] }] },
+      { threadId: "thr_retry" },
+    );
+    for (let index = 0; index < 8; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM invalid_base_suppressions").get() as { n: number }).n, 1);
+
+    requestedRef = "fixed";
+    phase = "valid";
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ id: item.id, step: "Retry validation", status: "pending", deps: [], files: ["src/retry.ts"] }] },
+      { threadId: "thr_retry" },
+    );
+    for (let index = 0; index < 10; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 1, "a changed ref must validate and admit without manual clearing");
   });
 
   it("stops and tombstones a legacy child that returns after the root slot commits", async () => {
@@ -639,7 +837,7 @@ describe("large-plan agent tool contracts", () => {
           id: threadId,
           projectId: "proj",
           providerId: "acp-opencode",
-          environmentId: null,
+          environmentId: "env_brief",
           status: threadId === "thr_brief" ? "idle" : "idle",
           parentThreadId: threadId.startsWith("thr_worker") ? "thr_brief" : null,
         }),
@@ -662,7 +860,10 @@ describe("large-plan agent tool contracts", () => {
         timeline: () => ({ rows: [] }),
         interactions: { list: async () => [] },
       },
-    });
+      environments: {
+        get: async () => ({ id: "env_brief", hostId: "host_brief", path: "/srv/brief", branchName: "main" }),
+      },
+    }, () => ({ status: "valid", repository: "/srv/brief", commit: "d".repeat(40) }));
     const db = host.bb.storage.database();
     db.prepare(
       "UPDATE goals SET thread_id = 'thr_brief', status = 'active', max_workers = 1, verify_enabled = 1 WHERE thread_id = 'thr_sentinel'",

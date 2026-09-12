@@ -14,6 +14,13 @@ const MIN_WAIT_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_WAIT_TIMEOUT_MS = 600_000;
 
+export interface ValidatedWorkerBase {
+  hostId: string;
+  repository: string;
+  requestedRef: string;
+  commit: string;
+}
+
 const SPAWN_AGENT_DESCRIPTION = `
         Spawns an agent to work on the specified task. If your current task is \`/root/task1\` and you call ultragoal_spawn_agent with task_name "task_3" the agent will have canonical task name \`/root/task1/task_3\`.
 You are then able to refer to this agent as \`task_3\` or \`/root/task1/task_3\` interchangeably. However an agent \`/root/task2/task_3\` would only be able to communicate with this agent via its canonical name \`/root/task1/task_3\`.
@@ -636,6 +643,8 @@ export function createCollabStore(
     strictItemClaim?: boolean;
     /** Root-wide durable worker cap for scheduler-only strict spawns. */
     schedulerMaxWorkers?: number;
+    /** Host-validated scheduler source. Its peeled commit closes the ref race. */
+    validatedBase?: ValidatedWorkerBase;
   }): Promise<
     | { threadId: string; taskName: string; nickname: string; itemId: string | null }
     | { error: string }
@@ -652,6 +661,7 @@ export function createCollabStore(
       skipClaim,
       strictItemClaim,
       schedulerMaxWorkers,
+      validatedBase,
     } = args;
     const trimmed = args.message.trim();
     if (!trimmed) return { error: "Empty message can't be sent to an agent" };
@@ -790,7 +800,7 @@ export function createCollabStore(
       // environment would put concurrent writers in one directory.
       environment: {
         type: "host" as const,
-        hostId: parentHostId,
+        hostId: validatedBase?.hostId ?? parentHostId,
         workspace: {
           type: "managed-worktree" as const,
           // Branch from where integration LANDS, not from the repository
@@ -800,7 +810,9 @@ export function createCollabStore(
           // bases, one re-implementing a slice already merged, every one of
           // them heading for a conflict. A worker that starts behind the
           // integration point is wasted before it reads a line.
-          baseBranch: integrationBranch
+          baseBranch: validatedBase
+            ? { kind: "named" as const, name: validatedBase.commit }
+            : integrationBranch
             ? { kind: "named" as const, name: integrationBranch }
             : { kind: "default" as const },
         },
@@ -1137,6 +1149,7 @@ export function createCollabStore(
       message: string;
       skipClaim?: boolean;
       maxWorkers: number;
+      validatedBase?: ValidatedWorkerBase;
     }): Promise<
       | { threadId: string; taskName: string; nickname: string; itemId: string | null }
       | { error: string }
@@ -1153,6 +1166,7 @@ export function createCollabStore(
         skipClaim: args.skipClaim,
         strictItemClaim: Boolean(args.itemId) && !args.skipClaim,
         schedulerMaxWorkers: args.maxWorkers,
+        validatedBase: args.validatedBase,
       });
       return result;
     },

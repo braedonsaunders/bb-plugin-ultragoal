@@ -10,6 +10,28 @@ import { z } from "zod";
  * its own slices instead of leaving that to whoever notices the disk filling.
  */
 export const hostContract = defineRpcContract({
+  resolveCommit: {
+    input: z.object({
+      checkoutPath: z.string().min(1),
+      requestedRef: z.string().min(1),
+    }),
+    output: z.discriminatedUnion("status", [
+      z.object({
+        status: z.literal("valid"),
+        commit: z.string().regex(/^[0-9a-f]{40,64}$/),
+        repository: z.string().min(1),
+      }),
+      z.object({
+        status: z.literal("invalid"),
+        repository: z.string().min(1),
+      }),
+      z.object({
+        status: z.literal("operational_error"),
+        repository: z.string().min(1),
+        reason: z.string().min(1),
+      }),
+    ]),
+  },
   reclaimWorktree: {
     input: z.object({
       /** Absolute path of the checkout inside the managed worktree. */
