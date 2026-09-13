@@ -704,3 +704,83 @@ describe("durable finding remediation queue", () => {
     assert.equal(state.findings.get("thr_root", finding.id)!.itemId, null);
   });
 });
+
+describe("durable remediation provenance", () => {
+  it("marks each plugin-minted item as finding-owned, and nothing else", () => {
+    const state = stores();
+    const declared = state.items.add("thr_root", "Owner-declared telemetry slice", "pending", {
+      files: ["src/declared.ts"],
+      check: "npm test -- declared",
+    })!;
+    const coalesced = state.findings.report("thr_root", {
+      title: "Same-file defect",
+      file: "src/declared.ts:12",
+      evidence: "The finding shares one concrete file with the declared slice.",
+      fixFiles: ["src/declared.ts"],
+    }).finding;
+    const unowned = state.findings.report("thr_root", {
+      title: "Unowned defect",
+      file: "src/unowned.ts:3",
+      evidence: "Nothing in the plan owns this file.",
+      fixFiles: ["src/unowned.ts"],
+    }).finding;
+
+    const result = reconcileFindingQueue({
+      threadId: "thr_root",
+      findings: state.findings,
+      items: state.items,
+      maxStaffed: 2,
+    });
+    assert.equal(result.minted, 1);
+    assert.equal(state.findings.get("thr_root", coalesced.id)!.itemId, declared.id);
+    assert.equal(state.items.origin("thr_root", declared.id), null);
+    const mintedId = state.findings.get("thr_root", unowned.id)!.itemId!;
+    assert.notEqual(mintedId, declared.id);
+    assert.equal(state.items.origin("thr_root", mintedId), "finding");
+
+    // The distinction is a durable column, not an in-memory tag: a restarted
+    // store reads the same answer, and assigned findings do not mint again.
+    const restartedItems = createItemStore(state.host.bb);
+    const restartedFindings = createFindingStore(state.host.bb);
+    assert.equal(restartedItems.origin("thr_root", mintedId), "finding");
+    assert.equal(restartedItems.origin("thr_root", declared.id), null);
+    assert.equal(
+      reconcileFindingQueue({
+        threadId: "thr_root",
+        findings: restartedFindings,
+        items: restartedItems,
+        maxStaffed: 2,
+      }).minted,
+      0,
+    );
+  });
+
+  it("leaves a pre-existing item byte-for-byte when a finding coalesces into it", () => {
+    const state = stores();
+    const declared = state.items.add("thr_root", "Owner-held telemetry slice", "pending", {
+      files: ["src/telemetry.ts"],
+      check: "npm test -- telemetry",
+    })!;
+    const finding = state.findings.report("thr_root", {
+      title: "Coalesced telemetry defect",
+      file: "src/telemetry.ts:12",
+      evidence: "The finding shares one concrete file with the declared slice.",
+      fixFiles: ["src/telemetry.ts"],
+    }).finding;
+    const before = state.db.prepare("SELECT * FROM goal_items WHERE id = ?").get(declared.id);
+
+    const result = reconcileFindingQueue({
+      threadId: "thr_root",
+      findings: state.findings,
+      items: state.items,
+      maxStaffed: 1,
+    });
+    assert.equal(result.minted, 0);
+    assert.equal(state.findings.get("thr_root", finding.id)!.itemId, declared.id);
+    assert.equal(state.items.origin("thr_root", declared.id), null);
+    assert.deepEqual(
+      state.db.prepare("SELECT * FROM goal_items WHERE id = ?").get(declared.id),
+      before,
+    );
+  });
+});

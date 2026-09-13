@@ -1797,6 +1797,7 @@ export default function plugin(bb: BbPluginApi) {
     if (!item) return false;
     const verdict = remediationItemRetirement({
       item,
+      origin: items.origin(rootThreadId, itemId),
       linkedFindings: findings.list(rootThreadId).filter((finding) => finding.itemId === itemId),
       staffed:
         workersOnItem(rootThreadId, itemId).length > 0 ||
@@ -3399,7 +3400,7 @@ export default function plugin(bb: BbPluginApi) {
       // one of these as "check:(none) and a one-line step" and could not tell
       // it from an unbriefed item. Point at the contract, and when no check was
       // supplied say so, because nothing then gates the slice's completion.
-      const dedicated = items.add(
+      const dedicated = items.addRemediation(
         rootThreadId,
         [
           `Fix: ${result.finding.title} [${evidenceFile}] CONTEXT (audit findings: ${result.finding.id}).`,
@@ -3407,7 +3408,6 @@ export default function plugin(bb: BbPluginApi) {
         ]
           .filter(Boolean)
           .join(" "),
-        "pending",
         { deps: [], files: scope, check: input.check ?? null },
       );
       if (dedicated && !findings.linkItem(rootThreadId, result.finding.id, dedicated.id)) {
@@ -4586,6 +4586,7 @@ export default function plugin(bb: BbPluginApi) {
         if (remove) {
           const verdict = remediationItemRetirement({
             item,
+            origin: items.origin(threadId, itemId),
             linkedFindings: findings.list(threadId).filter((finding) => finding.itemId === itemId),
             staffed:
               workersOnItem(threadId, itemId).length > 0 ||

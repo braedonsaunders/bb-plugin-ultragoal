@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createFakePluginHost, type FakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createItemStore } from "./items.ts";
+import { createItemStore, type PlanPatchItem } from "./items.ts";
 
 const hosts: FakePluginHost[] = [];
 
@@ -27,7 +27,7 @@ function itemStore() {
       check_cmd TEXT
     )
   `);
-  return { store: createItemStore(host.bb), db: host.bb.storage.database() };
+  return { host, store: createItemStore(host.bb), db: host.bb.storage.database() };
 }
 
 describe("patch-style plans", () => {
@@ -110,5 +110,87 @@ describe("patch-style plans", () => {
       /forced patch failure/,
     );
     assert.deepEqual(store.list("thr_root"), before);
+  });
+});
+
+describe("durable item provenance", () => {
+  it("persists finding origin across a patch, a transfer rewrite and a store restart", () => {
+    const { host, store, db } = itemStore();
+    const minted = store.addRemediation("thr_root", "Fix: a defect [src/a.ts]", {
+      files: ["src/a.ts"],
+      check: "npm test -- a",
+    })!;
+    assert.equal(store.origin("thr_root", minted.id), "finding");
+    const storedOrigin = () =>
+      (db.prepare("SELECT origin FROM goal_items WHERE id = ?").get(minted.id) as {
+        origin: string | null;
+      }).origin;
+    assert.equal(storedOrigin(), "finding");
+
+    store.patch(
+      "thr_root",
+      [{ id: minted.id, step: "Fix: a defect [src/a.ts]", status: "in_progress" }],
+      [],
+    );
+    assert.equal(storedOrigin(), "finding", "a status patch must carry provenance, not reset it");
+
+    // The store's full-rewrite path deletes and reinserts every row; a naive
+    // rewrite that forgot the column would silently un-own the item.
+    store.replace("thr_root", [
+      { id: minted.id, step: "Fix: a defect [src/a.ts]", status: "pending" },
+    ]);
+    assert.equal(storedOrigin(), "finding");
+
+    // Root transfer moves items with an in-place thread_id rewrite (the same
+    // statement lib/root-transfer.ts runs), so the row must read as owned under
+    // its new thread and not as a fresh, unowned row.
+    db.prepare("UPDATE goal_items SET thread_id = ? WHERE thread_id = ?").run(
+      "thr_moved",
+      "thr_root",
+    );
+    assert.equal(store.origin("thr_moved", minted.id), "finding");
+
+    assert.equal(createItemStore(host.bb).origin("thr_moved", minted.id), "finding");
+  });
+
+  it("never lets an ordinary plan patch claim finding ownership", () => {
+    const { store, db } = itemStore();
+    // The untrusted shape a tool call reaches the store with: a plan entry that
+    // carries an origin key. Ordinary patches create and edit work, so an
+    // origin they supply must never count as durable finding ownership.
+    const untrusted = { step: "Owner-declared slice", status: "pending", origin: "finding" };
+    const forged = untrusted as PlanPatchItem;
+    const [created] = store.patch("thr_root", [forged], []).items;
+    assert.equal(store.origin("thr_root", created!.id), null);
+
+    store.patch("thr_root", [{ ...forged, id: created!.id } as PlanPatchItem], []);
+    const stored = db.prepare("SELECT origin FROM goal_items WHERE id = ?").get(created!.id) as {
+      origin: string | null;
+    };
+    assert.equal(stored.origin, null);
+    assert.equal(store.origin("thr_root", created!.id), null);
+
+    assert.equal(store.origin("thr_root", "itm_missing"), null);
+  });
+
+  it("reads provenance an older build wrote — or a null legacy row — as none", () => {
+    const { store, db } = itemStore();
+    const legacy = store.add("thr_root", "Native-plan mirror left behind by an older build")!;
+    assert.equal(store.origin("thr_root", legacy.id), null);
+    // 0.8.0 removed the native mirror but left its rows behind; "native" is not
+    // remediation provenance, so the retirement gate must not read it as any.
+    db.prepare("UPDATE goal_items SET origin = 'native' WHERE id = ?").run(legacy.id);
+    assert.equal(store.origin("thr_root", legacy.id), null);
+    // Fail closed is not the same as rewrite: an ordinary patch must carry the
+    // stored bytes through untouched rather than normalizing the column.
+    store.patch(
+      "thr_root",
+      [{ id: legacy.id, step: "Legacy mirror, retitled", status: "pending" }],
+      [],
+    );
+    const stored = db.prepare("SELECT origin FROM goal_items WHERE id = ?").get(legacy.id) as {
+      origin: string | null;
+    };
+    assert.equal(stored.origin, "native");
   });
 });

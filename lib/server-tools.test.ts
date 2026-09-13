@@ -1088,3 +1088,142 @@ describe("resolve_finding end to end", () => {
     assert.equal(findings.get("thr_root", rec.finding.id)!.status, "open");
   });
 });
+
+describe("remediation retirement end to end", () => {
+  it("retires only a plugin-minted finding item, never a pre-existing one a finding coalesced into", async () => {
+    const host = registeredHost();
+    const db = host.bb.storage.database();
+    // max_workers 0 keeps this focused on retirement: no scheduler spawn runs.
+    db.prepare(
+      "UPDATE goals SET thread_id = 'thr_origin', status = 'active', max_workers = 0 WHERE thread_id = 'thr_sentinel'",
+    ).run();
+    const items = createItemStore(host.bb);
+    const findings = createFindingStore(host.bb);
+
+    // The CFP#37 shape: an owner-held slice with its own scope predates any
+    // finding. A same-file defect coalesces onto it; dismissing that defect
+    // must leave the owner's work exactly as it was.
+    const declared = items.add("thr_origin", "Runtime telemetry isolation", "pending", {
+      files: ["src/telemetry.ts"],
+      check: "npm test -- telemetry",
+    })!;
+    // The regression item was owner-held, not merely pending.
+    const held = await host.harness.behavior.runCli([
+      "release", declared.id, "--hold", "--thread", "thr_origin",
+    ]);
+    assert.equal(held.exitCode, 0, held.stderr);
+    const filed = await host.harness.behavior.runCli([
+      "finding", "A same-file telemetry defect",
+      "--file", "src/telemetry.ts:12",
+      "--evidence", "The defect shares one concrete file with the declared slice.",
+      "--fix-files", "src/telemetry.ts",
+      "--thread", "thr_origin",
+    ]);
+    assert.equal(filed.exitCode, 0, filed.stderr);
+    const coalesced = findings.list("thr_origin").find(
+      (row) => row.title === "A same-file telemetry defect",
+    )!;
+    assert.equal(coalesced.itemId, declared.id);
+    const before = db.prepare("SELECT * FROM goal_items WHERE id = ?").get(declared.id);
+
+    const dismissed = await host.harness.behavior.runCli([
+      "resolve", coalesced.id, "--as", "not-a-defect",
+      "--evidence", "Same-file overlap only; the owner requirement still stands.",
+      "--thread", "thr_origin",
+    ]);
+    assert.equal(dismissed.exitCode, 0, dismissed.stderr);
+    assert.doesNotMatch(dismissed.stdout ?? "", /retired its now-orphaned remediation item/);
+    assert.deepEqual(db.prepare("SELECT * FROM goal_items WHERE id = ?").get(declared.id), before);
+    assert.equal(items.origin("thr_origin", declared.id), null);
+    const stillHeld = await host.harness.behavior.runCli([
+      "item", declared.id, "--thread", "thr_origin",
+    ]);
+    assert.equal(stillHeld.exitCode, 0, stillHeld.stderr);
+    assert.match(stillHeld.stdout ?? "", /HELD out of scheduling/);
+
+    // The CLI removal guard agrees with automatic retirement and says why.
+    const refused = await host.harness.behavior.runCli([
+      "item", declared.id, "--remove", "--thread", "thr_origin",
+    ]);
+    assert.equal(refused.exitCode, 1);
+    assert.match(refused.stderr ?? "", /not a remediation item/);
+    assert.ok(items.list("thr_origin").some((row) => row.id === declared.id));
+
+    // A defect nothing owns still mints its own slice from both plugin seams,
+    // and resolving each finding retires the slice it created.
+    const dedicated = await host.harness.behavior.runCli([
+      "finding", "A dedicated telemetry defect",
+      "--file", "src/dedicated.ts:1",
+      "--evidence", "Nothing in the plan owns this file.",
+      "--fix-files", "src/dedicated.ts",
+      "--thread", "thr_origin",
+    ]);
+    assert.equal(dedicated.exitCode, 0, dedicated.stderr);
+    const owned = await host.harness.behavior.runCli([
+      "finding", "An auditor-owned telemetry defect",
+      "--file", "src/audited.ts:1",
+      "--evidence", "Only this finding's own slice may repair it.",
+      "--fix-files", "src/audited.ts",
+      "--own-slice",
+      "--thread", "thr_origin",
+    ]);
+    assert.equal(owned.exitCode, 0, owned.stderr);
+
+    for (const title of ["A dedicated telemetry defect", "An auditor-owned telemetry defect"]) {
+      const finding = findings.list("thr_origin").find((row) => row.title === title)!;
+      assert.ok(finding.itemId, `${title} should have minted a slice`);
+      assert.equal(items.origin("thr_origin", finding.itemId!), "finding");
+    }
+
+    // The auto-minted slice is the one a live worker can protect: a durable
+    // claim owns it, so neither the resolution pass nor an explicit removal may
+    // delete it from under them. A reservation is how the scheduler holds a
+    // slice between claim and spawn, and itemClaimants already counts it.
+    const dedicatedFinding = findings.list("thr_origin").find(
+      (row) => row.title === "A dedicated telemetry defect",
+    )!;
+    const dedicatedItemId = dedicatedFinding.itemId!;
+    db.prepare(`
+      INSERT INTO collab_item_reservations (root_thread_id, item_id, claim_token, created_at, expires_at, slot_limit)
+      VALUES ('thr_origin', ?, 'tok_dedicated_worker', ?, ?, 1)
+    `).run(dedicatedItemId, Date.now(), Date.now() + 60 * 60 * 1000);
+
+    const resolvedBusy = await host.harness.behavior.runCli([
+      "resolve", dedicatedFinding.id, "--as", "not-a-defect",
+      "--evidence", "Review found the behaviour is already covered.",
+      "--thread", "thr_origin",
+    ]);
+    assert.equal(resolvedBusy.exitCode, 0, resolvedBusy.stderr);
+    assert.doesNotMatch(resolvedBusy.stdout ?? "", /retired its now-orphaned remediation item/);
+    assert.ok(items.list("thr_origin").some((row) => row.id === dedicatedItemId));
+
+    const busyRefusal = await host.harness.behavior.runCli([
+      "item", dedicatedItemId, "--remove", "--thread", "thr_origin",
+    ]);
+    assert.equal(busyRefusal.exitCode, 1);
+    assert.match(busyRefusal.stderr ?? "", /staffed/);
+
+    db.prepare("DELETE FROM collab_item_reservations WHERE claim_token = 'tok_dedicated_worker'").run();
+    const removed = await host.harness.behavior.runCli([
+      "item", dedicatedItemId, "--remove", "--thread", "thr_origin",
+    ]);
+    assert.equal(removed.exitCode, 0, removed.stderr);
+    assert.match(removed.stdout ?? "", /Removed/);
+    assert.equal(items.list("thr_origin").some((row) => row.id === dedicatedItemId), false);
+
+    // The auditor's own slice needs no worker protection: nothing holds it, so
+    // resolving its finding retires it automatically.
+    const ownedFinding = findings.list("thr_origin").find(
+      (row) => row.title === "An auditor-owned telemetry defect",
+    )!;
+    const ownedItemId = ownedFinding.itemId!;
+    const resolvedOwned = await host.harness.behavior.runCli([
+      "resolve", ownedFinding.id, "--as", "not-a-defect",
+      "--evidence", "Review found the behaviour is already covered.",
+      "--thread", "thr_origin",
+    ]);
+    assert.equal(resolvedOwned.exitCode, 0, resolvedOwned.stderr);
+    assert.match(resolvedOwned.stdout ?? "", /retired its now-orphaned remediation item/);
+    assert.equal(items.list("thr_origin").some((row) => row.id === ownedItemId), false);
+  });
+});

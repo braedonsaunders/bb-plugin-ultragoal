@@ -252,10 +252,11 @@ export function reconcileFindingQueue(input: {
     }
 
     if (staffed.size >= maxStaffed) continue;
-    const fixItem = items.add(
+    // Minted here means minted by the plugin for this finding: that is the only
+    // provenance remediation retirement accepts as proof the row is disposable.
+    const fixItem = items.addRemediation(
       threadId,
       `Fix: ${finding.title} [${normalizeFindingFile(finding.file)}]`,
-      "pending",
       { deps: [], files: finding.fixFiles, check: finding.check },
     );
     if (!fixItem) break;

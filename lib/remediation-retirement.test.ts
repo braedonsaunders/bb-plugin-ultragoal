@@ -8,6 +8,7 @@ const fixed = [{ status: "fixed" }];
 function verdict(overrides = {}) {
   return remediationItemRetirement({
     item: pending,
+    origin: "finding",
     linkedFindings: fixed,
     staffed: false,
     ...overrides,
@@ -38,9 +39,32 @@ describe("retiring an orphaned remediation item", () => {
   it("never removes an item no finding ever pointed at", () => {
     // A declared deliverable or an owner-written plan step exists on its own
     // terms; a quiet finding queue is not a reason to delete it.
-    const v = verdict({ linkedFindings: [] });
+    const v = verdict({ origin: null, linkedFindings: [] });
     assert.equal(v.retire, false);
     assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
+  });
+
+  it("never removes a pre-existing item a finding was merely coalesced into", () => {
+    // The defect that produced this gate: a same-file finding attached to the
+    // owner's held CFP#37 item, and its dismissal deleted the item. A mutable
+    // finding link proves overlap, never ownership.
+    const v = verdict({ origin: null });
+    assert.equal(v.retire, false);
+    assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
+  });
+
+  it("fails closed for legacy provenance it does not recognize", () => {
+    const v = verdict({ origin: "native" });
+    assert.equal(v.retire, false);
+    assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
+  });
+
+  it("leaves a finding-origin item alone once every link has been detached", () => {
+    // Fail closed: provenance alone is not proof that the item's work is gone,
+    // so retirement still needs at least one historical link to reason about.
+    const v = verdict({ linkedFindings: [] });
+    assert.equal(v.retire, false);
+    assert.match(v.retire === false ? v.reason : "", /no linked finding/);
   });
 
   it("leaves work someone is doing alone", () => {
@@ -62,7 +86,11 @@ describe("retiring an orphaned remediation item", () => {
   });
 
   it("checks scope before status, so a deliverable is refused for the honest reason", () => {
-    const v = verdict({ item: { id: "itm_1", status: "completed" }, linkedFindings: [] });
+    const v = verdict({
+      item: { id: "itm_1", status: "completed" },
+      origin: null,
+      linkedFindings: [],
+    });
     assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
   });
 });
