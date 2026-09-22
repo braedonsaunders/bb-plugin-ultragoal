@@ -1,5 +1,12 @@
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import {
+  createFakePluginHost,
+  makeThreadResponse,
+  type FakePluginHost,
+} from "@get-bb/plugin-sdk/testing";
+import { createCollabStore } from "./collab.ts";
+import { createGoalStore } from "./store.ts";
 import {
   coalescingFilesOverlap,
   findingFilesMatchItem,
@@ -24,6 +31,56 @@ import {
   threadIsSettledForSubmit,
   verifierStillDeciding,
 } from "./scheduler.ts";
+
+const retirementHosts: FakePluginHost[] = [];
+
+afterEach(async () => {
+  while (retirementHosts.length > 0) {
+    await retirementHosts.pop()!.harness.lifecycle.dispose();
+  }
+});
+
+function retirementFixture(hostStatus: "active" | "idle") {
+  const host = createFakePluginHost({
+    pluginId: `scheduler-retirement-${retirementHosts.length}`,
+    sdk: {
+      threads: {
+        get: ({ threadId }) => makeThreadResponse({ id: threadId, status: hostStatus }),
+      },
+    },
+  });
+  retirementHosts.push(host);
+  createGoalStore(host.bb);
+  const collab = createCollabStore(host.bb);
+  const db = host.bb.storage.database();
+  assert.equal(collab.setWorkerCap("thr_root", 1), true);
+  db.prepare(`
+    INSERT INTO collab_agents (
+      thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+      item_id, role
+    ) VALUES ('thr_itemless', 'thr_root', 'thr_root', '/root/legacy', 1, NULL, 'worker')
+  `).run();
+  return { host, collab, db };
+}
+
+async function reconcileFinishedWorkers(
+  fixture: ReturnType<typeof retirementFixture>,
+  items: readonly { id: string; status: "pending" | "in_progress" | "completed" }[],
+): Promise<string[]> {
+  const candidates = finishedWorkerRetirementCandidates(
+    fixture.collab.durableRowsForRoot("thr_root"),
+    items,
+    () => false,
+  );
+  const retired: string[] = [];
+  for (const threadId of candidates) {
+    const hostStatus = (await fixture.host.bb.sdk.threads.get({ threadId })).status ?? null;
+    if (!retirementPermittedByHost(hostStatus)) continue;
+    fixture.collab.forget(threadId);
+    retired.push(threadId);
+  }
+  return retired;
+}
 
 describe("planWorkerRelease", () => {
   const ROOT = "thr_root";
@@ -327,11 +384,67 @@ describe("finishedWorkerRetirementCandidates", () => {
     assert.deepEqual(retire, []);
   });
 
-  it("never retires verifiers or itemless crew", () => {
+  it("retires an inactive durable itemless row and restores SQL capacity idempotently", async () => {
+    const fixture = retirementFixture("idle");
+    const insertReplacement = fixture.db.prepare(`
+      INSERT INTO collab_agents (
+        thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+        item_id, role
+      ) VALUES ('thr_replacement', 'thr_root', 'thr_root', '/root/replacement', 2,
+        'itm_replacement', 'worker')
+    `);
+
+    assert.throws(() => insertReplacement.run(), /root worker capacity is full/);
+    assert.deepEqual(await reconcileFinishedWorkers(fixture, items), ["thr_itemless"]);
+    const firstRetiredAt = fixture.db.prepare(
+      "SELECT retired_at FROM collab_agents WHERE thread_id = 'thr_itemless'",
+    ).pluck().get() as number;
+    assert.ok(firstRetiredAt > 0);
+
+    assert.deepEqual(await reconcileFinishedWorkers(fixture, items), []);
+    assert.equal(
+      fixture.db.prepare(
+        "SELECT retired_at FROM collab_agents WHERE thread_id = 'thr_itemless'",
+      ).pluck().get(),
+      firstRetiredAt,
+    );
+    assert.equal(insertReplacement.run().changes, 1);
+    assert.equal(
+      fixture.db.prepare(`
+        SELECT COUNT(*) FROM collab_agents
+        WHERE root_thread_id = 'thr_root' AND retired_at IS NULL
+          AND COALESCE(role, 'worker') != 'verifier'
+      `).pluck().get(),
+      1,
+    );
+  });
+
+  it("keeps a live durable itemless row counted by the SQL capacity fence", async () => {
+    const fixture = retirementFixture("active");
+    assert.deepEqual(await reconcileFinishedWorkers(fixture, items), []);
+    assert.ok(fixture.collab.rowOf("thr_itemless"));
+    assert.equal(
+      fixture.db.prepare(
+        "SELECT retired_at FROM collab_agents WHERE thread_id = 'thr_itemless'",
+      ).pluck().get(),
+      null,
+    );
+    assert.throws(
+      () => fixture.db.prepare(`
+        INSERT INTO collab_agents (
+          thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+          item_id, role
+        ) VALUES ('thr_blocked', 'thr_root', 'thr_root', '/root/blocked', 2,
+          'itm_blocked', 'worker')
+      `).run(),
+      /root worker capacity is full/,
+    );
+  });
+
+  it("never retires verifiers", () => {
     const retire = finishedWorkerRetirementCandidates(
       [
         { role: "verifier", itemId: "itm_done", threadId: "thr_verifier" },
-        { role: "worker", itemId: null, threadId: "thr_itemless" },
       ],
       items,
       noVerifier,

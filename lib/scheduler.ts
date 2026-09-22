@@ -185,8 +185,11 @@ export function occupyingWorkerIds(
  *
  * A worker is only a candidate when its slice is `completed` or gone from the
  * plan entirely; a `pending` or `in_progress` slice may still be handed back to
- * the same worker. One a verifier still reads as its source is never a
- * candidate, because the verifier resolves its slice through that row.
+ * the same worker. Legacy itemless rows are candidates too: the durable
+ * capacity fence counts them, and only the caller's direct host-status check
+ * can distinguish an inactive leak from a genuinely live itemless worker. One
+ * that a verifier still reads as its source is never a candidate, because the
+ * verifier resolves its slice through that row.
  */
 export function finishedWorkerRetirementCandidates(
   workers: readonly { threadId: string; itemId: string | null; role: string | null }[],
@@ -196,8 +199,8 @@ export function finishedWorkerRetirementCandidates(
   const byId = new Map(items.map((item) => [item.id, item.status]));
   const retire: string[] = [];
   for (const worker of workers) {
-    if (worker.role === "verifier" || !worker.itemId) continue;
-    const status = byId.get(worker.itemId);
+    if (worker.role === "verifier") continue;
+    const status = worker.itemId === null ? undefined : byId.get(worker.itemId);
     if (status !== undefined && status !== "completed") continue;
     if (hasLiveVerifier(worker.threadId)) continue;
     retire.push(worker.threadId);
