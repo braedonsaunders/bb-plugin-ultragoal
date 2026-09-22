@@ -28,6 +28,7 @@ export interface GoalSettingOverrides {
   workerModel: string | null;
   workerReasoning: string | null;
   workerServiceTier: string | null;
+  workerPermissionMode: string | null;
   autoIntegrateCompletedSlices: boolean | null;
   reclaimMergedWorktrees: boolean | null;
   readLocalProviderData: boolean | null;
@@ -47,6 +48,7 @@ export interface ResolvedGoalSettings {
   workerModel: string;
   workerReasoning: ReasoningLevel | "";
   workerServiceTier: ServiceTier | null;
+  workerPermissionMode: AgentPermissionMode;
   /** Squash-merge completed managed slice branches into the goal's base branch. */
   autoIntegrateCompletedSlices: boolean;
   /** Delete clean managed worktrees and their branches after integration. */
@@ -72,6 +74,12 @@ export interface GoalSettingDefaults {
   verifyByDefault: boolean;
   verifyProvider: string;
   verifyModel: string;
+  verifyReasoning: ReasoningLevel;
+  verifyServiceTier: ServiceTier | null;
+  workerProvider: string;
+  workerModel: string;
+  workerReasoning: ReasoningLevel;
+  workerServiceTier: ServiceTier | null;
   autoContinue: boolean;
   progressUpdateMinutes: number;
   maxWorkers: number;
@@ -92,29 +100,38 @@ export function resolveGoalSettings(
   overrides: GoalSettingOverrides,
   defaults: GoalSettingDefaults,
 ): ResolvedGoalSettings {
-  const workerProvider = overrides.workerProvider?.trim() ?? "";
+  const workerProvider = overrides.workerProvider?.trim() || defaults.workerProvider;
+  const workerModel = overrides.workerModel?.trim() || defaults.workerModel;
   return {
     verifyEnabled: overrides.verifyEnabled ?? defaults.verifyByDefault,
     verifyProvider: overrides.verifyProvider?.trim() || defaults.verifyProvider,
     verifyModel: overrides.verifyModel?.trim() || defaults.verifyModel,
     verifyReasoning: parseReasoningLevel(
       overrides.verifyReasoning,
-      DEFAULT_REASONING_LEVEL,
+      defaults.verifyReasoning,
     ),
-    verifyServiceTier: parseServiceTier(overrides.verifyServiceTier),
+    verifyServiceTier:
+      overrides.verifyServiceTier == null
+        ? defaults.verifyServiceTier
+        : parseServiceTier(overrides.verifyServiceTier),
     autoContinue: overrides.autoContinue ?? defaults.autoContinue,
     progressUpdateMinutes:
       overrides.progressUpdateMinutes ?? defaults.progressUpdateMinutes,
     maxWorkers: overrides.maxWorkers ?? defaults.maxWorkers,
     maxOpenFindings: overrides.maxOpenFindings ?? defaults.maxOpenFindings,
     workerProvider,
-    workerModel: overrides.workerModel?.trim() ?? "",
+    workerModel,
     workerReasoning: workerProvider
-      ? parseReasoningLevel(overrides.workerReasoning)
+      ? parseReasoningLevel(overrides.workerReasoning, defaults.workerReasoning)
       : "",
     workerServiceTier: workerProvider
-      ? parseServiceTier(overrides.workerServiceTier)
+      ? overrides.workerServiceTier == null
+        ? defaults.workerServiceTier
+        : parseServiceTier(overrides.workerServiceTier)
       : null,
+    workerPermissionMode: normalizePermissionMode(
+      overrides.workerPermissionMode ?? defaults.workerPermissionMode,
+    ),
     autoIntegrateCompletedSlices:
       overrides.autoIntegrateCompletedSlices ?? defaults.autoIntegrateCompletedSlices,
     reclaimMergedWorktrees:

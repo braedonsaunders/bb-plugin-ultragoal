@@ -25,6 +25,11 @@ export interface ItemMeta {
   check?: string | null;
 }
 
+/** Durable proof that the plugin minted a row solely for a finding. */
+export type ItemOrigin = "finding";
+
+const FINDING_ORIGIN: ItemOrigin = "finding";
+
 export type PlanPatchItem = {
   id?: string;
   step: string;
@@ -220,9 +225,43 @@ export function createItemStore(bb: BbPluginApi) {
     return { items: slots.map((slot) => rowToItem(slot.row)), removed: removalIds.size };
   };
 
+  const insert = (
+    threadId: string,
+    step: string,
+    status: GoalItemStatus,
+    meta: ItemMeta | undefined,
+    origin: ItemOrigin | null,
+  ): GoalItem | null => {
+    const text = currentSliceTitle(step);
+    if (!text) return null;
+    const existing = listStmt.all(threadId) as ItemRow[];
+    const now = Date.now();
+    const row: ItemRow = {
+      id: newId(),
+      thread_id: threadId,
+      step: text,
+      status,
+      sort_order: existing.length,
+      created_at: now,
+      updated_at: now,
+      origin,
+      deps: meta?.deps ? JSON.stringify(meta.deps) : null,
+      files: meta?.files ? JSON.stringify(meta.files) : null,
+      check_cmd: meta?.check?.trim() || null,
+    };
+    insertStmt.run(row);
+    return rowToItem(row);
+  };
+
   return {
     list(threadId: string): GoalItem[] {
       return (listStmt.all(threadId) as ItemRow[]).map(rowToItem);
+    },
+
+    /** Unknown and legacy origin values deliberately fail closed. */
+    origin(threadId: string, itemId: string): ItemOrigin | null {
+      const row = (listStmt.all(threadId) as ItemRow[]).find((entry) => entry.id === itemId);
+      return row?.origin === FINDING_ORIGIN ? FINDING_ORIGIN : null;
     },
 
     /** Stable durable age ordering for conservative remediation repair. */
@@ -370,25 +409,12 @@ export function createItemStore(bb: BbPluginApi) {
       status: GoalItemStatus = "pending",
       meta?: ItemMeta,
     ): GoalItem | null {
-      const text = currentSliceTitle(step);
-      if (!text) return null;
-      const existing = listStmt.all(threadId) as ItemRow[];
-      const now = Date.now();
-      const row: ItemRow = {
-        id: newId(),
-        thread_id: threadId,
-        step: text,
-        status,
-        sort_order: existing.length,
-        created_at: now,
-        updated_at: now,
-        origin: null,
-        deps: meta?.deps ? JSON.stringify(meta.deps) : null,
-        files: meta?.files ? JSON.stringify(meta.files) : null,
-        check_cmd: meta?.check?.trim() || null,
-      };
-      insertStmt.run(row);
-      return rowToItem(row);
+      return insert(threadId, step, status, meta, null);
+    },
+
+    /** The only write path allowed to claim finding ownership. */
+    addRemediation(threadId: string, step: string, meta?: ItemMeta): GoalItem | null {
+      return insert(threadId, step, "pending", meta, FINDING_ORIGIN);
     },
 
     setStatus(threadId: string, itemId: string, status: GoalItemStatus): GoalItem | null {

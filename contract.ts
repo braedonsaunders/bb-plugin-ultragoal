@@ -48,6 +48,21 @@ export const goalAgentStatusSchema = z.enum([
 
 export const goalAgentRoleSchema = z.enum(["worker", "verifier"]);
 
+export const executionStateSchema = z.object({
+  providerId: z.string(),
+  model: z.string(),
+  reasoningLevel: reasoningLevelSchema,
+  serviceTier: serviceTierSchema.nullable(),
+  permissionMode: z.enum(["auto", "accept-edits", "full"]),
+});
+
+export const agentExecutionSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  requested: executionStateSchema,
+  actual: executionStateSchema.nullable(),
+  mismatches: z.array(z.string()),
+});
+
 export const goalAgentSchema = z.object({
   threadId: z.string(),
   taskName: z.string(),
@@ -57,6 +72,7 @@ export const goalAgentSchema = z.object({
   role: goalAgentRoleSchema,
   status: goalAgentStatusSchema,
   summary: z.string().nullable(),
+  execution: agentExecutionSchema.nullable().default(null),
 });
 
 // One rendered row in Now: in-progress work, attributed to whoever is on it.
@@ -92,6 +108,7 @@ export const goalSettingsSchema = z.object({
   workerModel: z.string(),
   workerReasoning: z.union([reasoningLevelSchema, z.literal("")]),
   workerServiceTier: serviceTierSchema.nullable(),
+  workerPermissionMode: z.enum(["auto", "accept-edits", "full"]),
   /** Off by default: squash-merge completed managed worker branches. */
   autoIntegrateCompletedSlices: z.boolean(),
   /** Off by default: remove a clean managed worktree and branch after integration. */
@@ -167,6 +184,22 @@ export const goalSnapshotSchema = z.object({
   now: z.array(nowRowSchema),
   next: z.array(goalItemSchema),
   settings: goalSettingsSchema,
+  execution: z.object({
+    revision: z.number().int().nonnegative(),
+    globalDefaults: z.object({
+      worker: executionStateSchema,
+      verifier: executionStateSchema,
+    }),
+    overrides: z.object({
+      worker: executionStateSchema.partial().nullable(),
+      verifier: executionStateSchema.partial().nullable(),
+    }),
+    effective: z.object({
+      worker: executionStateSchema,
+      verifier: executionStateSchema,
+    }),
+    configurationError: z.string().nullable(),
+  }),
   /** User-authored standing rules shown and edited only in the UltraGoal pane. */
   standingBrief: standingBriefSchema.nullable().default(null),
   findings: z
@@ -208,6 +241,25 @@ export type GoalSettings = z.infer<typeof goalSettingsSchema>;
 export type GoalSnapshot = z.infer<typeof goalSnapshotSchema>;
 
 export const rpcContract = defineRpcContract({
+  start: {
+    input: z.object({
+      threadId: z.string().min(1),
+      objective: z.string().min(1),
+      tokenBudget: z.number().int().positive().nullable().optional(),
+      maxWorkers: z.number().int().min(0).max(16).optional(),
+      verifyEnabled: z.boolean().optional(),
+      workerProvider: z.string().min(1).optional(),
+      workerModel: z.string().min(1).optional(),
+      workerReasoning: reasoningLevelSchema.optional(),
+      workerServiceTier: serviceTierSchema.nullable().optional(),
+      workerPermissionMode: z.enum(["auto", "accept-edits", "full"]).optional(),
+      verifyProvider: z.string().min(1).optional(),
+      verifyModel: z.string().min(1).optional(),
+      verifyReasoning: reasoningLevelSchema.optional(),
+      verifyServiceTier: serviceTierSchema.nullable().optional(),
+    }).strict(),
+    output: z.object({ goal: goalSnapshotSchema.nullable() }),
+  },
   getGoal: {
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: z.object({
@@ -296,6 +348,8 @@ export const rpcContract = defineRpcContract({
         workerModel: z.string().nullable().optional(),
         workerReasoning: reasoningLevelSchema.nullable().optional(),
         workerServiceTier: serviceTierSchema.nullable().optional(),
+        workerPermissionMode: z.enum(["auto", "accept-edits", "full"]).nullable().optional(),
+        replaceActiveWorkers: z.boolean().optional(),
         autoIntegrateCompletedSlices: z.boolean().optional(),
         reclaimMergedWorktrees: z.boolean().optional(),
         readLocalProviderData: z.boolean().optional(),
@@ -329,6 +383,7 @@ export const rpcContract = defineRpcContract({
           displayName: z.string(),
           available: z.boolean(),
           supportsServiceTier: z.boolean(),
+          permissionModes: z.array(z.enum(["auto", "accept-edits", "full"])),
           brandPrefix: z.string().optional(),
           models: z.array(
             z.object({
@@ -344,6 +399,19 @@ export const rpcContract = defineRpcContract({
           ),
         }),
       ),
+    }),
+  },
+  replaceWorkers: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
+    output: z.object({
+      completed: z.boolean(),
+      replacements: z.array(z.object({
+        oldThreadId: z.string(),
+        newThreadId: z.string(),
+        itemId: z.string(),
+        actual: executionStateSchema.nullable(),
+      })),
+      paused: z.object({ threadId: z.string(), itemId: z.string(), risk: z.string() }).nullable(),
     }),
   },
   listCrews: {

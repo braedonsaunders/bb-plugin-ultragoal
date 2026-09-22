@@ -55,6 +55,7 @@ import {
 } from "./lib/deliverables.js";
 import { remediationItemRetirement } from "./lib/remediation-retirement.js";
 import { createStaffingHoldStore } from "./lib/staffing-hold.js";
+import { createInvalidBaseSuppressionStore } from "./lib/invalid-base-suppressions.js";
 import { parseAttribution, type CommitLookup, type CommitResolver } from "./lib/attribution.js";
 import { createIntegrationRecordStore } from "./lib/integration-record.js";
 import { hostContract } from "./host-contract.js";
@@ -145,6 +146,11 @@ import {
 import {
   BRAND_PREFIX,
   catalogModelsFromOptions,
+  DEFAULT_REASONING_LEVEL,
+  isReasoningLevel,
+  isServiceTier,
+  parseReasoningLevel,
+  parseServiceTier,
   type CatalogModel,
   type CatalogProvider,
 } from "./lib/execution.js";
@@ -177,6 +183,35 @@ function snapshotOf(
 ): GoalSnapshot {
   const itemList = items.list(goal.threadId);
   const pane = projectPane(goal.threadId, itemList, agents, rootRunning);
+  const resolved = resolveGoalSettings(
+    {
+      verifyEnabled: goal.verifyEnabledOverride,
+      verifyProvider: goal.verifyProviderOverride,
+      verifyModel: goal.verifyModelOverride,
+      verifyReasoning: goal.verifyReasoningOverride,
+      verifyServiceTier: goal.verifyServiceTierOverride,
+      autoContinue: goal.autoContinueOverride,
+      progressUpdateMinutes: goal.progressUpdateMinutesOverride,
+      maxWorkers: goal.maxWorkersOverride,
+      maxOpenFindings: null,
+      workerProvider: goal.workerProviderOverride,
+      workerModel: goal.workerModelOverride,
+      workerReasoning: goal.workerReasoningOverride,
+      workerServiceTier: goal.workerServiceTierOverride,
+      workerPermissionMode: goal.workerPermissionModeOverride,
+      autoIntegrateCompletedSlices: goal.autoIntegrateCompletedSlicesOverride,
+      reclaimMergedWorktrees: goal.reclaimMergedWorktreesOverride,
+      readLocalProviderData: goal.readLocalProviderDataOverride,
+    },
+    snapshotDefaults,
+  );
+  const executionState = (
+    providerId: string,
+    model: string,
+    reasoningLevel: ReturnType<typeof parseReasoningLevel>,
+    serviceTier: ReturnType<typeof parseServiceTier>,
+    permissionMode: "auto" | "accept-edits" | "full",
+  ) => ({ providerId, model, reasoningLevel, serviceTier, permissionMode });
   return {
     threadId: goal.threadId,
     objective: goal.objective,
@@ -196,33 +231,46 @@ function snapshotOf(
     agents,
     now: pane.now,
     next: pane.next,
-    settings: resolveGoalSettings(
-      {
-        verifyEnabled: goal.verifyEnabledOverride,
-        verifyProvider: goal.verifyProviderOverride,
-        verifyModel: goal.verifyModelOverride,
-        verifyReasoning: goal.verifyReasoningOverride,
-        verifyServiceTier: goal.verifyServiceTierOverride,
-        autoContinue: goal.autoContinueOverride,
-        progressUpdateMinutes: goal.progressUpdateMinutesOverride,
-        maxWorkers: goal.maxWorkersOverride,
-        maxOpenFindings: null,
-        workerProvider: goal.workerProviderOverride,
-        workerModel: goal.workerModelOverride,
-        workerReasoning: goal.workerReasoningOverride,
-        workerServiceTier: goal.workerServiceTierOverride,
-        autoIntegrateCompletedSlices: goal.autoIntegrateCompletedSlicesOverride,
-        reclaimMergedWorktrees: goal.reclaimMergedWorktreesOverride,
-        readLocalProviderData: goal.readLocalProviderDataOverride,
+    settings: resolved,
+    execution: {
+      revision: goal.executionRevision,
+      globalDefaults: {
+        worker: executionState(snapshotDefaults.workerProvider, snapshotDefaults.workerModel, snapshotDefaults.workerReasoning, snapshotDefaults.workerServiceTier, snapshotDefaults.workerPermissionMode),
+        verifier: executionState(snapshotDefaults.verifyProvider, snapshotDefaults.verifyModel, snapshotDefaults.verifyReasoning, snapshotDefaults.verifyServiceTier, "auto"),
       },
-      snapshotDefaults,
-    ),
+      overrides: {
+        worker: goal.workerProviderOverride || goal.workerModelOverride || goal.workerReasoningOverride || goal.workerServiceTierOverride || goal.workerPermissionModeOverride
+          ? {
+              ...(goal.workerProviderOverride ? { providerId: goal.workerProviderOverride } : {}),
+              ...(goal.workerModelOverride ? { model: goal.workerModelOverride } : {}),
+              ...(goal.workerReasoningOverride ? { reasoningLevel: parseReasoningLevel(goal.workerReasoningOverride) } : {}),
+              ...(goal.workerServiceTierOverride ? { serviceTier: parseServiceTier(goal.workerServiceTierOverride) } : {}),
+              ...(goal.workerPermissionModeOverride ? { permissionMode: normalizePermissionMode(goal.workerPermissionModeOverride) } : {}),
+            }
+          : null,
+        verifier: goal.verifyProviderOverride || goal.verifyModelOverride || goal.verifyReasoningOverride || goal.verifyServiceTierOverride
+          ? {
+              ...(goal.verifyProviderOverride ? { providerId: goal.verifyProviderOverride } : {}),
+              ...(goal.verifyModelOverride ? { model: goal.verifyModelOverride } : {}),
+              ...(goal.verifyReasoningOverride ? { reasoningLevel: parseReasoningLevel(goal.verifyReasoningOverride) } : {}),
+              ...(goal.verifyServiceTierOverride ? { serviceTier: parseServiceTier(goal.verifyServiceTierOverride) } : {}),
+            }
+          : null,
+      },
+      effective: {
+        worker: executionState(resolved.workerProvider, resolved.workerModel, resolved.workerReasoning || snapshotDefaults.workerReasoning, resolved.workerServiceTier, resolved.workerPermissionMode),
+        verifier: executionState(resolved.verifyProvider, resolved.verifyModel, resolved.verifyReasoning, resolved.verifyServiceTier, "auto"),
+      },
+      configurationError: executionConfigurationErrors.get(goal.threadId) ?? null,
+    },
     standingBrief,
     findings,
     decisions,
     completionSummary: goal.completionSummary,
   };
 }
+
+const executionConfigurationErrors = new Map<string, string>();
 
 function hashText(text: string): string {
   return createHash("sha1").update(text).digest("hex");
@@ -232,6 +280,12 @@ let snapshotDefaults: GoalSettingDefaults = {
   verifyByDefault: true,
   verifyProvider: DEFAULT_VERIFY_PROVIDER,
   verifyModel: DEFAULT_VERIFY_MODEL,
+  verifyReasoning: DEFAULT_REASONING_LEVEL,
+  verifyServiceTier: null,
+  workerProvider: "",
+  workerModel: "",
+  workerReasoning: DEFAULT_REASONING_LEVEL,
+  workerServiceTier: null,
   autoContinue: true,
   progressUpdateMinutes: DEFAULT_PROGRESS_UPDATE_MINUTES,
   maxWorkers: DEFAULT_MAX_WORKERS,
@@ -272,6 +326,36 @@ export default function plugin(bb: BbPluginApi) {
       label: "Default verifier model",
       description: "Codex GPT-5.6-Sol unless an UltraGoal overrides it in the right-pane Settings.",
       default: DEFAULT_VERIFY_MODEL,
+    },
+    verifyReasoning: {
+      type: "string",
+      label: "Default verifier reasoning",
+      default: DEFAULT_REASONING_LEVEL,
+    },
+    verifyServiceTier: {
+      type: "string",
+      label: "Default verifier service tier (default | fast | empty)",
+      default: "",
+    },
+    workerProvider: {
+      type: "string",
+      label: "Default worker provider (empty = inherit root)",
+      default: "",
+    },
+    workerModel: {
+      type: "string",
+      label: "Default worker model (empty = inherit root)",
+      default: "",
+    },
+    workerReasoning: {
+      type: "string",
+      label: "Default worker reasoning",
+      default: DEFAULT_REASONING_LEVEL,
+    },
+    workerServiceTier: {
+      type: "string",
+      label: "Default worker service tier (default | fast | empty)",
+      default: "",
     },
     progressUpdateMinutes: {
       type: "string",
@@ -347,6 +431,12 @@ export default function plugin(bb: BbPluginApi) {
       verifyByDefault: value.verifyByDefault,
       verifyProvider: value.verifyProvider.trim() || DEFAULT_VERIFY_PROVIDER,
       verifyModel: value.verifyModel.trim() || DEFAULT_VERIFY_MODEL,
+      verifyReasoning: parseReasoningLevel(value.verifyReasoning, DEFAULT_REASONING_LEVEL),
+      verifyServiceTier: parseServiceTier(value.verifyServiceTier),
+      workerProvider: value.workerProvider.trim(),
+      workerModel: value.workerModel.trim(),
+      workerReasoning: parseReasoningLevel(value.workerReasoning, DEFAULT_REASONING_LEVEL),
+      workerServiceTier: parseServiceTier(value.workerServiceTier),
       autoContinue: value.autoContinue,
       progressUpdateMinutes:
         parseNonNegativeInt(value.progressUpdateMinutes) ?? DEFAULT_PROGRESS_UPDATE_MINUTES,
@@ -368,7 +458,25 @@ export default function plugin(bb: BbPluginApi) {
   }
   void refreshDefaults();
   settings.onChange(() => {
-    void refreshDefaults();
+    void (async () => {
+      const roots = store.listActiveThreadIds();
+      for (const root of roots) settingsChanging.add(root);
+      try {
+        await refreshDefaults();
+        for (const root of roots) {
+          const deadline = Date.now() + 30_000;
+          while (scheduling.has(root) && Date.now() < deadline) await delay(10);
+          const goal = store.get(root);
+          if (goal) store.update(root, { executionRevision: goal.executionRevision + 1 });
+        }
+      } finally {
+        for (const root of roots) {
+          settingsChanging.delete(root);
+          void scheduleReady(root);
+          void publishFresh(root);
+        }
+      }
+    })();
   });
 
   const store = createGoalStore(bb);
@@ -394,6 +502,27 @@ export default function plugin(bb: BbPluginApi) {
   const workerBriefs = createWorkerBriefStore(bb.storage.database());
   const itemRequirements = createItemRequirementStore(bb.storage.database());
   const staffingHolds = createStaffingHoldStore(bb.storage.database());
+  const invalidBaseSuppressions = createInvalidBaseSuppressionStore(bb.storage.database());
+
+  function invalidBaseStatus(rootThreadId: string) {
+    return invalidBaseSuppressions.list(rootThreadId).map((entry) => ({
+      item_id: entry.itemId,
+      repository: entry.repository,
+      requested_ref: entry.requestedRef,
+      diagnostic: entry.diagnostic,
+      suppressed_at: entry.suppressedAt,
+      corrective_action: `bb ultragoal revalidate ${entry.itemId} --thread ${rootThreadId}`,
+    }));
+  }
+
+  function formatInvalidBaseStatus(rootThreadId: string): string {
+    const entries = invalidBaseStatus(rootThreadId);
+    if (entries.length === 0) return "";
+    return [
+      "Invalid base suppressions:",
+      ...entries.map((entry) => `- ${entry.item_id}: ${entry.diagnostic} Corrective action: ${entry.corrective_action}`),
+    ].join("\n");
+  }
   const integrations = createIntegrationRecordStore(bb.storage.database());
 
   const collab = createCollabStore(bb, {
@@ -494,12 +623,25 @@ export default function plugin(bb: BbPluginApi) {
       // Same effect as `bb ultragoal release`, reachable by the orchestrator
       // that can actually see a worker is redundant.
       items.setStatus(rootThreadId, itemId, "pending");
+      lastStaffTry.delete(itemId);
+      agentCache.set(
+        rootThreadId,
+        (agentCache.get(rootThreadId) ?? []).filter(
+          (agent) => agent.itemId !== itemId || agent.role === "verifier",
+        ),
+      );
       markGoalEvent(rootThreadId);
       bb.log.info(`Orchestrator released ${itemId} on ${rootThreadId}: ${reason}`);
       void publishFresh(rootThreadId);
       void scheduleReady(rootThreadId);
     },
-    workerPermissionMode: () => snapshotDefaults.workerPermissionMode,
+    workerPermissionMode(rootThreadId) {
+      const goal = store.get(rootThreadId);
+      return goal ? view(goal).settings.workerPermissionMode : snapshotDefaults.workerPermissionMode;
+    },
+    executionRevision(rootThreadId) {
+      return store.get(rootThreadId)?.executionRevision ?? 0;
+    },
     onRejectedChild(rootThreadId, childThreadId, itemId) {
       if (itemId) {
         const otherClaimants = itemClaimants(rootThreadId, itemId).filter(
@@ -780,6 +922,7 @@ export default function plugin(bb: BbPluginApi) {
         role: "worker" as const,
         status: "running" as const,
         summary: null,
+        execution: null,
       };
     });
     return { agents, aliveCalls: alive.length };
@@ -825,6 +968,7 @@ export default function plugin(bb: BbPluginApi) {
   const STAFF_RETRY_MS = 5 * 60_000;
   const lastStaffTry = new Map<string, number>();
   const scheduling = new Set<string>();
+  const settingsChanging = new Set<string>();
 
   function itemBriefMessage(rootThreadId: string, item: GoalItem, restaffed: boolean): string {
     const lines = [`SLICE (item_id=${item.id}): ${item.step}`];
@@ -883,8 +1027,35 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
+  type SchedulerBase =
+    | { status: "valid"; hostId: string; repository: string; requestedRef: string; commit: string }
+    | { status: "invalid"; hostId: string; repository: string; requestedRef: string }
+    | { status: "operational_error"; reason: string };
+
+  async function resolveSchedulerBase(rootThreadId: string): Promise<SchedulerBase> {
+    try {
+      const root = await bb.sdk.threads.get({ threadId: rootThreadId });
+      if (!root.environmentId) return { status: "operational_error", reason: "root thread has no environment" };
+      const environment = await bb.sdk.environments.get({ environmentId: root.environmentId });
+      const { hostId } = environment;
+      const checkoutPath = environment.path;
+      const requestedRef = environment.branchName ?? environment.mergeBaseBranch ?? "HEAD";
+      if (!hostId || !checkoutPath) {
+        return { status: "operational_error", reason: "root environment has no host or repository path" };
+      }
+      const resolved = await hostClient.call("resolveCommit", { checkoutPath, requestedRef }, { hostId });
+      if (resolved.status === "operational_error") {
+        return { status: "operational_error", reason: resolved.reason };
+      }
+      return { ...resolved, hostId, requestedRef };
+    } catch (error) {
+      return { status: "operational_error", reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async function scheduleReady(rootThreadId: string): Promise<void> {
     if (transferLocked(rootThreadId)) return;
+    if (settingsChanging.has(rootThreadId)) return;
     const goal = store.get(rootThreadId);
     if (
       !goal ||
@@ -980,7 +1151,6 @@ export default function plugin(bb: BbPluginApi) {
           for (const holder of holders) collab.forget(holder.threadId);
           restaffed = true;
         }
-        lastStaffTry.set(item.id, now);
         const still = store.get(rootThreadId);
         if (
           !still ||
@@ -988,6 +1158,51 @@ export default function plugin(bb: BbPluginApi) {
         ) {
           return;
         }
+        const effective = view(still).settings;
+        const execution = await resolveAndValidateExecution(
+          bb,
+          rootThreadId,
+          {
+            providerId: effective.workerProvider || undefined,
+            model: effective.workerModel || undefined,
+            reasoningLevel: effective.workerReasoning || undefined,
+            serviceTier: effective.workerServiceTier,
+            permissionMode: effective.workerPermissionMode,
+          },
+          "worker",
+        );
+        if ("error" in execution) {
+          executionConfigurationErrors.set(rootThreadId, execution.error);
+          bb.log.warn(`Scheduler refused ${item.id} on ${rootThreadId}: ${execution.error}`);
+          void publishFresh(rootThreadId);
+          continue;
+        }
+        executionConfigurationErrors.delete(rootThreadId);
+        const base = await resolveSchedulerBase(rootThreadId);
+        if (base.status === "operational_error") {
+          bb.log.warn(`Scheduler could not validate the base for ${item.id} on ${rootThreadId}; will retry: ${base.reason}`);
+          continue;
+        }
+        if (invalidBaseSuppressions.get(rootThreadId, item.id, base.repository, base.requestedRef)) continue;
+        if (base.status === "invalid") {
+          const diagnostic = [
+            `Base ref ${JSON.stringify(base.requestedRef)} is missing or does not peel to a commit in ${base.repository}.`,
+            "The work item and goal remain open; no worker or worktree was allocated.",
+            `Correct the repository/ref tuple, or explicitly retry it with bb ultragoal revalidate ${item.id} --thread ${rootThreadId}.`,
+          ].join(" ");
+          invalidBaseSuppressions.suppress({
+            rootThreadId,
+            itemId: item.id,
+            repository: base.repository,
+            requestedRef: base.requestedRef,
+            diagnostic,
+            suppressedAt: now,
+          });
+          markGoalEvent(rootThreadId);
+          void publishFresh(rootThreadId);
+          continue;
+        }
+        lastStaffTry.set(item.id, now);
         let result: Awaited<ReturnType<typeof collab.spawnWorker>>;
         try {
           result = await collab.spawnWorker({
@@ -999,6 +1214,14 @@ export default function plugin(bb: BbPluginApi) {
               agents.map((agent) => agent.nickname),
             ),
             message: itemBriefMessage(rootThreadId, item, restaffed),
+            validatedBase: {
+              hostId: base.hostId,
+              repository: base.repository,
+              requestedRef: base.requestedRef,
+              commit: base.commit,
+            },
+            execution: execution.selection,
+            executionRevision: still.executionRevision,
           });
         } catch (error) {
           result = { error: error instanceof Error ? error.message : String(error) };
@@ -1048,6 +1271,123 @@ export default function plugin(bb: BbPluginApi) {
   // conflicts escalate to the orchestrator. Remote publication is outside
   // this automation and requires direct user authorization.
   const hostClient = bb.hosts.experimental_client({ contract: hostContract });
+
+  async function replaceActiveCrew(rootThreadId: string): Promise<{
+    completed: boolean;
+    replacements: Array<{
+      oldThreadId: string;
+      newThreadId: string;
+      itemId: string;
+      actual: ResolvedExecution | null;
+    }>;
+    paused: { threadId: string; itemId: string; risk: string } | null;
+  }> {
+    const replacements: Array<{ oldThreadId: string; newThreadId: string; itemId: string; actual: ResolvedExecution | null }> = [];
+    const rows = collab.durableRowsForRoot(rootThreadId)
+      .filter((row) => row.role !== "verifier" && row.itemId)
+      .sort((left, right) => left.threadId.localeCompare(right.threadId));
+    for (const row of rows) {
+      const itemId = row.itemId!;
+      const item = items.list(rootThreadId).find((entry) => entry.id === itemId);
+      if (!item || item.status === "completed") continue;
+      if (row.reportStatus) {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: `worker has an unharvested ${row.reportStatus} report` } };
+      }
+      let thread;
+      try {
+        thread = await bb.sdk.threads.get({ threadId: row.threadId });
+      } catch {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: "worker state is unreadable; non-durable progress cannot be excluded" } };
+      }
+      if (thread.status === "active" || thread.status === "starting") {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: `worker is ${thread.status}; an external run may hold unreported progress` } };
+      }
+      if (!thread.environmentId) {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: "worker has no inspectable worktree" } };
+      }
+      let environment: Awaited<ReturnType<typeof bb.sdk.environments.get>> | null = null;
+      try {
+        environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
+      } catch {
+        // Report the unreadable worktree as a replacement risk below.
+      }
+      if (!environment?.path || !environment.hostId) {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: "worker worktree or host is unavailable" } };
+      }
+      let inspection: { clean: boolean; summary: string };
+      try {
+        inspection = await hostClient.call("inspectWorktree", { checkoutPath: environment.path }, { hostId: environment.hostId });
+      } catch (error) {
+        return {
+          completed: false,
+          replacements,
+          paused: {
+            threadId: row.threadId,
+            itemId,
+            risk: `worktree inspection failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        };
+      }
+      if (!inspection.clean) {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: `dirty worktree: ${inspection.summary}` } };
+      }
+      const goal = store.get(rootThreadId);
+      if (!goal) break;
+      const effective = view(goal).settings;
+      const execution = await resolveAndValidateExecution(bb, rootThreadId, {
+        providerId: effective.workerProvider || undefined,
+        model: effective.workerModel || undefined,
+        reasoningLevel: effective.workerReasoning || undefined,
+        serviceTier: effective.workerServiceTier,
+        permissionMode: effective.workerPermissionMode,
+      }, "worker");
+      if ("error" in execution) {
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: execution.error } };
+      }
+      const base = await resolveSchedulerBase(rootThreadId);
+      if (base.status !== "valid") {
+        const risk = base.status === "invalid"
+          ? `base ref ${JSON.stringify(base.requestedRef)} is invalid in ${base.repository}`
+          : `base validation failed: ${base.reason}`;
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk } };
+      }
+      collab.forget(row.threadId);
+      items.setStatus(rootThreadId, itemId, "pending");
+      agentCache.set(rootThreadId, (agentCache.get(rootThreadId) ?? []).filter((agent) => agent.threadId !== row.threadId));
+      lastStaffTry.delete(itemId);
+      const spawned = await collab.spawnWorker({
+        parentThreadId: rootThreadId,
+        itemId,
+        maxWorkers: effective.maxWorkers,
+        displayName: workRelatedName(item.step, (agentCache.get(rootThreadId) ?? []).map((agent) => agent.nickname)),
+        message: itemBriefMessage(rootThreadId, item, true),
+        validatedBase: { hostId: base.hostId, repository: base.repository, requestedRef: base.requestedRef, commit: base.commit },
+        execution: execution.selection,
+        executionRevision: goal.executionRevision,
+      });
+      if ("error" in spawned) {
+        collab.restoreWorker(row.threadId, itemId);
+        items.setStatus(rootThreadId, itemId, "in_progress");
+        return { completed: false, replacements, paused: { threadId: row.threadId, itemId, risk: `replacement spawn failed; original ownership restored: ${spawned.error}` } };
+      }
+      try {
+        await bb.sdk.threads.stop({ threadId: row.threadId });
+      } catch {
+        // The durable ownership handoff already succeeded.
+      }
+      try {
+        await bb.sdk.threads.archive({ threadId: row.threadId });
+      } catch {
+        // Archival is cleanup; the retired durable row still fences overlap.
+      }
+      const refreshed = await collab.listForRoot(rootThreadId, { refreshLimit: 64, refreshHolders: true });
+      const replacement = refreshed.find((agent) => agent.threadId === spawned.threadId);
+      replacements.push({ oldThreadId: row.threadId, newThreadId: spawned.threadId, itemId, actual: replacement?.execution?.actual ?? null });
+    }
+    markGoalEvent(rootThreadId);
+    void publishFresh(rootThreadId);
+    return { completed: true, replacements, paused: null };
+  }
   const integrating = new Map<string, Promise<void>>();
   const INTEGRATION_STEER_COOLDOWN_MS = 30 * 60_000;
   const integrationSteerAt = new Map<string, number>();
@@ -1630,7 +1970,7 @@ export default function plugin(bb: BbPluginApi) {
           await bb.sdk.threads.send({
             threadId: agent.threadId,
             mode: (workerThread ? immediateSendMode(workerThread) : null) ?? "steer",
-            permissionMode: snapshotDefaults.workerPermissionMode,
+            permissionMode: view(goal).settings.workerPermissionMode,
             input: [
               {
                 type: "text",
@@ -1797,6 +2137,7 @@ export default function plugin(bb: BbPluginApi) {
     if (!item) return false;
     const verdict = remediationItemRetirement({
       item,
+      origin: items.origin(rootThreadId, itemId),
       linkedFindings: findings.list(rootThreadId).filter((finding) => finding.itemId === itemId),
       staffed:
         workersOnItem(rootThreadId, itemId).length > 0 ||
@@ -2097,6 +2438,23 @@ export default function plugin(bb: BbPluginApi) {
 
     verifying.add(workerThreadId);
     try {
+      const verifierExecution = await resolveAndValidateExecution(
+        bb,
+        row.root_thread_id,
+        {
+          providerId: resolved.verifyProvider,
+          model: resolved.verifyModel,
+          reasoningLevel: resolved.verifyReasoning,
+          serviceTier: resolved.verifyServiceTier,
+          permissionMode: "auto",
+        },
+        "verifier",
+      );
+      if ("error" in verifierExecution) {
+        executionConfigurationErrors.set(row.root_thread_id, verifierExecution.error);
+        throw new Error(verifierExecution.error);
+      }
+      executionConfigurationErrors.delete(row.root_thread_id);
       const item = row.item_id
         ? items.list(row.root_thread_id).find((entry) => entry.id === row.item_id)
         : null;
@@ -2105,10 +2463,11 @@ export default function plugin(bb: BbPluginApi) {
         rootThreadId: row.root_thread_id,
         sourceThreadId: workerThreadId,
         itemId: row.item_id,
-        providerId: resolved.verifyProvider,
-        model: resolved.verifyModel,
-        reasoningLevel: resolved.verifyReasoning,
-        serviceTier: resolved.verifyServiceTier,
+        providerId: verifierExecution.selection.providerId,
+        model: verifierExecution.selection.model,
+        reasoningLevel: verifierExecution.selection.reasoningLevel,
+        serviceTier: verifierExecution.selection.serviceTier,
+        executionRevision: goal.executionRevision,
         workText: item?.step ?? "",
         prompt: [
           "Independent verification of a finished Goal worker.",
@@ -2411,6 +2770,19 @@ export default function plugin(bb: BbPluginApi) {
     threadId: string,
     objective: string,
     tokenBudget?: number | null,
+    config?: {
+      maxWorkers?: number;
+      verifyEnabled?: boolean;
+      workerProvider?: string;
+      workerModel?: string;
+      workerReasoning?: ReturnType<typeof parseReasoningLevel>;
+      workerServiceTier?: ReturnType<typeof parseServiceTier>;
+      workerPermissionMode?: "auto" | "accept-edits" | "full";
+      verifyProvider?: string;
+      verifyModel?: string;
+      verifyReasoning?: ReturnType<typeof parseReasoningLevel>;
+      verifyServiceTier?: ReturnType<typeof parseServiceTier>;
+    },
   ): Promise<StoredGoal | { error: string }> {
     const invalid = validateObjective(objective);
     if (invalid) return { error: invalid };
@@ -2421,20 +2793,73 @@ export default function plugin(bb: BbPluginApi) {
         error: `goal token budget ${budget} exceeds the maximum allowed goal token budget of ${maxGoalTokenBudget}`,
       };
     }
+    const candidate = resolveGoalSettings({
+      verifyEnabled: config?.verifyEnabled ?? null,
+      verifyProvider: config?.verifyProvider ?? null,
+      verifyModel: config?.verifyModel ?? null,
+      verifyReasoning: config?.verifyReasoning ?? null,
+      verifyServiceTier: config?.verifyServiceTier ?? null,
+      autoContinue: null,
+      progressUpdateMinutes: null,
+      maxWorkers: config?.maxWorkers ?? null,
+      maxOpenFindings: null,
+      workerProvider: config?.workerProvider ?? null,
+      workerModel: config?.workerModel ?? null,
+      workerReasoning: config?.workerReasoning ?? null,
+      workerServiceTier: config?.workerServiceTier ?? null,
+      workerPermissionMode: config?.workerPermissionMode ?? null,
+      autoIntegrateCompletedSlices: null,
+      reclaimMergedWorktrees: null,
+      readLocalProviderData: null,
+    }, snapshotDefaults);
+    const workerCheck = await resolveAndValidateExecution(bb, threadId, {
+      providerId: candidate.workerProvider || undefined,
+      model: candidate.workerModel || undefined,
+      reasoningLevel: candidate.workerReasoning || undefined,
+      serviceTier: candidate.workerServiceTier,
+      permissionMode: candidate.workerPermissionMode,
+    }, "worker");
+    if ("error" in workerCheck) return workerCheck;
+    const verifierCheck = await resolveAndValidateExecution(bb, threadId, {
+      providerId: candidate.verifyProvider,
+      model: candidate.verifyModel,
+      reasoningLevel: candidate.verifyReasoning,
+      serviceTier: candidate.verifyServiceTier,
+      permissionMode: "auto",
+    }, "verifier");
+    if ("error" in verifierCheck) return verifierCheck;
 
     const existing = store.get(threadId);
     if (!existing || existing.status === "complete") {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
     }
-    const goal =
+    const executionWrite = config
+      ? {
+          maxWorkersOverride: config.maxWorkers,
+          verifyEnabledOverride: config.verifyEnabled,
+          workerProviderOverride: config.workerProvider,
+          workerModelOverride: config.workerModel,
+          workerReasoningOverride: config.workerReasoning,
+          workerServiceTierOverride: config.workerServiceTier,
+          workerPermissionModeOverride: config.workerPermissionMode,
+          verifyProviderOverride: config.verifyProvider,
+          verifyModelOverride: config.verifyModel,
+          verifyReasoningOverride: config.verifyReasoning,
+          verifyServiceTierOverride: config.verifyServiceTier,
+          executionRevision: 1,
+        }
+      : undefined;
+    const configured =
       !existing || existing.status === "complete"
         ? store.replace({
             threadId,
             objective: objective.trim(),
             status: "active",
             tokenBudget: budget ?? null,
+            execution: executionWrite,
           })
         : store.update(threadId, {
             objective: objective.trim(),
@@ -2443,15 +2868,16 @@ export default function plugin(bb: BbPluginApi) {
             tokenBudget: budget ?? existing.tokenBudget,
             blockedStreak: 0,
             lastBlockKey: null,
+            ...executionWrite,
           });
-    if (!goal) return { error: "failed to set goal" };
+    if (!configured) return { error: "failed to set goal" };
     const baseline = await readThreadTokens(bb, threadId);
     const next = store.update(threadId, {
       lastSeenTokens: baseline,
       lastAccountedAt: Date.now(),
       lastContinueWasAutomatic: false,
     });
-    const ready = next ?? goal;
+    const ready = next ?? configured;
     publish(threadId, view(ready));
     return ready;
   }
@@ -2823,6 +3249,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
       if (store.clear(threadId)) publish(threadId, null);
       return true;
     }
@@ -2844,6 +3271,12 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
+    async start({ threadId, objective, tokenBudget, ...config }) {
+      const result = await userSetGoal(threadId, objective, tokenBudget, config);
+      if ("error" in result) throw new Error(result.error);
+      await sendSteering(threadId, continuationPrompt(view(result)), "start").catch(() => false);
+      return { goal: await viewFresh(store.get(threadId) ?? result) };
+    },
     async getGoal({ threadId }) {
       const goal = store.get(threadId);
       if (goal) refreshPane(threadId);
@@ -2861,6 +3294,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
       const cleared = store.clear(threadId);
       if (cleared) publish(threadId, null);
       return { cleared };
@@ -2978,14 +3412,60 @@ export default function plugin(bb: BbPluginApi) {
       workerModel,
       workerReasoning,
       workerServiceTier,
+      workerPermissionMode,
+      replaceActiveWorkers,
       autoIntegrateCompletedSlices,
       reclaimMergedWorktrees,
       readLocalProviderData,
       tokenBudget,
     }) {
-      const existing = store.get(threadId);
-      if (!existing) return { goal: null };
-      const next = store.update(threadId, {
+      settingsChanging.add(threadId);
+      try {
+        const deadline = Date.now() + 30_000;
+        while (scheduling.has(threadId) && Date.now() < deadline) await delay(10);
+        const existing = store.get(threadId);
+        if (!existing) return { goal: null };
+        const candidate = resolveGoalSettings({
+          verifyEnabled: verifyEnabled === undefined ? existing.verifyEnabledOverride : verifyEnabled,
+          verifyProvider: verifyProvider === undefined ? existing.verifyProviderOverride : verifyProvider,
+          verifyModel: verifyModel === undefined ? existing.verifyModelOverride : verifyModel,
+          verifyReasoning: verifyReasoning === undefined ? existing.verifyReasoningOverride : verifyReasoning,
+          verifyServiceTier: verifyServiceTier === undefined ? existing.verifyServiceTierOverride : verifyServiceTier,
+          autoContinue: existing.autoContinueOverride,
+          progressUpdateMinutes: existing.progressUpdateMinutesOverride,
+          maxWorkers: maxWorkers === undefined ? existing.maxWorkersOverride : maxWorkers,
+          maxOpenFindings: null,
+          workerProvider: workerProvider === undefined ? existing.workerProviderOverride : workerProvider,
+          workerModel: workerModel === undefined ? existing.workerModelOverride : workerModel,
+          workerReasoning: workerReasoning === undefined ? existing.workerReasoningOverride : workerReasoning,
+          workerServiceTier: workerServiceTier === undefined ? existing.workerServiceTierOverride : workerServiceTier,
+          workerPermissionMode: workerPermissionMode === undefined ? existing.workerPermissionModeOverride : workerPermissionMode,
+          autoIntegrateCompletedSlices: existing.autoIntegrateCompletedSlicesOverride,
+          reclaimMergedWorktrees: existing.reclaimMergedWorktreesOverride,
+          readLocalProviderData: existing.readLocalProviderDataOverride,
+        }, snapshotDefaults);
+        const workerCheck = await resolveAndValidateExecution(bb, threadId, {
+          providerId: candidate.workerProvider || undefined,
+          model: candidate.workerModel || undefined,
+          reasoningLevel: candidate.workerReasoning || undefined,
+          serviceTier: candidate.workerServiceTier,
+          permissionMode: candidate.workerPermissionMode,
+        }, "worker");
+        if ("error" in workerCheck) throw new Error(workerCheck.error);
+        const verifierCheck = await resolveAndValidateExecution(bb, threadId, {
+          providerId: candidate.verifyProvider,
+          model: candidate.verifyModel,
+          reasoningLevel: candidate.verifyReasoning,
+          serviceTier: candidate.verifyServiceTier,
+          permissionMode: "auto",
+        }, "verifier");
+        if ("error" in verifierCheck) throw new Error(verifierCheck.error);
+        const executionChanged = [
+          verifyProvider, verifyModel, verifyReasoning, verifyServiceTier,
+          workerProvider, workerModel, workerReasoning, workerServiceTier,
+          workerPermissionMode,
+        ].some((value) => value !== undefined);
+        const next = store.update(threadId, {
         verifyEnabledOverride: verifyEnabled,
         verifyProviderOverride: verifyProvider,
         verifyModelOverride: verifyModel,
@@ -2998,14 +3478,26 @@ export default function plugin(bb: BbPluginApi) {
         workerModelOverride: workerModel,
         workerReasoningOverride: workerReasoning,
         workerServiceTierOverride: workerServiceTier,
+        workerPermissionModeOverride: workerPermissionMode,
+        executionRevision: executionChanged ? existing.executionRevision + 1 : existing.executionRevision,
         autoIntegrateCompletedSlicesOverride: autoIntegrateCompletedSlices,
         reclaimMergedWorktreesOverride: reclaimMergedWorktrees,
         readLocalProviderDataOverride: readLocalProviderData,
         tokenBudget,
-      });
-      const snap = next ? await viewFresh(next) : null;
-      if (snap) publish(threadId, snap);
-      return { goal: snap };
+        });
+        executionConfigurationErrors.delete(threadId);
+        if (next) {
+          markGoalEvent(threadId);
+          if (maxWorkers !== undefined || executionChanged) void scheduleReady(threadId);
+          if (replaceActiveWorkers) await replaceActiveCrew(threadId);
+        }
+        const snap = next ? await viewFresh(next) : null;
+        if (snap) publish(threadId, snap);
+        return { goal: snap };
+      } finally {
+        settingsChanging.delete(threadId);
+        void scheduleReady(threadId);
+      }
     },
     async setStandingBriefFromPane({ threadId, text }) {
       const goal = store.get(threadId);
@@ -3023,6 +3515,18 @@ export default function plugin(bb: BbPluginApi) {
     },
     async listModels({ threadId }) {
       return { providers: await listExecutionCatalog(bb, threadId) };
+    },
+    async replaceWorkers({ threadId }) {
+      if (!store.get(threadId)) {
+        return { completed: false, replacements: [], paused: { threadId, itemId: "", risk: "No UltraGoal is set on this thread." } };
+      }
+      settingsChanging.add(threadId);
+      try {
+        return await replaceActiveCrew(threadId);
+      } finally {
+        settingsChanging.delete(threadId);
+        void scheduleReady(threadId);
+      }
     },
     async workerTranscript({ threadId, workerThreadId }) {
       // Scope: only threads in this goal's tree are readable through the pane.
@@ -3137,9 +3641,20 @@ export default function plugin(bb: BbPluginApi) {
           .positive()
           .optional()
           .describe("Positive token budget. Omit unless explicitly requested."),
+        max_workers: z.number().int().min(0).max(16).optional(),
+        verify_enabled: z.boolean().optional(),
+        worker_provider: z.string().min(1).optional(),
+        worker_model: z.string().min(1).optional(),
+        worker_reasoning: z.enum(["none", "low", "medium", "high", "xhigh", "ultracode", "max", "ultra"]).optional(),
+        worker_service_tier: z.enum(["default", "fast"]).nullable().optional(),
+        worker_permission_mode: z.enum(["auto", "accept-edits", "full"]).optional(),
+        verify_provider: z.string().min(1).optional(),
+        verify_model: z.string().min(1).optional(),
+        verify_reasoning: z.enum(["none", "low", "medium", "high", "xhigh", "ultracode", "max", "ultra"]).optional(),
+        verify_service_tier: z.enum(["default", "fast"]).nullable().optional(),
       })
       .strict(),
-    async execute({ objective, token_budget }, { threadId }) {
+    async execute({ objective, token_budget, ...config }, { threadId }) {
       const rootThreadId = collab.rootId(threadId);
       const existing = store.get(rootThreadId);
       if (existing && isUnfinished(existing.status)) {
@@ -3153,7 +3668,19 @@ export default function plugin(bb: BbPluginApi) {
           isError: true,
         };
       }
-      const result = await userSetGoal(rootThreadId, objective, token_budget ?? null);
+      const result = await userSetGoal(rootThreadId, objective, token_budget ?? null, {
+        maxWorkers: config.max_workers,
+        verifyEnabled: config.verify_enabled,
+        workerProvider: config.worker_provider,
+        workerModel: config.worker_model,
+        workerReasoning: config.worker_reasoning,
+        workerServiceTier: config.worker_service_tier,
+        workerPermissionMode: config.worker_permission_mode,
+        verifyProvider: config.verify_provider,
+        verifyModel: config.verify_model,
+        verifyReasoning: config.verify_reasoning,
+        verifyServiceTier: config.verify_service_tier,
+      });
       if ("error" in result) {
         return { content: [{ type: "text", text: result.error }], isError: true };
       }
@@ -3174,12 +3701,14 @@ export default function plugin(bb: BbPluginApi) {
       await refreshRunning(rootThreadId);
       const accounted = await account(rootThreadId);
       const goal = accounted ?? store.get(rootThreadId);
-      return goalToolResponse(
+      const response = JSON.parse(goalToolResponse(
         goal ? await viewFresh(goal) : null,
         false,
         findings.list(rootThreadId, "open"),
         { planStatus: plan_status, planCursor: plan_cursor, planLimit: plan_limit },
-      );
+      )) as Record<string, unknown>;
+      response.invalidBaseSuppressions = invalidBaseStatus(rootThreadId);
+      return JSON.stringify(response, null, 2);
     },
   });
 
@@ -3399,7 +3928,7 @@ export default function plugin(bb: BbPluginApi) {
       // one of these as "check:(none) and a one-line step" and could not tell
       // it from an unbriefed item. Point at the contract, and when no check was
       // supplied say so, because nothing then gates the slice's completion.
-      const dedicated = items.add(
+      const dedicated = items.addRemediation(
         rootThreadId,
         [
           `Fix: ${result.finding.title} [${evidenceFile}] CONTEXT (audit findings: ${result.finding.id}).`,
@@ -3407,7 +3936,6 @@ export default function plugin(bb: BbPluginApi) {
         ]
           .filter(Boolean)
           .join(" "),
-        "pending",
         { deps: [], files: scope, check: input.check ?? null },
       );
       if (dedicated && !findings.linkItem(rootThreadId, result.finding.id, dedicated.id)) {
@@ -4038,7 +4566,7 @@ export default function plugin(bb: BbPluginApi) {
             await bb.sdk.threads.send({
               threadId: thread.id,
               mode: immediateSendMode(thread) ?? "start",
-              permissionMode: snapshotDefaults.workerPermissionMode,
+              permissionMode: "auto",
               input: [{
                 type: "text",
                 text: [
@@ -4099,7 +4627,9 @@ export default function plugin(bb: BbPluginApi) {
               await bb.sdk.threads.send({
                 threadId: child.source_thread_id,
                 mode: "start",
-                permissionMode: snapshotDefaults.workerPermissionMode,
+                permissionMode: store.get(parentRoot)
+                  ? view(store.get(parentRoot)!).settings.workerPermissionMode
+                  : snapshotDefaults.workerPermissionMode,
                 input: [
                   {
                     type: "text",
@@ -4202,6 +4732,14 @@ export default function plugin(bb: BbPluginApi) {
       // blocks its SOURCE worker from ever being retired. Its slice returns to
       // the queue through the ordinary orphan reclaim.
       collab.forget(thread.id);
+      if (failedChild.item_id) {
+        items.setStatus(failedChild.root_thread_id, failedChild.item_id, "pending");
+        lastStaffTry.delete(failedChild.item_id);
+      }
+      agentCache.set(
+        failedChild.root_thread_id,
+        (agentCache.get(failedChild.root_thread_id) ?? []).filter((agent) => agent.threadId !== thread.id),
+      );
       markGoalEvent(failedChild.root_thread_id);
       void publishFresh(failedChild.root_thread_id);
       void scheduleReady(failedChild.root_thread_id);
@@ -4226,6 +4764,14 @@ export default function plugin(bb: BbPluginApi) {
     const deletedChild = collab.rowOf(thread.id);
     if (deletedChild && deletedChild.root_thread_id !== thread.id) {
       collab.forget(thread.id);
+      if (deletedChild.item_id) {
+        items.setStatus(deletedChild.root_thread_id, deletedChild.item_id, "pending");
+        lastStaffTry.delete(deletedChild.item_id);
+      }
+      agentCache.set(
+        deletedChild.root_thread_id,
+        (agentCache.get(deletedChild.root_thread_id) ?? []).filter((agent) => agent.threadId !== thread.id),
+      );
       markGoalEvent(deletedChild.root_thread_id);
       void publishFresh(deletedChild.root_thread_id);
       void scheduleReady(deletedChild.root_thread_id);
@@ -4233,6 +4779,7 @@ export default function plugin(bb: BbPluginApi) {
     items.clear(thread.id);
     findings.clear(thread.id);
     decisions.clear(thread.id);
+    invalidBaseSuppressions.clear(thread.id);
     if (store.clear(thread.id)) publish(thread.id, null);
   });
 
@@ -4281,9 +4828,12 @@ export default function plugin(bb: BbPluginApi) {
       if (action === "status") {
         await account(threadId);
         const latest = store.get(threadId);
+        const invalidBases = formatInvalidBaseStatus(threadId);
         return {
           exitCode: 0,
-          stdout: latest ? formatGoalCard(view(latest)) : "No UltraGoal is set on this thread.",
+          stdout: latest
+            ? [formatGoalCard(view(latest)), invalidBases].filter(Boolean).join("\n\n")
+            : "No UltraGoal is set on this thread.",
         };
       }
 
@@ -4309,8 +4859,62 @@ export default function plugin(bb: BbPluginApi) {
       }
 
       if (action === "set") {
-        if (!objective) return { exitCode: 1, stderr: "Usage: bb ultragoal set <objective>" };
-        const result = await userSetGoal(threadId, objective);
+        const tokens = parsed.rawRest ?? [];
+        const objectiveParts: string[] = [];
+        const start: NonNullable<Parameters<typeof userSetGoal>[3]> = {};
+        let tokenBudget: number | null | undefined;
+        for (let i = 0; i < tokens.length; i += 1) {
+          const token = tokens[i];
+          const value = () => tokens[++i] ?? "";
+          if (token === "--workers") { start.maxWorkers = Number.parseInt(value(), 10); continue; }
+          if (token === "--worker-provider") { start.workerProvider = value(); continue; }
+          if (token === "--worker-model") { start.workerModel = value(); continue; }
+          if (token === "--worker-reasoning") {
+            const raw = value().trim();
+            if (!isReasoningLevel(raw)) return { exitCode: 1, stderr: `Invalid worker reasoning level: ${raw || "(empty)"}` };
+            start.workerReasoning = raw;
+            continue;
+          }
+          if (token === "--worker-tier") {
+            const raw = value().trim();
+            if (!isServiceTier(raw)) return { exitCode: 1, stderr: `Invalid worker service tier: ${raw || "(empty)"}` };
+            start.workerServiceTier = raw;
+            continue;
+          }
+          if (token === "--worker-permission") {
+            const raw = value().trim();
+            if (raw !== "auto" && raw !== "accept-edits" && raw !== "full") return { exitCode: 1, stderr: `Invalid worker permission mode: ${raw || "(empty)"}` };
+            start.workerPermissionMode = raw;
+            continue;
+          }
+          if (token === "--verifier-provider") { start.verifyProvider = value(); continue; }
+          if (token === "--verifier-model") { start.verifyModel = value(); continue; }
+          if (token === "--verifier-reasoning") {
+            const raw = value().trim();
+            if (!isReasoningLevel(raw)) return { exitCode: 1, stderr: `Invalid verifier reasoning level: ${raw || "(empty)"}` };
+            start.verifyReasoning = raw;
+            continue;
+          }
+          if (token === "--verifier-tier") {
+            const raw = value().trim();
+            if (!isServiceTier(raw)) return { exitCode: 1, stderr: `Invalid verifier service tier: ${raw || "(empty)"}` };
+            start.verifyServiceTier = raw;
+            continue;
+          }
+          if (token === "--verify") { start.verifyEnabled = true; continue; }
+          if (token === "--no-verify") { start.verifyEnabled = false; continue; }
+          if (token === "--budget") { tokenBudget = Number.parseInt(value(), 10); continue; }
+          objectiveParts.push(token);
+        }
+        const startObjective = objectiveParts.join(" ").trim();
+        if (!startObjective) return { exitCode: 1, stderr: "Usage: bb ultragoal set <objective> [execution options]" };
+        if (start.maxWorkers !== undefined && (!Number.isInteger(start.maxWorkers) || start.maxWorkers < 0 || start.maxWorkers > 16)) {
+          return { exitCode: 1, stderr: "--workers must be an integer from 0 to 16" };
+        }
+        if (tokenBudget !== undefined && (tokenBudget === null || !Number.isInteger(tokenBudget) || tokenBudget <= 0)) {
+          return { exitCode: 1, stderr: "--budget must be a positive integer" };
+        }
+        const result = await userSetGoal(threadId, startObjective, tokenBudget, start);
         if ("error" in result) return { exitCode: 1, stderr: result.error };
         try {
           await sendSteering(
@@ -4471,7 +5075,11 @@ export default function plugin(bb: BbPluginApi) {
         for (const { threadId: workerId, itemId } of plan.release) {
           collab.forget(workerId);
           void releaseWorkerRuntime(workerId);
-          if (itemId) items.setStatus(threadId, itemId, "pending");
+          if (itemId) {
+            items.setStatus(threadId, itemId, "pending");
+            lastStaffTry.delete(itemId);
+          }
+          agentCache.set(threadId, (agentCache.get(threadId) ?? []).filter((agent) => agent.threadId !== workerId));
           released.push(itemId ? `${workerId} -> ${itemId}` : workerId);
         }
         markGoalEvent(threadId);
@@ -4586,6 +5194,7 @@ export default function plugin(bb: BbPluginApi) {
         if (remove) {
           const verdict = remediationItemRetirement({
             item,
+            origin: items.origin(threadId, itemId),
             linkedFindings: findings.list(threadId).filter((finding) => finding.itemId === itemId),
             staffed:
               workersOnItem(threadId, itemId).length > 0 ||
@@ -4727,43 +5336,155 @@ export default function plugin(bb: BbPluginApi) {
         };
       }
 
+      if (action === "revalidate") {
+        const goal = store.get(threadId);
+        if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+        const itemId = (objective ?? "").trim();
+        if (!itemId) return { exitCode: 1, stderr: "Usage: bb ultragoal revalidate <item-id> [--thread <id>]" };
+        if (!items.list(threadId).some((row) => row.id === itemId)) {
+          return { exitCode: 1, stderr: `Unknown work item: ${itemId}` };
+        }
+        const removed = invalidBaseSuppressions.revalidate(threadId, itemId);
+        if (removed > 0) {
+          markGoalEvent(threadId);
+          void publishFresh(threadId);
+          void scheduleReady(threadId);
+        }
+        return {
+          exitCode: 0,
+          stdout: removed > 0
+            ? `Cleared ${removed} invalid-base suppression(s) for ${itemId}; the unchanged request will be validated again.`
+            : `${itemId} has no invalid-base suppression to revalidate.`,
+        };
+      }
+
       if (action === "exec") {
         const goal = store.get(threadId);
         if (!goal) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
         const tokens = parsed.rawRest ?? [];
         const role = tokens[0] ?? "";
         if (!role) {
-          // Reading this was impossible from the CLI, which is how a goal ran
-          // ninety-nine workers on the wrong provider before anyone noticed.
+          const snap = await viewFresh(goal);
+          const line = (label: string, selection: ResolvedExecution) =>
+            `${label}: ${selection.providerId || "(inherit root)"}/${selection.model || "(inherit model)"} · ${selection.reasoningLevel} · ${selection.serviceTier ?? "no tier"} · ${selection.permissionMode}`;
           return {
             exitCode: 0,
             stdout: [
-              `worker:   ${goal.workerProviderOverride ?? "(inherits the root thread)"} ${goal.workerModelOverride ?? ""}`.trim(),
-              `verifier: ${goal.verifyProviderOverride ?? "(default)"} ${goal.verifyModelOverride ?? ""}`.trim(),
+              `Execution revision: ${snap.execution.revision}`,
+              line("Global worker", snap.execution.globalDefaults.worker),
+              line("Effective worker", snap.execution.effective.worker),
+              `Worker override: ${snap.execution.overrides.worker ? JSON.stringify(snap.execution.overrides.worker) : "none"}`,
+              line("Global verifier", snap.execution.globalDefaults.verifier),
+              line("Effective verifier", snap.execution.effective.verifier),
+              `Verifier override: ${snap.execution.overrides.verifier ? JSON.stringify(snap.execution.overrides.verifier) : "none"}`,
+              `Capacity: ${snap.settings.maxWorkers}; active ${snap.agents.filter((agent) => agent.status === "running").length}; starting ${snap.agents.filter((agent) => agent.status === "starting").length}; idle-assigned ${snap.agents.filter((agent) => agent.status === "idle" && agent.itemId).length}; verifiers ${snap.agents.filter((agent) => agent.role === "verifier").length}`,
+              ...snap.agents.filter((agent) => agent.execution).map((agent) => `${agent.nickname} ${agent.threadId}: requested=${JSON.stringify(agent.execution!.requested)} actual=${JSON.stringify(agent.execution!.actual)}${agent.execution!.mismatches.length ? ` MISMATCH(${agent.execution!.mismatches.join(",")})` : ""}`),
             ].join("\n"),
           };
         }
         if (role !== "worker" && role !== "verifier") {
-          return { exitCode: 1, stderr: 'Usage: bb ultragoal exec | exec worker <provider> <model> | exec verifier <provider> <model>' };
+          return { exitCode: 1, stderr: 'Usage: bb ultragoal exec | exec worker|verifier [--provider id --model id --reasoning level --tier default|fast] [--permission mode] [--clear] [--replace-active]' };
         }
-        const providerId = (tokens[1] ?? "").trim();
-        const model = tokens.slice(2).join(" ").trim();
-        if (!providerId || !model) {
-          return { exitCode: 1, stderr: `Usage: bb ultragoal exec ${role} <provider> <model>` };
+        let clear = false;
+        let replaceActive = false;
+        let providerId: string | undefined;
+        let model: string | undefined;
+        let reasoningLevel: ReturnType<typeof parseReasoningLevel> | undefined;
+        let serviceTier: ReturnType<typeof parseServiceTier> | undefined;
+        let permissionMode: "auto" | "accept-edits" | "full" | undefined;
+        const positional: string[] = [];
+        for (let i = 1; i < tokens.length; i += 1) {
+          const token = tokens[i];
+          const value = () => tokens[++i] ?? "";
+          if (token === "--clear") { clear = true; continue; }
+          if (token === "--replace-active") { replaceActive = true; continue; }
+          if (token === "--provider") { providerId = value().trim(); continue; }
+          if (token === "--model") { model = value().trim(); continue; }
+          if (token === "--reasoning") {
+            const raw = value().trim();
+            if (!isReasoningLevel(raw)) return { exitCode: 1, stderr: `Invalid reasoning level: ${raw || "(empty)"}` };
+            reasoningLevel = raw;
+            continue;
+          }
+          if (token === "--tier") {
+            const raw = value().trim();
+            if (!isServiceTier(raw)) return { exitCode: 1, stderr: `Invalid service tier: ${raw || "(empty)"}` };
+            serviceTier = raw;
+            continue;
+          }
+          if (token === "--permission") {
+            const raw = value().trim();
+            if (raw !== "auto" && raw !== "accept-edits" && raw !== "full") {
+              return { exitCode: 1, stderr: `Invalid permission mode: ${raw || "(empty)"}` };
+            }
+            permissionMode = raw;
+            continue;
+          }
+          positional.push(token);
         }
-        const updated = store.update(
-          threadId,
-          role === "worker"
-            ? { workerProviderOverride: providerId, workerModelOverride: model }
-            : { verifyProviderOverride: providerId, verifyModelOverride: model },
-        );
-        if (!updated) return { exitCode: 1, stderr: "Could not update the goal." };
-        markGoalEvent(threadId);
-        void publishFresh(threadId);
-        return {
+        providerId ??= positional[0]?.trim();
+        model ??= positional.slice(1).join(" ").trim() || undefined;
+        if (clear && (providerId || model || reasoningLevel || serviceTier || permissionMode)) {
+          return { exitCode: 1, stderr: "--clear cannot be combined with execution values" };
+        }
+        if (!clear && (!providerId || !model)) {
+          return { exitCode: 1, stderr: `Usage: bb ultragoal exec ${role} --provider <id> --model <id> [--reasoning <level>] [--tier default|fast]${role === "worker" ? " [--permission auto|accept-edits|full] [--replace-active]" : ""}` };
+        }
+        if (role === "verifier" && permissionMode && permissionMode !== "auto") {
+          return { exitCode: 1, stderr: "Verifiers are fixed to auto permission mode so they cannot edit the work they judge." };
+        }
+        settingsChanging.add(threadId);
+        try {
+          const deadline = Date.now() + 30_000;
+          while (scheduling.has(threadId) && Date.now() < deadline) await delay(10);
+          const current = store.get(threadId);
+          if (!current) return { exitCode: 1, stderr: "No UltraGoal is set on this thread." };
+          if (!clear) {
+            const checked = await resolveAndValidateExecution(bb, threadId, {
+            providerId,
+            model,
+            reasoningLevel: reasoningLevel ?? DEFAULT_REASONING_LEVEL,
+            serviceTier: serviceTier ?? null,
+            permissionMode: role === "worker" ? permissionMode ?? view(current).settings.workerPermissionMode : "auto",
+            }, role);
+            if ("error" in checked) return { exitCode: 1, stderr: checked.error };
+          }
+          const updated = store.update(threadId, role === "worker"
+          ? {
+              workerProviderOverride: clear ? null : providerId,
+              workerModelOverride: clear ? null : model,
+              workerReasoningOverride: clear ? null : reasoningLevel ?? DEFAULT_REASONING_LEVEL,
+              workerServiceTierOverride: clear ? null : serviceTier ?? null,
+              workerPermissionModeOverride: clear ? null : permissionMode ?? view(current).settings.workerPermissionMode,
+              executionRevision: current.executionRevision + 1,
+            }
+          : {
+              verifyProviderOverride: clear ? null : providerId,
+              verifyModelOverride: clear ? null : model,
+              verifyReasoningOverride: clear ? null : reasoningLevel ?? DEFAULT_REASONING_LEVEL,
+              verifyServiceTierOverride: clear ? null : serviceTier ?? null,
+              executionRevision: current.executionRevision + 1,
+            });
+          if (!updated) return { exitCode: 1, stderr: "Could not update the goal." };
+          let replacement: Awaited<ReturnType<typeof replaceActiveCrew>> | null = null;
+          if (replaceActive && role === "worker") replacement = await replaceActiveCrew(threadId);
+          markGoalEvent(threadId);
+          void publishFresh(threadId);
+          return {
           exitCode: 0,
-          stdout: `${role} now runs on ${providerId} ${model}. Workers already running keep the provider they started on.`,
-        };
+          stdout: [
+            clear ? `${role} override cleared; inherited defaults are effective.` : `${role} now requests ${providerId}/${model} · ${reasoningLevel ?? DEFAULT_REASONING_LEVEL} · ${serviceTier ?? "default"}${role === "worker" ? ` · ${permissionMode ?? view(updated).settings.workerPermissionMode}` : " · auto"}.`,
+            replacement
+              ? replacement.completed
+                ? `Replaced ${replacement.replacements.length} worker(s): ${replacement.replacements.map((entry) => `${entry.oldThreadId}->${entry.newThreadId} actual=${JSON.stringify(entry.actual)}`).join(", ") || "none active"}`
+                : `Rolling replacement paused at ${replacement.paused?.threadId}: ${replacement.paused?.risk}`
+              : "Workers already running keep their launch selection; use --replace-active for a controlled replacement.",
+          ].join("\n"),
+          };
+        } finally {
+          settingsChanging.delete(threadId);
+          void scheduleReady(threadId);
+        }
       }
 
       if (action === "pause") {
@@ -4787,6 +5508,7 @@ export default function plugin(bb: BbPluginApi) {
       items.clear(threadId);
       findings.clear(threadId);
       decisions.clear(threadId);
+      invalidBaseSuppressions.clear(threadId);
       store.clear(threadId);
       publish(threadId, null);
       return { exitCode: 0, stdout: "UltraGoal cleared." };
@@ -4808,6 +5530,7 @@ export default function plugin(bb: BbPluginApi) {
       { name: "release", summary: "Return a stopped worker's slice to the queue and free its slot", usage: "bb ultragoal release <worker-thread-id|item-id> [--hold] [--thread <id>]" },
       { name: "requires", summary: "Declare output paths a work item cannot close without", usage: "bb ultragoal requires <item-id> <path,path> | <item-id> --clear [--thread <id>]" },
       { name: "item", summary: "Edit a work item's brief, scope or check without staffing it", usage: "bb ultragoal item <item-id> [--step \"<text>\"] [--files a,b] [--check \"<cmd>\" | --no-check] [--remove] [--unhold] | bb ultragoal item --new --step \"<text>\" [--files a,b] [--check \"<cmd>\"] [--thread <id>]" },
+      { name: "revalidate", summary: "Explicitly retry an unchanged invalid base tuple", usage: "bb ultragoal revalidate <item-id> [--thread <id>]" },
       { name: "resolve", summary: "Close a finding whose fix landed outside its own slice, or that is not a defect", usage: "bb ultragoal resolve <finding-id> --as fixed|not-a-defect --evidence \"<proof>\" [--repository <path>] [--thread <id>]" },
       { name: "pause", summary: "Pause the UltraGoal", usage: "bb ultragoal pause [--thread <id>]" },
       { name: "resume", summary: "Resume a paused UltraGoal", usage: "bb ultragoal resume [--thread <id>]" },
@@ -4861,7 +5584,7 @@ function parseCli(
   argv: string[],
   fallbackThreadId: string | undefined,
 ): {
-  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "requires" | "item" | "resolve" | "exec" | "transfer-root";
+  action: "status" | "pane" | "set" | "edit" | "pause" | "resume" | "clear" | "workers" | "decide" | "finding" | "release" | "requires" | "item" | "resolve" | "exec" | "transfer-root" | "revalidate";
   threadId: string | undefined;
   objective?: string;
   rawRest?: string[];
@@ -4884,11 +5607,14 @@ function parseCli(
     return { action: "status", threadId };
   }
   if (
-    action === "set" || action === "edit" || action === "workers" ||
+    action === "edit" || action === "workers" ||
     action === "decide" || action === "release" ||
-    action === "requires"
+    action === "requires" || action === "revalidate"
   ) {
     return { action, threadId, objective: rest.slice(1).join(" ").trim() };
+  }
+  if (action === "set") {
+    return { action, threadId, objective: rest.slice(1).join(" ").trim(), rawRest: rest.slice(1) };
   }
   if (action === "finding" || action === "item" || action === "resolve" || action === "exec") {
     return { action, threadId, objective: rest.slice(1).join(" ").trim(), rawRest: rest.slice(1) };
@@ -4904,6 +5630,65 @@ function parseCli(
 
 type ExecutionOptions = Awaited<ReturnType<BbPluginApi["sdk"]["system"]["executionOptions"]>>;
 type ExecutionProvider = NonNullable<ExecutionOptions["providers"]>[number];
+
+interface ResolvedExecution {
+  providerId: string;
+  model: string;
+  reasoningLevel: ReturnType<typeof parseReasoningLevel>;
+  serviceTier: ReturnType<typeof parseServiceTier>;
+  permissionMode: "auto" | "accept-edits" | "full";
+}
+
+async function resolveAndValidateExecution(
+  bb: BbPluginApi,
+  threadId: string,
+  requested: Partial<ResolvedExecution>,
+  role: "worker" | "verifier",
+): Promise<{ selection: ResolvedExecution } | { error: string }> {
+  const catalog = await listExecutionCatalog(bb, threadId);
+  let rootProviderId = "";
+  try {
+    rootProviderId = (await bb.sdk.threads.get({ threadId })).providerId;
+  } catch {
+    // Start remains usable in a newly-created/fake root; explicit settings or
+    // the catalog default still produce a fully pinned configuration.
+  }
+  let inherited: Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["defaultExecutionOptions"]>> | null = null;
+  try {
+    inherited = await bb.sdk.threads.defaultExecutionOptions({ threadId });
+  } catch {
+    // Missing host state is handled by the catalog defaults below.
+  }
+  const providerId = requested.providerId?.trim() || rootProviderId || catalog.find((entry) => entry.available)?.id || DEFAULT_VERIFY_PROVIDER;
+  const provider = catalog.find((entry) => entry.id === providerId);
+  if (!provider || !provider.available) {
+    return { error: `${role} provider ${providerId || "(empty)"} is unavailable in the target environment` };
+  }
+  const inheritedModel = providerId === rootProviderId && provider.models.some((entry) => entry.id === inherited?.model)
+    ? inherited?.model
+    : undefined;
+  const modelId = requested.model?.trim() ||
+    inheritedModel ||
+    provider.models.find((model) => model.isDefault)?.id ||
+    provider.models[0]?.id || "";
+  const model = provider.models.find((entry) => entry.id === modelId);
+  if (!model) return { error: `${role} model ${modelId || "(empty)"} is not available from ${providerId}` };
+  const reasoningLevel = requested.reasoningLevel ?? inherited?.reasoningLevel ?? model.defaultReasoning ?? DEFAULT_REASONING_LEVEL;
+  if (model.reasoning.length > 0 && !model.reasoning.includes(reasoningLevel)) {
+    return { error: `${role} model ${providerId}/${modelId} does not support ${reasoningLevel} reasoning` };
+  }
+  const serviceTier = provider.supportsServiceTier
+    ? requested.serviceTier ?? (providerId === rootProviderId ? inherited?.serviceTier : null) ?? "default"
+    : null;
+  if (requested.serviceTier === "fast" && !provider.supportsServiceTier) {
+    return { error: `${role} provider ${providerId} does not support the fast service tier` };
+  }
+  const permissionMode = role === "verifier" ? "auto" : requested.permissionMode ?? "auto";
+  if (!provider.permissionModes.includes(permissionMode)) {
+    return { error: `${role} provider ${providerId} cannot run with permission mode ${permissionMode}; supported: ${provider.permissionModes.join(", ") || "none"}` };
+  }
+  return { selection: { providerId, model: modelId, reasoningLevel, serviceTier, permissionMode } };
+}
 
 async function listExecutionCatalog(
   bb: BbPluginApi,
@@ -4925,7 +5710,12 @@ async function listExecutionCatalog(
     const options = await bb.sdk.system.executionOptions(scope);
     providers = options.providers ?? [];
   } catch {
-    const listed = await bb.sdk.providers.list(scope).catch(() => []);
+    let listed: Awaited<ReturnType<BbPluginApi["sdk"]["providers"]["list"]>> = [];
+    try {
+      listed = await bb.sdk.providers.list(scope);
+    } catch {
+      // Older hosts and minimal test harnesses may not expose provider APIs.
+    }
     providers = listed.map((provider) => ({
       id: provider.id,
       displayName: provider.displayName,
@@ -4951,6 +5741,7 @@ async function listExecutionCatalog(
         displayName: "Codex",
         available: true,
         supportsServiceTier: true,
+        permissionModes: ["auto", "accept-edits", "full"],
         brandPrefix: BRAND_PREFIX.codex,
         models: [
           {
@@ -4971,6 +5762,7 @@ async function listExecutionCatalog(
       displayName: provider.displayName,
       available: provider.available !== false,
       supportsServiceTier: provider.capabilities?.supportsServiceTier === true,
+      permissionModes: [...(provider.capabilities?.permissionModes ?? [])],
       ...(BRAND_PREFIX[provider.id] ? { brandPrefix: BRAND_PREFIX[provider.id] } : {}),
       models: await listProviderModels(bb, provider.id, environmentId),
     })),

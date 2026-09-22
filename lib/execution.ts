@@ -48,6 +48,7 @@ export interface CatalogProvider {
   displayName: string;
   available: boolean;
   supportsServiceTier: boolean;
+  permissionModes: Array<"auto" | "accept-edits" | "full">;
   brandPrefix?: string;
   models: CatalogModel[];
 }

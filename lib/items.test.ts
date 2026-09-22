@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createFakePluginHost, type FakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createItemStore } from "./items.ts";
+import { createItemStore, type PlanPatchItem } from "./items.ts";
 
 const hosts: FakePluginHost[] = [];
 
@@ -27,7 +27,7 @@ function itemStore() {
       check_cmd TEXT
     )
   `);
-  return { store: createItemStore(host.bb), db: host.bb.storage.database() };
+  return { host, store: createItemStore(host.bb), db: host.bb.storage.database() };
 }
 
 describe("patch-style plans", () => {
@@ -110,5 +110,43 @@ describe("patch-style plans", () => {
       /forced patch failure/,
     );
     assert.deepEqual(store.list("thr_root"), before);
+  });
+});
+
+describe("durable item provenance", () => {
+  it("persists finding ownership across patches, rewrites, transfer, and restart", () => {
+    const { host, store, db } = itemStore();
+    const minted = store.addRemediation("thr_root", "Fix a defect", {
+      files: ["src/a.ts"],
+      check: "npm test -- a",
+    })!;
+    store.patch("thr_root", [{ id: minted.id, step: "Fix a defect", status: "in_progress" }], []);
+    store.replace("thr_root", [{ id: minted.id, step: "Fix a defect", status: "pending" }]);
+    db.prepare("UPDATE goal_items SET thread_id = ? WHERE thread_id = ?").run("thr_moved", "thr_root");
+    assert.equal(createItemStore(host.bb).origin("thr_moved", minted.id), "finding");
+  });
+
+  it("never lets an ordinary plan patch forge finding ownership", () => {
+    const { store, db } = itemStore();
+    const forged = { step: "Owner slice", status: "pending", origin: "finding" } as PlanPatchItem;
+    const [created] = store.patch("thr_root", [forged], []).items;
+    store.patch("thr_root", [{ ...forged, id: created!.id } as PlanPatchItem], []);
+    const row = db.prepare("SELECT origin FROM goal_items WHERE id = ?").get(created!.id) as {
+      origin: string | null;
+    };
+    assert.equal(row.origin, null);
+    assert.equal(store.origin("thr_root", created!.id), null);
+  });
+
+  it("fails closed for unknown legacy provenance", () => {
+    const { store, db } = itemStore();
+    const legacy = store.add("thr_root", "Legacy row")!;
+    db.prepare("UPDATE goal_items SET origin = 'native' WHERE id = ?").run(legacy.id);
+    assert.equal(store.origin("thr_root", legacy.id), null);
+    store.patch("thr_root", [{ id: legacy.id, step: "Legacy row retitled", status: "pending" }], []);
+    assert.equal(
+      (db.prepare("SELECT origin FROM goal_items WHERE id = ?").get(legacy.id) as { origin: string }).origin,
+      "native",
+    );
   });
 });

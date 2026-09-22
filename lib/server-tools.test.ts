@@ -17,11 +17,83 @@ afterEach(async () => {
   while (hosts.length > 0) await hosts.pop()!.harness.lifecycle.dispose();
 });
 
-function registeredHost(sdk?: CreateFakePluginHostOptions["sdk"]) {
+function registeredHost(
+  sdk?: CreateFakePluginHostOptions["sdk"],
+  hostRpc?: CreateFakePluginHostOptions["experimental_callHostRpc"],
+) {
+  const provider = (id: string, displayName: string) => ({
+    id,
+    displayName,
+    available: true,
+    capabilities: {
+      supportsServiceTier: true,
+      permissionModes: ["auto", "accept-edits", "full"] as const,
+      supportsFork: true,
+      supportsNativeUserQuestion: true,
+      supportsSessionRewind: false,
+      supportsThreadArchive: true,
+      supportsThreadRename: true,
+    },
+    composerActions: [],
+    logoUrl: null,
+  });
+  const model = (id: string, displayName: string) => ({
+    id,
+    model: id,
+    displayName,
+    description: "test model",
+    isDefault: true,
+    defaultReasoningEffort: "medium" as const,
+    supportedReasoningEfforts: [
+      { reasoningEffort: "medium" as const, description: "balanced" },
+      { reasoningEffort: "high" as const, description: "thorough" },
+      { reasoningEffort: "xhigh" as const, description: "very thorough" },
+    ],
+  });
+  const providers = [provider("codex", "Codex"), provider("acp-opencode", "OpenCode")];
+  const systemDefaults = {
+    executionOptions: (args?: { providerId?: string }) => ({
+      providers,
+      models: args?.providerId === "acp-opencode"
+        ? [model("openrouter/stealth/ox-alpha", "OpenRouter Stealth")]
+        : [model("gpt-5.6-sol", "GPT-5.6-Sol")],
+      selectedOnlyModels: [],
+      modelLoadError: null,
+      permissionCeiling: "full" as const,
+    }),
+  };
+  const threadDefaults = {
+    defaultExecutionOptions: () => ({
+      model: "gpt-5.6-sol",
+      reasoningLevel: "medium" as const,
+      serviceTier: "default" as const,
+      permissionMode: "auto" as const,
+      source: "client/thread/start" as const,
+    }),
+  };
   const host = createFakePluginHost({
     pluginId: `ultragoal-tools-${hosts.length}`,
     agentSkillIds: ["ultragoal"],
-    sdk,
+    sdk: {
+      ...sdk,
+      system: { ...systemDefaults, ...sdk?.system },
+      threads: { ...threadDefaults, ...sdk?.threads },
+      environments: {
+        get: ({ environmentId }) => ({
+          id: environmentId,
+          hostId: "host_test",
+          path: "/tmp/ultragoal-test-repository",
+          branchName: "main",
+          mergeBaseBranch: "main",
+        }),
+        ...sdk?.environments,
+      },
+    },
+    experimental_callHostRpc: hostRpc ?? (() => ({
+      status: "valid",
+      repository: "/tmp/ultragoal-test-repository",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+    })),
   });
   hosts.push(host);
   // Keep this registration test isolated from the developer machine's
@@ -262,6 +334,65 @@ describe("large-plan agent tool contracts", () => {
     );
   });
 
+  it("validates and persists the complete launch configuration in the creation upsert", async () => {
+    const host = registeredHost();
+    const started = await host.harness.behavior.callAgentTool(
+      "ultragoal_start",
+      {
+        objective: "Start with a fully pinned execution configuration",
+        max_workers: 3,
+        verify_enabled: true,
+        worker_provider: "acp-opencode",
+        worker_model: "openrouter/stealth/ox-alpha",
+        worker_reasoning: "high",
+        worker_service_tier: "fast",
+        worker_permission_mode: "accept-edits",
+        verify_provider: "codex",
+        verify_model: "gpt-5.6-sol",
+        verify_reasoning: "xhigh",
+        verify_service_tier: "default",
+      },
+      { threadId: "thr_atomic_start" },
+    );
+    assert.equal(isToolError(started), false);
+    const row = host.bb.storage.database().prepare(`
+      SELECT max_workers, verify_enabled, worker_provider, worker_model,
+        worker_reasoning, worker_service_tier, worker_permission_mode,
+        verify_provider, verify_model, verify_reasoning, verify_service_tier,
+        execution_revision
+      FROM goals WHERE thread_id='thr_atomic_start'
+    `).get();
+    assert.deepEqual(row, {
+      max_workers: 3,
+      verify_enabled: 1,
+      worker_provider: "acp-opencode",
+      worker_model: "openrouter/stealth/ox-alpha",
+      worker_reasoning: "high",
+      worker_service_tier: "fast",
+      worker_permission_mode: "accept-edits",
+      verify_provider: "codex",
+      verify_model: "gpt-5.6-sol",
+      verify_reasoning: "xhigh",
+      verify_service_tier: "default",
+      execution_revision: 1,
+    });
+
+    const rejected = await host.harness.behavior.callAgentTool(
+      "ultragoal_start",
+      {
+        objective: "Reject an unavailable model before creating state",
+        worker_provider: "codex",
+        worker_model: "missing-model",
+      },
+      { threadId: "thr_invalid_start" },
+    );
+    assert.equal(isToolError(rejected), true);
+    assert.equal(
+      host.bb.storage.database().prepare("SELECT 1 FROM goals WHERE thread_id='thr_invalid_start'").get(),
+      undefined,
+    );
+  });
+
   it("reconstructs a transferred Codex root with canonical tools and live instructions", async () => {
     const host = registeredHost();
     host.bb.storage.database().prepare(
@@ -333,7 +464,7 @@ describe("large-plan agent tool contracts", () => {
           id: threadId,
           projectId: "proj",
           providerId: "acp-opencode",
-          environmentId: null,
+          environmentId: "env_test",
           status: "active",
           parentThreadId: threadId === "thr_existing_worker" ? "thr_reload" : null,
         }),
@@ -416,7 +547,7 @@ describe("large-plan agent tool contracts", () => {
           id: threadId,
           projectId: "proj",
           providerId: "acp-opencode",
-          environmentId: null,
+          environmentId: "env_test",
           status: "idle",
         }),
         list: () => [],
@@ -467,6 +598,237 @@ describe("large-plan agent tool contracts", () => {
         "SELECT COUNT(*) AS n FROM collab_agents WHERE root_thread_id='thr_spawn_fail' AND retired_at IS NULL",
       ).get() as { n: number }).n,
       0,
+    );
+  });
+
+  it("immediately returns a failed worker slice to the queue and restaffs it", async () => {
+    let spawnCalls = 0;
+    const host = registeredHost({
+      threads: {
+        get: ({ threadId }) => makeThreadResponse({
+          id: threadId,
+          parentThreadId: threadId === "thr_failed_worker" ? "thr_converge" : null,
+          projectId: "proj",
+          providerId: "acp-opencode",
+          environmentId: "env_test",
+          status: threadId === "thr_failed_worker" ? "error" : "idle",
+        }),
+        list: () => [],
+        spawn: () => {
+          spawnCalls += 1;
+          return makeThreadResponse({
+            id: `thr_replacement_${spawnCalls}`,
+            parentThreadId: "thr_converge",
+            projectId: "proj",
+            providerId: "acp-opencode",
+            environmentId: "env_test",
+            status: "active",
+          });
+        },
+        update: ({ threadId }) => makeThreadResponse({ id: threadId }),
+      },
+    });
+    const db = host.bb.storage.database();
+    db.prepare(
+      "UPDATE goals SET thread_id='thr_converge', status='active', max_workers=1 WHERE thread_id='thr_sentinel'",
+    ).run();
+    const item = createItemStore(host.bb).add("thr_converge", "Restaff a failed slice", "in_progress", {
+      files: ["src/converge.ts"],
+    })!;
+    db.prepare(`
+      INSERT INTO collab_agents (
+        thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+        display_name, item_id, role
+      ) VALUES ('thr_failed_worker', 'thr_converge', 'thr_converge', '/root/failed', 1,
+        'Failed Worker', ?, 'worker')
+    `).run(item.id);
+
+    await host.harness.behavior.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({
+        id: "thr_failed_worker",
+        parentThreadId: "thr_converge",
+        environmentId: "env_test",
+        status: "error",
+      }),
+      error: "provider crashed",
+    });
+    for (let index = 0; index < 12; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 1);
+    assert.equal(
+      (db.prepare("SELECT status FROM goal_items WHERE id = ?").get(item.id) as { status: string }).status,
+      "in_progress",
+    );
+    assert.equal(
+      (db.prepare("SELECT retired_at IS NOT NULL AS retired FROM collab_agents WHERE thread_id='thr_failed_worker'").get() as { retired: number }).retired,
+      1,
+    );
+  });
+
+  it("durably suppresses an invalid base until explicit revalidation", async () => {
+    let valid = false;
+    let spawnCalls = 0;
+    const commit = "a".repeat(40);
+    const host = registeredHost({
+      threads: {
+        get: ({ threadId }) => makeThreadResponse({
+          id: threadId,
+          projectId: "proj",
+          providerId: "acp-opencode",
+          environmentId: "env_invalid",
+          status: "idle",
+        }),
+        list: () => [],
+        spawn: () => {
+          spawnCalls += 1;
+          return makeThreadResponse({ id: `thr_validated_${spawnCalls}` });
+        },
+        update: ({ threadId }) => makeThreadResponse({ id: threadId }),
+      },
+      environments: {
+        get: () => ({
+          id: "env_invalid",
+          hostId: "host_invalid",
+          path: "/srv/project",
+          branchName: "release",
+          mergeBaseBranch: "main",
+        }),
+      },
+    }, () => valid
+      ? { status: "valid", repository: "/srv/project", commit }
+      : { status: "invalid", repository: "/srv/project" });
+    const db = host.bb.storage.database();
+    db.prepare(
+      "UPDATE goals SET thread_id='thr_invalid', status='active', max_workers=1 WHERE thread_id='thr_sentinel'",
+    ).run();
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ step: "Invalid base slice", status: "pending", deps: [], files: ["src/base.ts"] }] },
+      { threadId: "thr_invalid" },
+    );
+    for (let index = 0; index < 10; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    const item = db.prepare("SELECT id, status FROM goal_items WHERE thread_id='thr_invalid'").get() as {
+      id: string;
+      status: string;
+    };
+    assert.equal(spawnCalls, 0);
+    assert.equal(item.status, "pending");
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM invalid_base_suppressions").get() as { n: number }).n,
+      1,
+    );
+
+    valid = true;
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_patch",
+      { plan: [{ id: item.id, step: "Invalid base slice", status: "pending", deps: [], files: ["src/base.ts"] }] },
+      { threadId: "thr_invalid" },
+    );
+    for (let index = 0; index < 6; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 0, "the unchanged tuple stays suppressed even after the ref is repaired");
+
+    const retried = await host.harness.behavior.runCli([
+      "revalidate",
+      item.id,
+      "--thread",
+      "thr_invalid",
+    ]);
+    assert.equal(retried.exitCode, 0, retried.stderr);
+    for (let index = 0; index < 10; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spawnCalls, 1);
+  });
+
+  it("rolls an idle clean worker to the new execution settings without overlap", async () => {
+    const stopped: string[] = [];
+    const archived: string[] = [];
+    let spawnCalls = 0;
+    const host = registeredHost({
+      threads: {
+        get: ({ threadId }) => makeThreadResponse({
+          id: threadId,
+          parentThreadId: threadId === "thr_old_worker" ? "thr_roll" : null,
+          projectId: "proj",
+          providerId: "acp-opencode",
+          environmentId: threadId === "thr_roll" ? "env_roll_root" : "env_roll_worker",
+          status: threadId === "thr_new_worker" ? "active" : "idle",
+        }),
+        list: () => [],
+        spawn: () => {
+          spawnCalls += 1;
+          return makeThreadResponse({
+            id: "thr_new_worker",
+            parentThreadId: "thr_roll",
+            projectId: "proj",
+            providerId: "acp-opencode",
+            environmentId: "env_roll_worker",
+            status: "active",
+          });
+        },
+        stop: ({ threadId }) => {
+          stopped.push(threadId);
+          return { ok: true };
+        },
+        archive: ({ threadId }) => {
+          archived.push(threadId);
+          return { archivedThreadIds: [threadId] };
+        },
+        update: ({ threadId }) => makeThreadResponse({ id: threadId }),
+      },
+      environments: {
+        get: ({ environmentId }) => ({
+          id: environmentId,
+          hostId: "host_roll",
+          path: environmentId === "env_roll_root" ? "/srv/root" : "/srv/worker",
+          branchName: "main",
+          mergeBaseBranch: "main",
+        }),
+      },
+    }, (call: { input?: unknown }) => {
+      const input = call.input as { requestedRef?: string } | undefined;
+      return input?.requestedRef
+        ? { status: "valid" as const, repository: "/srv/root", commit: "b".repeat(40) }
+        : { clean: true, summary: "clean" };
+    });
+    const db = host.bb.storage.database();
+    db.prepare(`
+      UPDATE goals SET thread_id='thr_roll', status='active', max_workers=1,
+        worker_provider='acp-opencode', worker_model='openrouter/stealth/ox-alpha',
+        worker_reasoning='high', worker_service_tier='fast',
+        worker_permission_mode='accept-edits', execution_revision=4
+      WHERE thread_id='thr_sentinel'
+    `).run();
+    const item = createItemStore(host.bb).add("thr_roll", "Roll this worker", "in_progress", {
+      files: ["src/rolling.ts"],
+    })!;
+    db.prepare(`
+      INSERT INTO collab_agents (
+        thread_id, root_thread_id, parent_thread_id, task_name, created_at,
+        display_name, item_id, role
+      ) VALUES ('thr_old_worker', 'thr_roll', 'thr_roll', '/root/old', 1,
+        'Old Worker', ?, 'worker')
+    `).run(item.id);
+
+    const result = await host.harness.behavior.callRpc("replaceWorkers", {
+      threadId: "thr_roll",
+    }) as {
+      completed: boolean;
+      replacements: Array<{ oldThreadId: string; newThreadId: string; itemId: string }>;
+      paused: unknown;
+    };
+    for (let index = 0; index < 8; index += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(result.completed, true);
+    assert.deepEqual(result.replacements.map(({ oldThreadId, newThreadId, itemId }) => ({ oldThreadId, newThreadId, itemId })), [
+      { oldThreadId: "thr_old_worker", newThreadId: "thr_new_worker", itemId: item.id },
+    ]);
+    assert.equal(spawnCalls, 1);
+    assert.deepEqual(stopped, ["thr_old_worker"]);
+    assert.deepEqual(archived, ["thr_old_worker"]);
+    assert.equal(
+      (db.prepare("SELECT retired_at IS NOT NULL AS retired FROM collab_agents WHERE thread_id='thr_old_worker'").get() as { retired: number }).retired,
+      1,
+    );
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM collab_agents WHERE root_thread_id='thr_roll' AND retired_at IS NULL").get() as { n: number }).n,
+      1,
     );
   });
 
@@ -639,7 +1001,7 @@ describe("large-plan agent tool contracts", () => {
           id: threadId,
           projectId: "proj",
           providerId: "acp-opencode",
-          environmentId: null,
+          environmentId: "env_test",
           status: threadId === "thr_brief" ? "idle" : "idle",
           parentThreadId: threadId.startsWith("thr_worker") ? "thr_brief" : null,
         }),

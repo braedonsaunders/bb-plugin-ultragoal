@@ -6,13 +6,20 @@ import { z } from "zod";
 import type { GoalAgent, GoalAgentRole, GoalAgentStatus } from "../contract.js";
 import { auditorNameFor, nextHumorousName, slugFromName, workRelatedName } from "./names.js";
 import { workerQualityBrief } from "./prompts.js";
-import { isReasoningLevel, type ReasoningLevel, type ServiceTier } from "./execution.js";
+import { DEFAULT_REASONING_LEVEL, isReasoningLevel, type ReasoningLevel, type ServiceTier } from "./execution.js";
 import { createItemReservationStore } from "./item-reservations.js";
 import type { FindingAffirmativeEvidence } from "./finding-brief.js";
 
 const MIN_WAIT_TIMEOUT_MS = 1_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_WAIT_TIMEOUT_MS = 600_000;
+
+export interface ValidatedWorkerBase {
+  hostId: string;
+  repository: string;
+  requestedRef: string;
+  commit: string;
+}
 
 const SPAWN_AGENT_DESCRIPTION = `
         Spawns an agent to work on the specified task. If your current task is \`/root/task1\` and you call ultragoal_spawn_agent with task_name "task_3" the agent will have canonical task name \`/root/task1/task_3\`.
@@ -54,12 +61,69 @@ interface CollabRow {
   report_status?: string | null;
   report_evidence?: string | null;
   report_item_id?: string | null;
+  requested_provider?: string | null;
+  requested_model?: string | null;
+  requested_reasoning?: string | null;
+  requested_service_tier?: string | null;
+  requested_permission_mode?: string | null;
+  actual_provider?: string | null;
+  actual_model?: string | null;
+  actual_reasoning?: string | null;
+  actual_service_tier?: string | null;
+  actual_permission_mode?: string | null;
+  execution_revision?: number | null;
+}
+
+export interface RequestedExecution {
+  providerId: string;
+  model: string;
+  reasoningLevel: ReasoningLevel;
+  serviceTier: ServiceTier | null;
+  permissionMode: AgentPermissionMode;
 }
 
 interface CollabReport {
   status: "done" | "blocked";
   evidence: string;
   findingEvidence: FindingAffirmativeEvidence[];
+}
+
+function permissionMode(value: string | null | undefined): AgentPermissionMode {
+  return value === "full" || value === "accept-edits" ? value : "auto";
+}
+
+function executionFromRow(row: CollabRow): GoalAgent["execution"] {
+  if (!row.requested_provider) return null;
+  const requested: NonNullable<GoalAgent["execution"]>["requested"] = {
+    providerId: row.requested_provider,
+    model: row.requested_model ?? "",
+    reasoningLevel: isReasoningLevel(row.requested_reasoning)
+      ? row.requested_reasoning
+      : DEFAULT_REASONING_LEVEL,
+    serviceTier:
+      row.requested_service_tier === "fast" || row.requested_service_tier === "default"
+        ? row.requested_service_tier
+        : null,
+    permissionMode: permissionMode(row.requested_permission_mode),
+  };
+  const actual: NonNullable<GoalAgent["execution"]>["actual"] = row.actual_provider && row.actual_model && isReasoningLevel(row.actual_reasoning)
+    ? {
+        providerId: row.actual_provider,
+        model: row.actual_model,
+        reasoningLevel: row.actual_reasoning,
+        serviceTier:
+          row.actual_service_tier === "fast" || row.actual_service_tier === "default"
+            ? row.actual_service_tier
+            : null,
+        permissionMode: permissionMode(row.actual_permission_mode),
+      }
+    : null;
+  const mismatches = actual
+    ? (Object.keys(requested) as Array<keyof typeof requested>).filter(
+        (key) => requested[key] !== actual[key],
+      )
+    : ["actual-unavailable"];
+  return { revision: row.execution_revision ?? 0, requested, actual, mismatches };
 }
 
 function encodeReport(evidence: string, findingEvidence: readonly FindingAffirmativeEvidence[]): string {
@@ -159,7 +223,9 @@ export function createCollabStore(
      * deliberately for an unattended run. Verifiers never use this — they are
      * pinned to "auto" because a verifier that can write is not a verifier.
      */
-    workerPermissionMode?: () => AgentPermissionMode;
+    workerPermissionMode?: (rootThreadId: string) => AgentPermissionMode;
+    /** Refuse an in-flight scheduler snapshot after settings changed. */
+    executionRevision?: (rootThreadId: string) => number;
     /** A discovered BB child could not obtain a durable root worker slot. */
     onRejectedChild?: (
       rootThreadId: string,
@@ -169,15 +235,54 @@ export function createCollabStore(
   },
 ) {
   const db = bb.storage.database();
+  const readExecutionOptions = async (threadId: string) => {
+    try {
+      return await bb.sdk.threads.defaultExecutionOptions({ threadId });
+    } catch {
+      return null;
+    }
+  };
+  const readThread = async (threadId: string) => {
+    try {
+      return await bb.sdk.threads.get({ threadId });
+    } catch {
+      return null;
+    }
+  };
   const reservations = createItemReservationStore(db);
+  for (const statement of [
+    "ALTER TABLE collab_agents ADD COLUMN requested_provider TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN requested_model TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN requested_reasoning TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN requested_service_tier TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN requested_permission_mode TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN actual_provider TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN actual_model TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN actual_reasoning TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN actual_service_tier TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN actual_permission_mode TEXT",
+    "ALTER TABLE collab_agents ADD COLUMN execution_revision INTEGER NOT NULL DEFAULT 0",
+  ]) {
+    try {
+      db.exec(statement);
+    } catch {
+      // The main store migration already added it.
+    }
+  }
   const insert = db.prepare(`
     INSERT INTO collab_agents (
       thread_id, root_thread_id, parent_thread_id, task_name, created_at, display_name, item_id,
-      role, source_thread_id, last_verify_hash
+      role, source_thread_id, last_verify_hash,
+      requested_provider, requested_model, requested_reasoning, requested_service_tier,
+      requested_permission_mode, actual_provider, actual_model, actual_reasoning,
+      actual_service_tier, actual_permission_mode, execution_revision
     )
     VALUES (
       @thread_id, @root_thread_id, @parent_thread_id, @task_name, @created_at, @display_name, @item_id,
-      @role, @source_thread_id, @last_verify_hash
+      @role, @source_thread_id, @last_verify_hash,
+      @requested_provider, @requested_model, @requested_reasoning, @requested_service_tier,
+      @requested_permission_mode, @actual_provider, @actual_model, @actual_reasoning,
+      @actual_service_tier, @actual_permission_mode, @execution_revision
     )
   `);
   const setMeta = db.prepare(`
@@ -217,6 +322,15 @@ export function createCollabStore(
   const setHash = db.prepare(
     "UPDATE collab_agents SET last_verify_hash = @last_verify_hash WHERE thread_id = @thread_id",
   );
+  const setActualExecution = db.prepare(`
+    UPDATE collab_agents SET
+      actual_provider = @actual_provider,
+      actual_model = @actual_model,
+      actual_reasoning = @actual_reasoning,
+      actual_service_tier = @actual_service_tier,
+      actual_permission_mode = @actual_permission_mode
+    WHERE thread_id = @thread_id
+  `);
   const bumpFails = db.prepare(
     "UPDATE collab_agents SET verify_fails = COALESCE(verify_fails, 0) + 1 WHERE thread_id = ?",
   );
@@ -243,6 +357,10 @@ export function createCollabStore(
          END,
          item_id = NULL
      WHERE thread_id = @thread_id`,
+  );
+  const restoreRow = db.prepare(
+    `UPDATE collab_agents SET retired_at = NULL, item_id = @item_id
+     WHERE thread_id = @thread_id AND retired_at IS NOT NULL`,
   );
 
   function itemHasWorker(
@@ -452,6 +570,19 @@ export function createCollabStore(
             source_thread_id: null,
             last_verify_hash: null,
           };
+          const childThread = await readThread(child.id);
+          const actual = await readExecutionOptions(child.id);
+          extra.requested_provider = childThread?.providerId ?? "";
+          extra.requested_model = actual?.model ?? "";
+          extra.requested_reasoning = actual?.reasoningLevel ?? DEFAULT_REASONING_LEVEL;
+          extra.requested_service_tier = actual?.serviceTier ?? null;
+          extra.requested_permission_mode = actual?.permissionMode ?? "auto";
+          extra.actual_provider = childThread?.providerId ?? null;
+          extra.actual_model = actual?.model ?? null;
+          extra.actual_reasoning = actual?.reasoningLevel ?? null;
+          extra.actual_service_tier = actual?.serviceTier ?? null;
+          extra.actual_permission_mode = actual?.permissionMode ?? null;
+          extra.execution_revision = 0;
           try {
             insert.run({
               thread_id: extra.thread_id,
@@ -464,6 +595,17 @@ export function createCollabStore(
               role: extra.role,
               source_thread_id: extra.source_thread_id,
               last_verify_hash: extra.last_verify_hash,
+              requested_provider: extra.requested_provider,
+              requested_model: extra.requested_model,
+              requested_reasoning: extra.requested_reasoning,
+              requested_service_tier: extra.requested_service_tier,
+              requested_permission_mode: extra.requested_permission_mode,
+              actual_provider: extra.actual_provider,
+              actual_model: extra.actual_model,
+              actual_reasoning: extra.actual_reasoning,
+              actual_service_tier: extra.actual_service_tier,
+              actual_permission_mode: extra.actual_permission_mode,
+              execution_revision: extra.execution_revision,
             });
             extras.push(extra);
           } catch (error) {
@@ -545,6 +687,24 @@ export function createCollabStore(
               summary: null,
               title: null,
             });
+        if (refreshIds.has(row.thread_id)) {
+          const actual = await readExecutionOptions(row.thread_id);
+          if (actual) {
+            row.actual_provider = row.actual_provider ?? row.requested_provider;
+            row.actual_model = actual.model;
+            row.actual_reasoning = actual.reasoningLevel;
+            row.actual_service_tier = actual.serviceTier;
+            row.actual_permission_mode = actual.permissionMode;
+            setActualExecution.run({
+              thread_id: row.thread_id,
+              actual_provider: row.actual_provider,
+              actual_model: row.actual_model,
+              actual_reasoning: row.actual_reasoning,
+              actual_service_tier: row.actual_service_tier,
+              actual_permission_mode: row.actual_permission_mode,
+            });
+          }
+        }
         const nickname = row.display_name?.trim() || nicknameOf(row.task_name, null);
         const title = mapped.title && mapped.title !== nickname ? mapped.title : null;
         return {
@@ -556,6 +716,7 @@ export function createCollabStore(
           role: row.role === "verifier" ? "verifier" as const : "worker" as const,
           status: mapped.status,
           summary: mapped.summary,
+          execution: executionFromRow(row),
         };
       }),
     );
@@ -636,6 +797,11 @@ export function createCollabStore(
     strictItemClaim?: boolean;
     /** Root-wide durable worker cap for scheduler-only strict spawns. */
     schedulerMaxWorkers?: number;
+    /** Host-validated source; the peeled SHA closes validation/spawn races. */
+    validatedBase?: ValidatedWorkerBase;
+    /** Exact validated selection captured by the scheduler. */
+    execution?: RequestedExecution;
+    executionRevision?: number;
   }): Promise<
     | { threadId: string; taskName: string; nickname: string; itemId: string | null }
     | { error: string }
@@ -652,6 +818,9 @@ export function createCollabStore(
       skipClaim,
       strictItemClaim,
       schedulerMaxWorkers,
+      validatedBase,
+      execution,
+      executionRevision,
     } = args;
     const trimmed = args.message.trim();
     if (!trimmed) return { error: "Empty message can't be sent to an agent" };
@@ -740,24 +909,34 @@ export function createCollabStore(
     ]
       .filter(Boolean)
       .join("\n\n");
-    // Where completed slices are squash-merged. integrateWorker uses the root
-    // environment's mergeBaseBranch, falling back to its checked-out branch, so
-    // workers must be cut from the same place.
-    let integrationBranch: string | null = null;
-    if (parent.environmentId) {
-      try {
-        const rootEnv = await bb.sdk.environments.get({ environmentId: parent.environmentId });
-        integrationBranch = rootEnv.branchName ?? rootEnv.mergeBaseBranch ?? null;
-      } catch {
-        integrationBranch = null;
+    // A root can move to another repository without changing its project.
+    // Managed spawning resolves the source from project + host, not the root's
+    // cwd. Select an exact source match before provisioning; never guess from
+    // a containing directory, remote URL, or a source on another host.
+    const root = rootThreadId === threadId
+      ? parent
+      : await bb.sdk.threads.get({ threadId: rootThreadId });
+    const rootEnv = root.environmentId
+      ? await bb.sdk.environments.get({ environmentId: root.environmentId })
+      : null;
+    let workerProjectId = root.projectId ?? args.projectId;
+    if (rootEnv?.isGitRepo && !rootEnv.isWorktree && rootEnv.path) {
+      const projects = await bb.sdk.projects.list();
+      const matches = projects.filter((project) => project.sources.some((source) =>
+        source.hostId === rootEnv.hostId && source.path === rootEnv.path,
+      ));
+      const matchingProject = matches.find((project) => project.id === workerProjectId)
+        ?? (matches.length === 1 ? matches[0] : null);
+      if (!matchingProject) {
+        throw new Error(
+          `Cannot staff ${rootThreadId}: expected one project source matching ${rootEnv.path} on ${rootEnv.hostId}; found ${matches.length}.`,
+        );
       }
+      workerProjectId = matchingProject.id;
     }
-    const parentHostId = parent.environmentId
-      ? await bb.sdk.environments
-          .get({ environmentId: parent.environmentId })
-          .then((environment) => environment.hostId)
-          .catch(() => undefined)
-      : undefined;
+    // Keep managed roots in their owning project: their worktree path is not
+    // a project source. The named base is also the worker's integration target.
+    const integrationBranch = rootEnv?.branchName ?? rootEnv?.mergeBaseBranch ?? null;
     // Execution is pinned with explicit provenance: the server drops
     // provider/model fields that carry no executionInputSources and re-derives
     // them from the project's stored defaults — which follow whatever the user
@@ -768,12 +947,20 @@ export function createCollabStore(
       reasoningLevel: null,
       serviceTier: null,
     };
-    const execProviderId = pin.providerId ?? parent.providerId;
-    const execModel = model ?? pin.model ?? undefined;
-    const execReasoning = isReasoningLevel(pin.reasoningLevel) ? pin.reasoningLevel : undefined;
-    const execServiceTier = pin.serviceTier ?? undefined;
+    const execProviderId = execution?.providerId ?? pin.providerId ?? parent.providerId;
+    const execModel = execution?.model ?? model ?? pin.model ?? undefined;
+    const execReasoning = execution?.reasoningLevel ?? (isReasoningLevel(pin.reasoningLevel) ? pin.reasoningLevel : undefined);
+    const execServiceTier = execution?.serviceTier ?? pin.serviceTier ?? undefined;
+    const execPermissionMode = execution?.permissionMode ?? hooks?.workerPermissionMode?.(rootThreadId) ?? ("auto" as const);
+    if (
+      executionRevision != null &&
+      hooks?.executionRevision &&
+      hooks.executionRevision(rootThreadId) !== executionRevision
+    ) {
+      return { error: `Worker execution settings changed while ${requested ?? taskName} was preparing; stale revision ${executionRevision} was not spawned.` };
+    }
     const spawnArgs = {
-      projectId: parent.projectId ?? args.projectId,
+      projectId: workerProjectId,
       parentThreadId: threadId,
       providerId: execProviderId,
       model: execModel,
@@ -785,12 +972,12 @@ export function createCollabStore(
         ...(execReasoning ? { reasoningLevel: "explicit" as const } : {}),
         ...(execServiceTier ? { serviceTier: "explicit" as const } : {}),
       },
-      permissionMode: hooks?.workerPermissionMode?.() ?? ("auto" as const),
+      permissionMode: execPermissionMode,
       // Non-forked workers get their own managed worktree: sharing the root's
       // environment would put concurrent writers in one directory.
       environment: {
         type: "host" as const,
-        hostId: parentHostId,
+        hostId: validatedBase?.hostId ?? rootEnv?.hostId,
         workspace: {
           type: "managed-worktree" as const,
           // Branch from where integration LANDS, not from the repository
@@ -800,7 +987,9 @@ export function createCollabStore(
           // bases, one re-implementing a slice already merged, every one of
           // them heading for a conflict. A worker that starts behind the
           // integration point is wasted before it reads a line.
-          baseBranch: integrationBranch
+          baseBranch: validatedBase
+            ? { kind: "named" as const, name: validatedBase.commit }
+            : integrationBranch
             ? { kind: "named" as const, name: integrationBranch }
             : { kind: "default" as const },
         },
@@ -818,7 +1007,7 @@ export function createCollabStore(
               sourceThreadId: threadId,
               input: [{ type: "text", text: prompt, mentions: [] }],
               title: shortSliceTitle(trimmed) || displayName,
-              permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
+              permissionMode: hooks?.workerPermissionMode?.(rootThreadId) ?? "auto",
               visibility: "hidden",
               workspace: "reuse",
               // Plugin-origin children skip bb's parent "needs help"
@@ -826,6 +1015,7 @@ export function createCollabStore(
               origin: "plugin",
             })
             .catch(() => bb.sdk.threads.spawn(spawnArgs));
+      const actual = await readExecutionOptions(child.id);
       const row = {
         thread_id: child.id,
         root_thread_id: rootId(threadId),
@@ -837,6 +1027,17 @@ export function createCollabStore(
         role: role === "verifier" ? "verifier" : "worker",
         source_thread_id: null,
         last_verify_hash: null,
+        requested_provider: execProviderId ?? "",
+        requested_model: execModel ?? "",
+        requested_reasoning: execReasoning ?? DEFAULT_REASONING_LEVEL,
+        requested_service_tier: execServiceTier ?? null,
+        requested_permission_mode: execPermissionMode,
+        actual_provider: child.providerId ?? execProviderId ?? "",
+        actual_model: actual?.model ?? null,
+        actual_reasoning: actual?.reasoningLevel ?? null,
+        actual_service_tier: actual?.serviceTier ?? null,
+        actual_permission_mode: actual?.permissionMode ?? null,
+        execution_revision: executionRevision ?? hooks?.executionRevision?.(rootThreadId) ?? 0,
       };
       if (reservationToken && requested) {
         reservationCommitted = reservations.commit(
@@ -899,7 +1100,7 @@ export function createCollabStore(
     await bb.sdk.threads.send({
       threadId,
       mode,
-      permissionMode: hooks?.workerPermissionMode?.() ?? "auto",
+      permissionMode: hooks?.workerPermissionMode?.(rootId(threadId)) ?? "auto",
       input: [{ type: "text", text, mentions: [] }],
     });
   }
@@ -983,6 +1184,10 @@ export function createCollabStore(
       removeRow.run({ thread_id: threadId, retired_at: Date.now() });
     },
 
+    restoreWorker(threadId: string, itemId: string): boolean {
+      return restoreRow.run({ thread_id: threadId, item_id: itemId }).changes > 0;
+    },
+
     setVerifyHash(threadId: string, hash: string | null) {
       setHash.run({ thread_id: threadId, last_verify_hash: hash });
     },
@@ -1054,6 +1259,7 @@ export function createCollabStore(
       model: string;
       reasoningLevel?: ReasoningLevel;
       serviceTier?: ServiceTier | null;
+      executionRevision?: number;
       prompt: string;
       /** The slice text under audit, for a work-related auditor name. */
       workText?: string;
@@ -1075,7 +1281,7 @@ export function createCollabStore(
       const slug = slugFromName(displayName);
       const taskName = `/root/${slug}`;
       const child = await bb.sdk.threads.spawn({
-        projectId: root.projectId,
+        projectId: source?.environmentId ? source.projectId : root.projectId,
         parentThreadId: args.rootThreadId,
         providerId: args.providerId,
         model: args.model,
@@ -1106,6 +1312,7 @@ export function createCollabStore(
         visibility: "hidden" as const,
         origin: "plugin",
       });
+      const actual = await readExecutionOptions(child.id);
       insert.run({
         thread_id: child.id,
         root_thread_id: args.rootThreadId,
@@ -1117,6 +1324,17 @@ export function createCollabStore(
         role: "verifier",
         source_thread_id: args.sourceThreadId,
         last_verify_hash: null,
+        requested_provider: args.providerId,
+        requested_model: args.model,
+        requested_reasoning: args.reasoningLevel ?? DEFAULT_REASONING_LEVEL,
+        requested_service_tier: args.serviceTier ?? null,
+        requested_permission_mode: "auto",
+        actual_provider: child.providerId ?? args.providerId,
+        actual_model: actual?.model ?? null,
+        actual_reasoning: actual?.reasoningLevel ?? null,
+        actual_service_tier: actual?.serviceTier ?? null,
+        actual_permission_mode: actual?.permissionMode ?? null,
+        execution_revision: args.executionRevision ?? hooks?.executionRevision?.(args.rootThreadId) ?? 0,
       });
       try {
         await bb.sdk.threads.update({ threadId: child.id, title: displayName });
@@ -1137,6 +1355,9 @@ export function createCollabStore(
       message: string;
       skipClaim?: boolean;
       maxWorkers: number;
+      validatedBase?: ValidatedWorkerBase;
+      execution?: RequestedExecution;
+      executionRevision?: number;
     }): Promise<
       | { threadId: string; taskName: string; nickname: string; itemId: string | null }
       | { error: string }
@@ -1153,6 +1374,9 @@ export function createCollabStore(
         skipClaim: args.skipClaim,
         strictItemClaim: Boolean(args.itemId) && !args.skipClaim,
         schedulerMaxWorkers: args.maxWorkers,
+        validatedBase: args.validatedBase,
+        execution: args.execution,
+        executionRevision: args.executionRevision,
       });
       return result;
     },

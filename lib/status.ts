@@ -57,6 +57,9 @@ export function formatGoalCard(goal: GoalSnapshot): string {
     `Tokens remaining: ${remaining == null ? "unbounded" : remaining}`,
     `Time used: ${goal.timeUsedSeconds}s`,
     `Verify: ${goal.settings.verifyEnabled ? `${goal.settings.verifyProvider}/${goal.settings.verifyModel}` : "off"}`,
+    `Execution revision: ${goal.execution.revision}`,
+    `Worker execution: global=${goal.execution.globalDefaults.worker.providerId || "inherit"}/${goal.execution.globalDefaults.worker.model || "inherit"}; override=${goal.execution.overrides.worker ? JSON.stringify(goal.execution.overrides.worker) : "none"}; effective=${goal.execution.effective.worker.providerId || "inherit"}/${goal.execution.effective.worker.model || "inherit"}/${goal.execution.effective.worker.reasoningLevel}/${goal.execution.effective.worker.serviceTier ?? "no-tier"}/${goal.execution.effective.worker.permissionMode}`,
+    `Verifier execution: global=${goal.execution.globalDefaults.verifier.providerId}/${goal.execution.globalDefaults.verifier.model}; override=${goal.execution.overrides.verifier ? JSON.stringify(goal.execution.overrides.verifier) : "none"}; effective=${goal.execution.effective.verifier.providerId}/${goal.execution.effective.verifier.model}/${goal.execution.effective.verifier.reasoningLevel}/${goal.execution.effective.verifier.serviceTier ?? "no-tier"}/auto`,
     `Progress chat: ${
       goal.settings.progressUpdateMinutes > 0
         ? `every ${goal.settings.progressUpdateMinutes}m`
@@ -64,6 +67,7 @@ export function formatGoalCard(goal: GoalSnapshot): string {
     }`,
   ];
   if (goal.reason) lines.push(`Reason: ${goal.reason}`);
+  if (goal.execution.configurationError) lines.push(`EXECUTION CONFIGURATION ERROR: ${goal.execution.configurationError}`);
   if (goal.status === "complete" && goal.completionSummary) {
     lines.push("", "COMPLETE — delivery summary:", goal.completionSummary, "");
   }
@@ -122,10 +126,15 @@ export function formatGoalCard(goal: GoalSnapshot): string {
   }
   if (goal.agents.length > 0) {
     const active = activeAgents(goal);
+    const starting = active.filter((agent) => agent.status === "starting").length;
+    const running = active.filter((agent) => agent.status === "running").length;
+    const idleAssigned = active.filter((agent) => agent.status === "idle" && agent.itemId).length;
+    const verifiers = active.filter((agent) => agent.role === "verifier").length;
+    lines.push(`Capacity: ${goal.settings.maxWorkers}; active ${running}; starting ${starting}; idle-assigned ${idleAssigned}; verifiers ${verifiers}`);
     lines.push(`Agents: ${active.length}/${goal.agents.length} active or assigned`);
     for (const agent of active.slice(0, MAX_STATUS_AGENTS)) {
       lines.push(
-        `- ${agent.nickname} (${agent.role}, ${agent.status}${agent.itemId ? `, item_id=${agent.itemId}` : ", unassigned"})`,
+        `- ${agent.nickname} (${agent.role}, ${agent.status}${agent.itemId ? `, item_id=${agent.itemId}` : ", unassigned"})${agent.execution ? ` requested=${agent.execution.requested.providerId}/${agent.execution.requested.model}/${agent.execution.requested.reasoningLevel}/${agent.execution.requested.serviceTier ?? "no-tier"}/${agent.execution.requested.permissionMode} actual=${agent.execution.actual ? `${agent.execution.actual.providerId}/${agent.execution.actual.model}/${agent.execution.actual.reasoningLevel}/${agent.execution.actual.serviceTier ?? "no-tier"}/${agent.execution.actual.permissionMode}` : "unavailable"}${agent.execution.mismatches.length ? ` MISMATCH(${agent.execution.mismatches.join(",")})` : ""}` : ""}`,
       );
     }
     if (active.length > MAX_STATUS_AGENTS) {
@@ -190,12 +199,18 @@ export function goalToolResponse(
               check: item.check,
             })),
             agentSummary: {
+              capacity: goal.settings.maxWorkers,
               total: goal.agents.length,
               activeOrAssigned: agents.length,
+              running: agents.filter((agent) => agent.status === "running").length,
+              starting: agents.filter((agent) => agent.status === "starting").length,
+              idleAssigned: agents.filter((agent) => agent.status === "idle" && agent.itemId).length,
+              verifiers: agents.filter((agent) => agent.role === "verifier").length,
               returned: Math.min(agents.length, MAX_STATUS_AGENTS),
             },
             agents: agents.slice(0, MAX_STATUS_AGENTS),
             settings: goal.settings,
+            execution: goal.execution,
             findings: goal.findings,
             openDecisions: goal.decisions.map((decision) => ({
               decision_id: decision.id,

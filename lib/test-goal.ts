@@ -35,7 +35,16 @@ export function makeLargeGoal(count = 1_000): GoalSnapshot {
     role: "worker" as const,
     status: index < inProgressCount ? "running" as const : "completed" as const,
     summary: null,
+    execution: null,
   }));
+  const workerExecution = {
+    providerId: "codex",
+    model: "gpt-5.6-sol",
+    reasoningLevel: "high" as const,
+    serviceTier: null,
+    permissionMode: "auto" as const,
+  };
+  const verifierExecution = { ...workerExecution };
   return {
     threadId: "thr_root",
     objective: "Complete a very large durable goal without retransmitting its history.",
@@ -69,9 +78,17 @@ export function makeLargeGoal(count = 1_000): GoalSnapshot {
       workerModel: "",
       workerReasoning: "",
       workerServiceTier: null,
+      workerPermissionMode: "auto",
       autoIntegrateCompletedSlices: false,
       reclaimMergedWorktrees: false,
       readLocalProviderData: false,
+    },
+    execution: {
+      revision: 0,
+      globalDefaults: { worker: workerExecution, verifier: verifierExecution },
+      overrides: { worker: null, verifier: null },
+      effective: { worker: workerExecution, verifier: verifierExecution },
+      configurationError: null,
     },
     standingBrief: null,
     findings: {

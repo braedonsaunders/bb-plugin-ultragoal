@@ -252,10 +252,9 @@ export function reconcileFindingQueue(input: {
     }
 
     if (staffed.size >= maxStaffed) continue;
-    const fixItem = items.add(
+    const fixItem = items.addRemediation(
       threadId,
       `Fix: ${finding.title} [${normalizeFindingFile(finding.file)}]`,
-      "pending",
       { deps: [], files: finding.fixFiles, check: finding.check },
     );
     if (!fixItem) break;

@@ -40,4 +40,23 @@ describe("bounded goal reads", () => {
     assert.doesNotMatch(card, /COMPLETED_BODY_/);
     assert.ok(card.length < 30_000, `status card was ${card.length} chars`);
   });
+
+  it("exposes effective execution provenance and capacity separately from activity", () => {
+    const goal = makeLargeGoal();
+    goal.agents[0]!.execution = {
+      revision: 3,
+      requested: goal.execution.effective.worker,
+      actual: { ...goal.execution.effective.worker, model: "host-substituted" },
+      mismatches: ["model"],
+    };
+    const parsed = JSON.parse(goalToolResponse(goal)) as any;
+    assert.equal(parsed.goal.execution.revision, 0);
+    assert.equal(parsed.goal.agentSummary.capacity, goal.settings.maxWorkers);
+    assert.equal(parsed.goal.agents[0].execution.mismatches[0], "model");
+    const card = formatGoalCard(goal);
+    assert.match(card, /Execution revision: 0/);
+    assert.match(card, /Worker execution: global=/);
+    assert.match(card, /effective=/);
+    assert.match(card, /MISMATCH\(model\)/);
+  });
 });

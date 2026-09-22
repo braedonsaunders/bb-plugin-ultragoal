@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.29.0
+
+- The active-goal header keeps even very large durable objectives to one
+  ellipsized line. Clicking the preview still opens the complete objective in
+  the editor; the stored goal contract is never shortened.
+- Worker and verifier provider, model, reasoning, service tier, and worker
+  permission mode now form one validated execution configuration. Global
+  defaults, per-goal overrides, effective selections, actual launch values,
+  mismatches, capacity, and execution revisions are visible in the pane, CLI,
+  agent state, and JSON. Goal creation persists the full configuration before
+  staffing can observe it, and stale in-flight settings cannot launch workers.
+- Execution changes affect future work by default. An explicit controlled
+  replacement drains one idle, clean worker at a time, preserves the exact
+  work-item assignment, pauses on uncommitted or unreported work, and reports
+  each old-to-new thread mapping and actual launch selection.
+- Scheduler allocation now validates the exact repository/ref on the target
+  host, peels it to a commit, and binds worktree creation to that SHA. Invalid
+  tuples stay pending and are durably suppressed until the ref changes or an
+  operator explicitly runs `bb ultragoal revalidate <item-id>`; operational
+  host failures remain retryable.
+- Failed, deleted, aborted, and explicitly released workers immediately return
+  their slice to the ready queue, clear retry suppression, and trigger a
+  scheduler convergence pass.
+- Finding cleanup records durable ownership on plugin-minted remediation
+  items. Resolving a finding can no longer delete a pre-existing plan item that
+  the finding merely coalesced into.
+
 ## 0.28.0
 
 - Repository mutation is explicit per goal and off by default. Automatic

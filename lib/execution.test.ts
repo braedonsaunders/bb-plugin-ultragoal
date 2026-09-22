@@ -38,6 +38,7 @@ const catalog: CatalogProvider = {
   displayName: "Codex",
   available: true,
   supportsServiceTier: true,
+  permissionModes: ["auto", "accept-edits", "full"],
   models: [
     {
       id: "gpt-5.6-sol",

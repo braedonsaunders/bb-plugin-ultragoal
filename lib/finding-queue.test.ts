@@ -704,3 +704,36 @@ describe("durable finding remediation queue", () => {
     assert.equal(state.findings.get("thr_root", finding.id)!.itemId, null);
   });
 });
+
+describe("durable remediation provenance", () => {
+  it("marks only plugin-minted items as finding-owned", () => {
+    const state = stores();
+    const declared = state.items.add("thr_root", "Owner-declared slice", "pending", {
+      files: ["src/declared.ts"],
+    })!;
+    const coalesced = state.findings.report("thr_root", {
+      title: "Same-file defect",
+      file: "src/declared.ts:12",
+      evidence: "Shares the declared file.",
+      fixFiles: ["src/declared.ts"],
+    }).finding;
+    const unowned = state.findings.report("thr_root", {
+      title: "Unowned defect",
+      file: "src/unowned.ts:3",
+      evidence: "Nothing owns this file.",
+      fixFiles: ["src/unowned.ts"],
+    }).finding;
+
+    assert.equal(reconcileFindingQueue({
+      threadId: "thr_root",
+      findings: state.findings,
+      items: state.items,
+      maxStaffed: 2,
+    }).minted, 1);
+    assert.equal(state.findings.get("thr_root", coalesced.id)!.itemId, declared.id);
+    assert.equal(state.items.origin("thr_root", declared.id), null);
+    const mintedId = state.findings.get("thr_root", unowned.id)!.itemId!;
+    assert.equal(state.items.origin("thr_root", mintedId), "finding");
+    assert.equal(createItemStore(state.host.bb).origin("thr_root", mintedId), "finding");
+  });
+});

@@ -274,6 +274,17 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
   }, [threadId]);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [startWorkers, setStartWorkers] = useState("5");
+  const [startVerify, setStartVerify] = useState(true);
+  const [startWorkerProvider, setStartWorkerProvider] = useState("");
+  const [startWorkerModel, setStartWorkerModel] = useState("");
+  const [startVerifierProvider, setStartVerifierProvider] = useState("");
+  const [startVerifierModel, setStartVerifierModel] = useState("");
+  const [startWorkerReasoning, setStartWorkerReasoning] = useState<ReasoningLevel>("medium");
+  const [startVerifierReasoning, setStartVerifierReasoning] = useState<ReasoningLevel>("medium");
+  const [startWorkerTier, setStartWorkerTier] = useState<"default" | "fast">("default");
+  const [startVerifierTier, setStartVerifierTier] = useState<"default" | "fast">("default");
+  const [startPermission, setStartPermission] = useState<"auto" | "accept-edits" | "full">("auto");
   const [editing, setEditing] = useState(false);
   const [objectiveDraft, setObjectiveDraft] = useState("");
   const [savingObjective, setSavingObjective] = useState(false);
@@ -368,8 +379,54 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
 
   if (!goal) {
     return (
-      <div ref={rootRef} className="flex h-full w-full min-w-0 flex-col justify-center overflow-x-hidden px-4 text-sm text-muted-foreground">
-        No UltraGoal is set on this thread.
+      <div ref={rootRef} className="flex h-full w-full min-w-0 flex-col overflow-y-auto px-4 py-4 text-sm text-muted-foreground">
+        <div className="text-[10px] font-medium uppercase tracking-[0.16em]">Start UltraGoal</div>
+        <textarea className="mt-3 min-h-24 rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" placeholder="Objective" value={draft} onChange={(event) => setDraft(event.target.value)} />
+        <label className="mt-3 text-[11px]">Worker slots
+          <input className="mt-1 w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" inputMode="numeric" value={startWorkers} onChange={(event) => setStartWorkers(event.target.value)} />
+        </label>
+        <label className="mt-3 flex items-center justify-between"><span>Verify workers</span><input type="checkbox" checked={startVerify} onChange={(event) => setStartVerify(event.target.checked)} /></label>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <input className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" placeholder="Worker provider (inherit)" value={startWorkerProvider} onChange={(event) => setStartWorkerProvider(event.target.value)} />
+          <input className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" placeholder="Worker model (inherit)" value={startWorkerModel} onChange={(event) => setStartWorkerModel(event.target.value)} />
+          <input className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" placeholder="Verifier provider (default)" value={startVerifierProvider} onChange={(event) => setStartVerifierProvider(event.target.value)} />
+          <input className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" placeholder="Verifier model (default)" value={startVerifierModel} onChange={(event) => setStartVerifierModel(event.target.value)} />
+          <select className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" value={startWorkerReasoning} onChange={(event) => setStartWorkerReasoning(event.target.value as ReasoningLevel)}>{Object.entries(REASONING_LABELS).map(([value, label]) => <option key={value} value={value}>{`Worker: ${label}`}</option>)}</select>
+          <select className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" value={startVerifierReasoning} onChange={(event) => setStartVerifierReasoning(event.target.value as ReasoningLevel)}>{Object.entries(REASONING_LABELS).map(([value, label]) => <option key={value} value={value}>{`Verifier: ${label}`}</option>)}</select>
+          <select className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" value={startWorkerTier} onChange={(event) => setStartWorkerTier(event.target.value as "default" | "fast")}><option value="default">Worker tier: default</option><option value="fast">Worker tier: fast</option></select>
+          <select className="rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" value={startVerifierTier} onChange={(event) => setStartVerifierTier(event.target.value as "default" | "fast")}><option value="default">Verifier tier: default</option><option value="fast">Verifier tier: fast</option></select>
+        </div>
+        <label className="mt-3 text-[11px]">Worker permission
+          <select className="mt-1 w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-foreground" value={startPermission} onChange={(event) => setStartPermission(event.target.value as typeof startPermission)}>
+            <option value="auto">auto</option><option value="accept-edits">accept-edits</option><option value="full">full</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          className="mt-4 rounded-md border border-border px-2 py-2 text-foreground hover:bg-muted disabled:opacity-50"
+          disabled={saving || !draft.trim()}
+          onClick={() => {
+            const maxWorkers = Number.parseInt(startWorkers, 10);
+            if (!Number.isInteger(maxWorkers) || maxWorkers < 0 || maxWorkers > 16) return;
+            setSaving(true);
+            void rpc.call("start", {
+              threadId,
+              objective: draft.trim(),
+              maxWorkers,
+              verifyEnabled: startVerify,
+              workerPermissionMode: startPermission,
+              workerReasoning: startWorkerReasoning,
+              workerServiceTier: startWorkerTier,
+              verifyReasoning: startVerifierReasoning,
+              verifyServiceTier: startVerifierTier,
+              ...(startWorkerProvider.trim() ? { workerProvider: startWorkerProvider.trim() } : {}),
+              ...(startWorkerModel.trim() ? { workerModel: startWorkerModel.trim() } : {}),
+              ...(startVerifierProvider.trim() ? { verifyProvider: startVerifierProvider.trim() } : {}),
+              ...(startVerifierModel.trim() ? { verifyModel: startVerifierModel.trim() } : {}),
+            }).then((result) => setGoal(result.goal)).finally(() => setSaving(false));
+          }}
+        >{saving ? "Starting…" : "Start with these settings"}</button>
+        <span className="mt-2 text-[11px]">Creation and execution settings are stored together before staffing. Use 0 worker slots to plan without launching workers.</span>
       </div>
     );
   }
@@ -523,7 +580,9 @@ function GoalPlanPanel({ threadId }: { threadId: string }) {
         ) : (
           <button
             type="button"
-            className="mt-3 block w-full text-left text-sm leading-snug break-words text-foreground hover:text-foreground/80"
+            className="mt-3 block w-full min-w-0 truncate text-left text-sm leading-snug text-foreground hover:text-foreground/80"
+            aria-label="Edit the full UltraGoal objective"
+            title="Edit the full UltraGoal objective"
             onClick={startEdit}
           >
             {goal.objective}
@@ -937,6 +996,7 @@ function GoalSettingsPanel({
   const [briefNote, setBriefNote] = useState<string | null>(null);
   const [rotating, setRotating] = useState(false);
   const [rotateNote, setRotateNote] = useState<string | null>(null);
+  const [replacementNote, setReplacementNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const settings = goal.settings;
 
@@ -979,6 +1039,8 @@ function GoalSettingsPanel({
     workerModel?: string | null;
     workerReasoning?: ReasoningLevel | null;
     workerServiceTier?: ExecutionSelection["serviceTier"];
+    workerPermissionMode?: "auto" | "accept-edits" | "full" | null;
+    replaceActiveWorkers?: boolean;
     autoIntegrateCompletedSlices?: boolean;
     reclaimMergedWorktrees?: boolean;
     readLocalProviderData?: boolean;
@@ -1003,6 +1065,19 @@ function GoalSettingsPanel({
       />
       {collapsed ? null : (
         <div className="space-y-3 px-1 pt-1">
+          <div className="rounded-md border border-border px-2 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            <div className="text-[10px] uppercase tracking-[0.12em]">Execution state · revision {goal.execution.revision}</div>
+            <div className="mt-1">Worker global: {goal.execution.globalDefaults.worker.providerId || "inherit root"}/{goal.execution.globalDefaults.worker.model || "inherit model"} · effective: {goal.execution.effective.worker.providerId || "inherit root"}/{goal.execution.effective.worker.model || "inherit model"} · {goal.execution.effective.worker.reasoningLevel} · {goal.execution.effective.worker.serviceTier ?? "no tier"} · {goal.execution.effective.worker.permissionMode}</div>
+            <div>Worker override: {goal.execution.overrides.worker ? JSON.stringify(goal.execution.overrides.worker) : "none"}</div>
+            <div className="mt-1">Verifier global: {goal.execution.globalDefaults.verifier.providerId}/{goal.execution.globalDefaults.verifier.model} · effective: {goal.execution.effective.verifier.providerId}/{goal.execution.effective.verifier.model} · {goal.execution.effective.verifier.reasoningLevel} · {goal.execution.effective.verifier.serviceTier ?? "no tier"} · auto</div>
+            <div>Verifier override: {goal.execution.overrides.verifier ? JSON.stringify(goal.execution.overrides.verifier) : "none"}</div>
+            {goal.execution.configurationError ? <div className="mt-1 text-destructive">Configuration error: {goal.execution.configurationError}</div> : null}
+            {goal.agents.filter((agent) => agent.execution).map((agent) => (
+              <div key={agent.threadId} className="mt-1">
+                {agent.nickname}: requested {agent.execution!.requested.providerId}/{agent.execution!.requested.model}/{agent.execution!.requested.reasoningLevel}; actual {agent.execution!.actual ? `${agent.execution!.actual.providerId}/${agent.execution!.actual.model}/${agent.execution!.actual.reasoningLevel}` : "unavailable"}{agent.execution!.mismatches.length ? ` · MISMATCH ${agent.execution!.mismatches.join(", ")}` : ""}
+              </div>
+            ))}
+          </div>
           <label className="flex items-center justify-between gap-3 text-[13px] text-foreground">
             <span>Verify workers</span>
             <input
@@ -1036,6 +1111,43 @@ function GoalSettingsPanel({
                 });
               }}
             />
+          </div>
+          <label className="block text-[13px] text-foreground">
+            <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Worker permission</span>
+            <select
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm"
+              value={settings.workerPermissionMode}
+              disabled={saving}
+              onChange={(event) => void save({ workerPermissionMode: event.target.value as "auto" | "accept-edits" | "full" })}
+            >
+              <option value="auto">auto</option>
+              <option value="accept-edits">accept-edits</option>
+              <option value="full">full</option>
+            </select>
+          </label>
+          <div className="rounded-md border border-border px-2 py-2">
+            <button
+              type="button"
+              className="w-full rounded-md border border-border px-2 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              disabled={saving}
+              onClick={() => {
+                void (async () => {
+                  setSaving(true);
+                  try {
+                    const result = await rpc.call("replaceWorkers", { threadId });
+                    setReplacementNote(result.completed
+                      ? `Replaced ${result.replacements.length} worker(s): ${result.replacements.map((entry) => `${entry.oldThreadId} → ${entry.newThreadId}`).join(", ") || "none active"}`
+                      : `Paused at ${result.paused?.threadId}: ${result.paused?.risk}`);
+                  } finally {
+                    setSaving(false);
+                  }
+                })();
+              }}
+            >
+              Safely replace active workers
+            </button>
+            <span className="mt-1 block text-[11px] text-muted-foreground">Settings normally affect future workers only. Replacement drains one clean, idle slice at a time and pauses on uncommitted or unreported work.</span>
+            {replacementNote ? <span className="mt-1 block text-[11px] text-foreground">{replacementNote}</span> : null}
           </div>
           <label className="block text-[13px] text-foreground">
             <span className="mb-1 block text-[10px] uppercase tracking-[0.12em] text-muted-foreground">

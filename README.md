@@ -15,7 +15,7 @@ bb plugin install ultragoal@bb-community
 Until then, install the tagged release from this repository:
 
 ```bash
-bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.28.0'
+bb plugin install 'git:https://github.com/braedonsaunders/bb-plugin-ultragoal.git@v0.29.0'
 ```
 
 Or from a local checkout:
@@ -51,12 +51,22 @@ CLI (from a thread, or pass `--thread`):
 ```bash
 bb ultragoal
 bb ultragoal set "Ship the ledger export"
+bb ultragoal set "Ship the ledger export" --workers 4 \
+  --worker-provider codex --worker-model gpt-5.6-sol --worker-reasoning high \
+  --worker-tier fast --worker-permission auto \
+  --verifier-provider codex --verifier-model gpt-5.6-sol --verifier-reasoning xhigh
+bb ultragoal exec
+bb ultragoal exec worker --provider codex --model gpt-5.6-sol \
+  --reasoning high --tier fast --permission auto
+bb ultragoal exec worker --provider codex --model gpt-5.6-sol \
+  --reasoning high --tier fast --permission auto --replace-active
+bb ultragoal revalidate <item-id>
 bb ultragoal pause
 bb ultragoal resume
 bb ultragoal clear
 ```
 
-The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked work gets a chip), and **Previous**. Its headline metrics distinguish **Work items** from **Defects** because related defects can share one repair item. The plan is read-only in the pane; the agent updates it. Settings control verification, verifier and worker models, progress-chat interval, worker slots, auto-continue, remediation capacity, repository integration, local provider accounting, standing worker rules, and the token budget.
+The UltraGoal pane lists **Now** (expand a row for the live worker), **Up next** (blocked work gets a chip), and **Previous**. Its headline metrics distinguish **Work items** from **Defects** because related defects can share one repair item. The plan is read-only in the pane; the agent updates it. A new goal can be created with its worker count and complete worker/verifier execution configuration in one step. Settings show global defaults, goal overrides, effective selections, actual launched values, and host substitutions; they also control progress chat, repository integration, local provider accounting, standing worker rules, and the token budget.
 
 The only root agent controls are `ultragoal_start`, `ultragoal_state`, `ultragoal_patch`, and `ultragoal_finish` on every provider. They operate on UltraGoal's durable plugin state; provider-native goal state is unrelated.
 
@@ -66,6 +76,7 @@ The split follows the research in [docs/architecture-research.md](docs/architect
 
 1. The orchestrator calls `ultragoal_patch` with new or changed work as a dependency-DAG patch: every work item carries `files` (its disjoint file scope), `check` (a runnable done-gate), and `deps` (what it waits for; `[]` = ready now). Omitted work remains durable, batches cap at 200, and `ultragoal_state` pages large plans 40 rows at a time by default.
 2. The ready-queue scheduler staffs one fresh worker per ready work item — deps complete, file scopes disjoint — up to the worker limit (default 5). Assigned workers occupy a slot until their item closes, including idle Codex turns. Pause stops the whole crew and parks in-progress work.
+   Before allocating a managed worktree, the scheduler resolves the target repository and requested ref on the owning host, peels it to an immutable commit SHA, and uses that SHA as the worker base. Invalid tuples stay pending without repeated spawning; use `bb ultragoal revalidate <item-id>` after repairing an unchanged ref.
 3. Hunt/audit work streams defects through `report_finding`. Exact-file related defects share repair work; new repair work is created until remediation capacity (the persisted `maxOpenFindings` setting) is full. Overflow waits durably and backfills oldest-first as capacity frees, including after restart. Open defects block completion.
 4. Workers stay hidden and implement only their item, reporting evidence (commit SHAs, check output). Every brief carries a generalized quality bar ([templates/goals/worker_brief.md](templates/goals/worker_brief.md)) — reuse-first, complete production-grade work, clean cutover, honest gates, crew-safe atomic commits — with the repo's own AGENTS.md taking precedence. They do not call `ultragoal_finish` or rewrite the parent plan.
 5. When verification is on (default), a second model audits each finished worker. The orchestrator should not mark that work item complete until `VERIFY_PASS`.
@@ -81,7 +92,9 @@ Safety-sensitive behavior is off by default and shown in each goal's pane:
 - **Merged worktree cleanup** optionally removes a clean managed worktree and force-deletes its worker branch, but only after the branch's work is represented on the base branch. It does nothing unless automatic integration is enabled.
 - **Local provider session accounting** optionally reads Claude Code JSONL files under `~/.claude/projects`, Codex JSONL files under `~/.codex/sessions`, Cursor's `state.vscdb` and session `store.db` files, and OpenCode's `opencode.db`. UltraGoal extracts token totals and native-child session metadata, stores only aggregate metadata in its own database, and transmits none of the source data.
 
-Automatic approval of agent requests is separately off by default. Workers use BB's normal approval mode and verifiers are hardcoded to that mode. Standing worker rules can be activated, edited, or cleared only by a user action in the UltraGoal pane; the agent-facing CLI cannot write them. The pane records when the rules were saved and that they came from a user action. Agent-authored work-item and finding `check` strings remain visible as plan metadata but are never inserted into another agent's prompt; workers choose verification independently from trusted repository instructions, and linked finding evidence is explicitly labeled untrusted data.
+Automatic approval of agent requests is separately off by default. Workers default to `auto` permission mode, while each goal can explicitly opt into `accept-edits` or `full`; verifiers are always restricted to `auto`. Standing worker rules can be activated, edited, or cleared only by a user action in the UltraGoal pane; the agent-facing CLI cannot write them. The pane records when the rules were saved and that they came from a user action. Agent-authored work-item and finding `check` strings remain visible as plan metadata but are never inserted into another agent's prompt; workers choose verification independently from trusted repository instructions, and linked finding evidence is explicitly labeled untrusted data.
+
+Worker and verifier launches are pinned from a validated per-goal execution snapshot. Global plugin defaults and goal overrides are resolved at launch time; existing workers keep their original selection. The pane and `bb ultragoal exec` expose requested versus actual provider/model/reasoning/tier/permission values and flag substitutions. Verifiers are always restricted to `auto` permission mode. Controlled worker replacement is opt-in and refuses to discard a dirty worktree, an active run, or an unharvested report.
 
 Every durable UltraGoal root carries exactly one UltraGoal pill beside its title in BB's thread list until the goal is cleared. A lifecycle-scoped content-script stylesheet targets only those root row IDs; it installs no observer, mutates no host nodes, and does not replace the user's chosen thread list. Workers and verifiers are created with BB's supported hidden-thread visibility, so the left sidebar stays at one root row. Subagents belonging to ordinary non-UltraGoal threads remain visible.
 

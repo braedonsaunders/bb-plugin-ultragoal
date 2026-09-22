@@ -22,6 +22,7 @@ function collabHost(options?: {
   const queued: unknown[] = [];
   const sent: Array<{ threadId?: string; mode?: string }> = [];
   let spawnCalls = 0;
+  const spawnArgs: unknown[] = [];
   const host = createFakePluginHost({
     pluginId: `collab-strict-${hosts.length}`,
     sdk: {
@@ -35,6 +36,13 @@ function collabHost(options?: {
             environmentId: null,
             status: threadId === "thr_root" ? "idle" : "active",
           }),
+        defaultExecutionOptions: () => ({
+          model: "openrouter/stealth/ox-alpha",
+          reasoningLevel: "medium",
+          serviceTier: "default",
+          permissionMode: "auto",
+          source: "client/thread/start",
+        }),
         list: () => options?.discovered ?? [],
         timeline: ({ threadId }) => ({
           rows: options?.prompts?.[threadId]
@@ -43,6 +51,7 @@ function collabHost(options?: {
         }),
         spawn: (args) => {
           spawnCalls += 1;
+          spawnArgs.push(args);
           prompts.push(args.prompt ?? "");
           return makeThreadResponse({
             id: "thr_spawned",
@@ -129,10 +138,72 @@ function collabHost(options?: {
         SELECT RAISE(ABORT, 'root worker capacity is full');
       END;
   `);
-  return { host, stopped, prompts, queued, sent, spawnCalls: () => spawnCalls };
+  return { host, stopped, prompts, queued, sent, spawnArgs, spawnCalls: () => spawnCalls };
 }
 
 describe("scheduler-strict collaboration spawns", () => {
+  it("binds allocation to the validated host, peeled commit, and execution revision", async () => {
+    const state = collabHost();
+    const collab = createCollabStore(state.host.bb, {
+      claimItem: (_root, args) => args.itemId,
+      executionRevision: () => 7,
+    });
+    const commit = "a".repeat(40);
+    const result = await collab.spawnWorker({
+      parentThreadId: "thr_root",
+      itemId: "itm_validated",
+      maxWorkers: 1,
+      displayName: "Commit Binder",
+      message: "SLICE (item_id=itm_validated): use the validated source",
+      validatedBase: {
+        hostId: "host_source",
+        repository: "/srv/project",
+        requestedRef: "release",
+        commit,
+      },
+      executionRevision: 7,
+      execution: {
+        providerId: "acp-opencode",
+        model: "openrouter/stealth/ox-alpha",
+        reasoningLevel: "high",
+        serviceTier: "fast",
+        permissionMode: "accept-edits",
+      },
+    });
+
+    assert.ok(!("error" in result));
+    const args = state.spawnArgs[0] as {
+      providerId?: string;
+      model?: string;
+      permissionMode?: string;
+      environment?: { hostId?: string; workspace?: { baseBranch?: { name?: string } } };
+    };
+    assert.equal(args.providerId, "acp-opencode");
+    assert.equal(args.model, "openrouter/stealth/ox-alpha");
+    assert.equal(args.permissionMode, "accept-edits");
+    assert.equal(args.environment?.hostId, "host_source");
+    assert.equal(args.environment?.workspace?.baseBranch?.name, commit);
+  });
+
+  it("refuses a stale execution revision before spawning", async () => {
+    const state = collabHost();
+    const collab = createCollabStore(state.host.bb, {
+      claimItem: (_root, args) => args.itemId,
+      executionRevision: () => 8,
+    });
+    const result = await collab.spawnWorker({
+      parentThreadId: "thr_root",
+      itemId: "itm_stale",
+      maxWorkers: 1,
+      displayName: "Revision Referee",
+      message: "SLICE (item_id=itm_stale): refuse stale settings",
+      executionRevision: 7,
+    });
+    assert.ok("error" in result);
+    assert.match(result.error, /stale revision 7/);
+    assert.equal(state.spawnCalls(), 0);
+  });
+
   it("fails closed before claim fallback when the requested item already has a worker", async () => {
     const state = collabHost();
     state.host.bb.storage.database().prepare(`

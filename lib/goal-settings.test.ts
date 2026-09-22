@@ -24,6 +24,12 @@ describe("safety-sensitive goal defaults", () => {
       verifyByDefault: true,
       verifyProvider: "codex",
       verifyModel: "gpt-5.6-sol",
+      verifyReasoning: "medium",
+      verifyServiceTier: null,
+      workerProvider: "",
+      workerModel: "",
+      workerReasoning: "medium",
+      workerServiceTier: null,
       autoContinue: true,
       progressUpdateMinutes: 5,
       maxWorkers: 5,
@@ -50,6 +56,7 @@ describe("safety-sensitive goal defaults", () => {
         workerModel: null,
         workerReasoning: null,
         workerServiceTier: null,
+        workerPermissionMode: null,
         autoIntegrateCompletedSlices: null,
         reclaimMergedWorktrees: null,
         readLocalProviderData: null,
@@ -59,5 +66,65 @@ describe("safety-sensitive goal defaults", () => {
     assert.equal(settings.autoIntegrateCompletedSlices, false);
     assert.equal(settings.reclaimMergedWorktrees, false);
     assert.equal(settings.readLocalProviderData, false);
+  });
+
+  it("inherits global execution defaults and applies goal-scoped overrides atomically", () => {
+    const defaults: GoalSettingDefaults = {
+      verifyByDefault: true,
+      verifyProvider: "codex",
+      verifyModel: "gpt-global",
+      verifyReasoning: "medium",
+      verifyServiceTier: "default",
+      workerProvider: "acp-opencode",
+      workerModel: "worker-global",
+      workerReasoning: "high",
+      workerServiceTier: "fast",
+      autoContinue: true,
+      progressUpdateMinutes: 5,
+      maxWorkers: 5,
+      maxOpenFindings: 50,
+      autoApproveAgentRequests: false,
+      workerPermissionMode: "auto",
+      autoIntegrateCompletedSlices: false,
+      reclaimMergedWorktrees: false,
+      readLocalProviderData: false,
+      shareWorktreeNodeModules: true,
+    };
+    const base = {
+      verifyEnabled: null,
+      verifyProvider: null,
+      verifyModel: null,
+      verifyReasoning: null,
+      verifyServiceTier: null,
+      autoContinue: null,
+      progressUpdateMinutes: null,
+      maxWorkers: null,
+      maxOpenFindings: null,
+      workerProvider: null,
+      workerModel: null,
+      workerReasoning: null,
+      workerServiceTier: null,
+      workerPermissionMode: null,
+      autoIntegrateCompletedSlices: null,
+      reclaimMergedWorktrees: null,
+      readLocalProviderData: null,
+    };
+    const inherited = resolveGoalSettings(base, defaults);
+    assert.deepEqual(
+      [inherited.workerProvider, inherited.workerModel, inherited.workerReasoning, inherited.workerServiceTier, inherited.workerPermissionMode],
+      ["acp-opencode", "worker-global", "high", "fast", "auto"],
+    );
+    const overridden = resolveGoalSettings({
+      ...base,
+      workerProvider: "codex",
+      workerModel: "worker-goal",
+      workerReasoning: "xhigh",
+      workerServiceTier: "default",
+      workerPermissionMode: "accept-edits",
+      verifyModel: "verify-goal",
+    }, defaults);
+    assert.equal(overridden.workerModel, "worker-goal");
+    assert.equal(overridden.workerPermissionMode, "accept-edits");
+    assert.equal(overridden.verifyModel, "verify-goal");
   });
 });

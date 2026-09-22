@@ -8,6 +8,7 @@ const fixed = [{ status: "fixed" }];
 function verdict(overrides = {}) {
   return remediationItemRetirement({
     item: pending,
+    origin: "finding",
     linkedFindings: fixed,
     staffed: false,
     ...overrides,
@@ -38,9 +39,22 @@ describe("retiring an orphaned remediation item", () => {
   it("never removes an item no finding ever pointed at", () => {
     // A declared deliverable or an owner-written plan step exists on its own
     // terms; a quiet finding queue is not a reason to delete it.
-    const v = verdict({ linkedFindings: [] });
+    const v = verdict({ origin: null, linkedFindings: [] });
     assert.equal(v.retire, false);
     assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
+  });
+
+  it("never removes a pre-existing item a finding merely coalesced into", () => {
+    const v = verdict({ origin: null });
+    assert.equal(v.retire, false);
+    assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
+  });
+
+  it("fails closed for unknown legacy provenance and detached links", () => {
+    for (const overrides of [{ origin: "native" }, { linkedFindings: [] }]) {
+      const v = verdict(overrides);
+      assert.equal(v.retire, false);
+    }
   });
 
   it("leaves work someone is doing alone", () => {
@@ -62,7 +76,7 @@ describe("retiring an orphaned remediation item", () => {
   });
 
   it("checks scope before status, so a deliverable is refused for the honest reason", () => {
-    const v = verdict({ item: { id: "itm_1", status: "completed" }, linkedFindings: [] });
+    const v = verdict({ item: { id: "itm_1", status: "completed" }, origin: null, linkedFindings: [] });
     assert.match(v.retire === false ? v.reason : "", /not a remediation item/);
   });
 });
