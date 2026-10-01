@@ -23,11 +23,12 @@ function collabHost(options?: {
   const sent: Array<{ threadId?: string; mode?: string }> = [];
   let spawnCalls = 0;
   const spawnArgs: unknown[] = [];
+  const forkArgs: unknown[] = [];
   const host = createFakePluginHost({
     pluginId: `collab-strict-${hosts.length}`,
     sdk: {
       threads: {
-        get: ({ threadId }) =>
+        get: async ({ threadId }) =>
           options?.discovered?.find((thread) => thread.id === threadId) ??
           makeThreadResponse({
             id: threadId,
@@ -55,6 +56,17 @@ function collabHost(options?: {
           prompts.push(args.prompt ?? "");
           return makeThreadResponse({
             id: "thr_spawned",
+            parentThreadId: "thr_root",
+            projectId: "proj",
+            providerId: "acp-opencode",
+            environmentId: null,
+            status: "active",
+          });
+        },
+        fork: async (args) => {
+          forkArgs.push(args);
+          return makeThreadResponse({
+            id: "thr_forked",
             parentThreadId: "thr_root",
             projectId: "proj",
             providerId: "acp-opencode",
@@ -138,7 +150,7 @@ function collabHost(options?: {
         SELECT RAISE(ABORT, 'root worker capacity is full');
       END;
   `);
-  return { host, stopped, prompts, queued, sent, spawnArgs, spawnCalls: () => spawnCalls };
+  return { host, stopped, prompts, queued, sent, spawnArgs, forkArgs, spawnCalls: () => spawnCalls };
 }
 
 describe("scheduler-strict collaboration spawns", () => {
@@ -176,11 +188,14 @@ describe("scheduler-strict collaboration spawns", () => {
       providerId?: string;
       model?: string;
       permissionMode?: string;
+      executionInputSources?: { permissionMode?: string };
       environment?: { hostId?: string; workspace?: { baseBranch?: { name?: string } } };
     };
     assert.equal(args.providerId, "acp-opencode");
     assert.equal(args.model, "openrouter/stealth/ox-alpha");
     assert.equal(args.permissionMode, "accept-edits");
+    // Unflagged fields are re-derived by the server, dropping the requested mode.
+    assert.equal(args.executionInputSources?.permissionMode, "explicit");
     assert.equal(args.environment?.hostId, "host_source");
     assert.equal(args.environment?.workspace?.baseBranch?.name, commit);
   });
@@ -404,6 +419,44 @@ describe("scheduler-strict collaboration spawns", () => {
     await collab.listForRoot("thr_root", { discover: true, refreshLimit: 8 });
     assert.deepEqual(state.stopped, ["thr_legacy_b"], "the tombstone prevents repeated adoption");
   });
+});
+
+describe("verifier permission pin", () => {
+  type SpawnArgs = { permissionMode?: string; executionInputSources?: { permissionMode?: string } };
+
+  it("pins the automatic verifier to auto with explicit provenance", async () => {
+    const state = collabHost();
+    const collab = createCollabStore(state.host.bb, { workerPermissionMode: () => "full" });
+    const result = await collab.spawnVerifier({
+      rootThreadId: "thr_root",
+      sourceThreadId: "thr_worker",
+      itemId: null,
+      providerId: "codex",
+      model: "gpt-5.6-sol",
+      prompt: "Verify the slice.",
+    });
+    assert.ok(result);
+    const args = state.spawnArgs[0] as SpawnArgs;
+    assert.equal(args.permissionMode, "auto");
+    assert.equal(args.executionInputSources?.permissionMode, "explicit");
+  });
+
+  for (const forkTurns of ["none", "all"]) {
+    it(`pins a tool-spawned verifier to auto, not the worker mode (fork_turns=${forkTurns})`, async () => {
+      const state = collabHost();
+      const collab = createCollabStore(state.host.bb, { workerPermissionMode: () => "full" });
+      collab.registerTools();
+      await state.host.harness.behavior.callAgentTool(
+        "ultragoal_spawn_agent",
+        { task_name: "audit", role: "verifier", message: "Audit the finished slice.", fork_turns: forkTurns },
+        { threadId: "thr_root", projectId: "proj" },
+      );
+      const args = (forkTurns === "none" ? state.spawnArgs[0] : state.forkArgs[0]) as SpawnArgs | undefined;
+      assert.ok(args, "the verifier must have been spawned");
+      assert.equal(args.permissionMode, "auto");
+      if (forkTurns === "none") assert.equal(args.executionInputSources?.permissionMode, "explicit");
+    });
+  }
 });
 
 describe("fleet management tool surface", () => {
