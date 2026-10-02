@@ -5470,7 +5470,7 @@ export default function plugin(bb: BbPluginApi) {
           return { exitCode: 1, stderr: `Usage: bb ultragoal exec ${role} --provider <id> --model <id> [--reasoning <level>] [--tier default|fast]${role === "worker" ? " [--permission auto|accept-edits|full] [--replace-active]" : ""}` };
         }
         if (role === "verifier" && permissionMode && permissionMode !== "auto") {
-          return { exitCode: 1, stderr: "Verifiers are fixed to auto permission mode so they cannot edit the work they judge." };
+          return { exitCode: 1, stderr: "Verifiers are fixed to auto permission mode (workspace sandboxing with automatic approval review); auto does not prevent workspace edits." };
         }
         settingsChanging.add(threadId);
         try {

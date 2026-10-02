@@ -219,10 +219,10 @@ export function createCollabStore(
       itemId: string,
     ) => { files: string[]; linkedDefects?: string } | null;
     /**
-     * Permission mode for spawned workers. Defaults to "auto" so a worker's
-     * risky actions still reach the normal approval gate; an operator raises it
-     * deliberately for an unattended run. Verifiers never use this — they are
-     * pinned to "auto" because a verifier that can write is not a verifier.
+     * Permission mode for spawned workers. Defaults to "auto", which retains
+     * workspace sandboxing and automatic approval review. Verifiers do not use
+     * this worker setting: their permission mode is fixed to "auto", which still
+     * permits workspace edits. Their prompts instruct them not to implement fixes.
      */
     workerPermissionMode?: (rootThreadId: string) => AgentPermissionMode;
     /** Refuse an in-flight scheduler snapshot after settings changed. */
