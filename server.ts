@@ -416,7 +416,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Permission mode for spawned workers (auto | accept-edits | full)",
       description:
-        "Defaults to auto, so a worker's risky actions still reach the normal approval gate. Set to full only for a deliberately unattended run.",
+        "Defaults to auto: workspace sandboxing with automatic approval review. Set to full only for a deliberately unattended run.",
       default: "auto",
     },
     maxOpenFindings: {
