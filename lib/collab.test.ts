@@ -459,6 +459,27 @@ describe("verifier permission pin", () => {
   }
 });
 
+describe("current SDK fork environment", () => {
+  it("reuses the source environment with no legacy workspace field", async () => {
+    const state = collabHost({ discovered: [makeThreadResponse({
+      id: "thr_root", projectId: "proj", providerId: "codex", environmentId: "env_source", status: "idle",
+    })] });
+    state.host.harness.sdk.stub("environments.get", ({ environmentId }) => ({
+      id: environmentId, hostId: "host_test", branchName: "main", isGitRepo: false,
+    }));
+    const collab = createCollabStore(state.host.bb);
+    collab.registerTools();
+    await state.host.harness.behavior.callAgentTool("ultragoal_spawn_agent", {
+      task_name: "audit", role: "verifier", message: "Audit the source.", fork_turns: "all",
+    }, { threadId: "thr_root", projectId: "proj" });
+    assert.equal(state.forkArgs.length, 1);
+    const args = state.forkArgs[0] as Record<string, unknown>;
+    assert.deepEqual(args.environment, { type: "reuse", environmentId: "env_source" });
+    assert.equal("workspace" in args, false);
+    assert.equal(state.spawnCalls(), 0, "fork must not fall back to a fresh workspace");
+  });
+});
+
 describe("fleet management tool surface", () => {
   it("exposes the levers an orchestrator needs to act on what it can see", () => {
     // It could describe a redundant worker on a stale base and had only
@@ -533,4 +554,28 @@ describe("immediate agent messaging", () => {
     assert.equal(state.queued.length, 0);
     assert.deepEqual(state.sent, [{ threadId: "thr_worker", mode: "steer" }]);
   });
+});
+
+describe("actual permission state", () => {
+  for (const actualMode of ["full", null, "unexpected", "unavailable"] as const) {
+    it(`surfaces worker permission ${actualMode ?? "missing"} without stopping it`, async () => {
+      const state = collabHost();
+      const collab = createCollabStore(state.host.bb);
+      await collab.spawnWorker({ parentThreadId: "thr_root", itemId: null, message: "Inspect state", maxWorkers: 1 });
+      state.host.harness.inspection.sdk.stub("threads.defaultExecutionOptions", () => {
+        if (actualMode === "unavailable") throw new Error("execution read-back failed");
+        return { model: "openrouter/stealth/ox-alpha", reasoningLevel: "medium", serviceTier: "default", permissionMode: actualMode };
+      });
+      const agents = await collab.listForRoot("thr_root");
+      assert.equal(agents.length, 1);
+      if (actualMode === "full") {
+        assert.equal(agents[0]!.execution!.actual!.permissionMode, "full");
+        assert.ok(agents[0]!.execution!.mismatches.includes("permissionMode"));
+      } else {
+        assert.equal(agents[0]!.execution!.actual, null, "unknown actual permission must not become auto");
+        assert.ok(agents[0]!.execution!.mismatches.includes("actual-unavailable"));
+      }
+      assert.equal(state.stopped.length, 0);
+    });
+  }
 });

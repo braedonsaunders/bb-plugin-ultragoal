@@ -261,7 +261,9 @@ function snapshotOf(
         worker: executionState(resolved.workerProvider, resolved.workerModel, resolved.workerReasoning || snapshotDefaults.workerReasoning, resolved.workerServiceTier, resolved.workerPermissionMode),
         verifier: executionState(resolved.verifyProvider, resolved.verifyModel, resolved.verifyReasoning, resolved.verifyServiceTier, "auto"),
       },
-      configurationError: executionConfigurationErrors.get(goal.threadId) ?? null,
+      configurationError: agents.find((agent) =>
+        agent.role === "verifier" && agent.summary?.startsWith("Verifier verdict rejected:")
+      )?.summary ?? executionConfigurationErrors.get(goal.threadId) ?? null,
     },
     standingBrief,
     findings,
@@ -807,7 +809,7 @@ export default function plugin(bb: BbPluginApi) {
     const extra: GoalAgent[] = [];
     for (const agent of agents) {
       if (agent.role === "verifier") {
-        if (agent.status === "running" || agent.status === "starting") extra.push(agent);
+        if (agent.status === "running" || agent.status === "starting" || agent.execution?.mismatches.length || agent.summary?.startsWith("Verifier verdict rejected:")) extra.push(agent);
         continue;
       }
       if (agent.status === "running" || agent.status === "starting") {
@@ -1682,6 +1684,7 @@ export default function plugin(bb: BbPluginApi) {
     let integrationCheckout: string | null = null;
     let integrationHostId: string | null = null;
     let integrationBase: string | null = null;
+    let localApiUnavailable = false;
     try {
       const worker = await bb.sdk.threads.get({ threadId: workerThreadId });
       if (!worker.environmentId) return;
@@ -1694,10 +1697,19 @@ export default function plugin(bb: BbPluginApi) {
         environment.mergeBaseBranch ?? environment.defaultBranch ?? environment.baseBranch;
       if (!base) return;
       integrationBase = base;
-      await bb.sdk.environments.squashMerge({
-        environmentId: worker.environmentId,
-        mergeBaseBranch: base,
-      });
+      // Compatibility with the former LOCAL-only API. Current SDKs can omit
+      // it; that must never become a remote merge or a successful integration.
+      const legacy = bb.sdk.environments as unknown as {
+        squashMerge?: (args: { environmentId: string; mergeBaseBranch: string }) => Promise<unknown>;
+      };
+      if (typeof legacy.squashMerge !== "function") {
+        localApiUnavailable = true;
+        throw new Error("Local squash integration unavailable: this runtime has no local squashMerge API. Branch and worktree preserved; no remote merge or cleanup attempted.");
+      }
+      const result = await legacy.squashMerge({ environmentId: worker.environmentId, mergeBaseBranch: base });
+      if (result == null || typeof result !== "object" || !("ok" in result) || result.ok !== true) {
+        throw new Error("Local squash integration returned no confirmed success. Branch and worktree preserved.");
+      }
       markGoalEvent(rootThreadId);
       // Record WHERE it landed. Nothing did, so 256 of 417 register entries had
       // no commit attribution at all and "fixed" could not be checked against
@@ -1729,7 +1741,7 @@ export default function plugin(bb: BbPluginApi) {
       // recorded as failures — and, after 0.26.0, would have reopened findings
       // whose work was already on the branch.
       let addsWork = true;
-      if (strandedBranch && integrationCheckout && integrationHostId && integrationBase) {
+      if (!localApiUnavailable && strandedBranch && integrationCheckout && integrationHostId && integrationBase) {
         const verdict = await hostClient
           .call(
             "branchAddsWork",
@@ -1754,7 +1766,7 @@ export default function plugin(bb: BbPluginApi) {
         bb.log.info(`Integration skipped for slice ${itemId} on ${rootThreadId}: already on the base branch`);
         return;
       }
-      if (/no changes|nothing to (merge|commit)|up.to.date|already|nothing to squash/i.test(message)) {
+      if (!localApiUnavailable && /no changes|nothing to (merge|commit)|up.to.date|already|nothing to squash/i.test(message)) {
         // "Already up to date. (nothing to squash)" is git exiting non-zero
         // because there was nothing to stage, and bb surfaces that as a 502.
         // Recording it as a FAILED integration is worse than useless: it is the
@@ -2409,6 +2421,11 @@ export default function plugin(bb: BbPluginApi) {
     const resolved = view(goal).settings;
     if (!resolved.verifyEnabled) return;
     if (verifying.has(workerThreadId)) return;
+    // Permission refusals are not protocol retries. Keep the durable verifier
+    // row until the orchestrator explicitly retires/replaces it after repair.
+    if (collab.durableRowsForRoot(row.root_thread_id).some((agent) =>
+      agent.role === "verifier" && agent.itemId === row.item_id && agent.reportStatus === "blocked"
+    )) return;
     const liveVerifiers = liveVerifierCount(agentCache.get(row.root_thread_id) ?? []);
     if (liveVerifiers >= resolved.maxWorkers) return;
 
@@ -3187,11 +3204,15 @@ export default function plugin(bb: BbPluginApi) {
         return;
       }
     }
-    const text = isBudgetExhausted(snap)
+    const continuation = isBudgetExhausted(snap)
       ? budgetLimitPrompt(snap)
       : due
         ? progressPrompt(snap)
         : continuationPrompt(snap);
+    const permissionRefusals = snap.agents
+      .filter((agent) => agent.role === "verifier" && agent.summary?.startsWith("Verifier verdict rejected:"))
+      .map((agent) => agent.summary);
+    const text = [continuation, ...permissionRefusals].join("\n\n");
     const sent = await sendSteering(threadId, text, "start");
     if (!sent) return;
     store.update(threadId, {
@@ -4506,6 +4527,24 @@ export default function plugin(bb: BbPluginApi) {
         }
         await maybeVerifyWorker(thread.id);
       } else {
+        if (collab.reportOf(thread.id)?.status === "blocked") return;
+        // Spawn observations can be stale by the time a verdict arrives. This
+        // shared gate covers automatic and tool-spawned/forked verifiers.
+        const current = await collab.refreshExecution(thread.id);
+        if (!current) return;
+        if (current.actual_permission_mode !== "auto" ||
+            (current.requested_permission_mode != null && current.requested_permission_mode !== "auto")) {
+          const requested = current.requested_permission_mode;
+          const actual = current.actual_permission_mode;
+          const reason = `Verifier verdict rejected: permission mode requested ${requested == null ? "unavailable" : JSON.stringify(requested)}, actual ${actual == null ? "unavailable" : JSON.stringify(actual)} on ${thread.id}. Slice and findings remain unfinished. Repair permission policy, then explicitly retire and replace this verifier; automatic retries are suppressed.`;
+          collab.setReport(thread.id, "blocked", reason);
+          markGoalEvent(parentRoot);
+          bb.log.warn(reason);
+          void releaseWorkerRuntime(thread.id);
+          await publishFresh(parentRoot);
+          void nudgeRoot(parentRoot);
+          return;
+        }
         const sourceItemId = child.source_thread_id
           ? (collab.rowOf(child.source_thread_id)?.item_id ?? child.item_id)
           : child.item_id;
@@ -5716,22 +5755,7 @@ async function listExecutionCatalog(
     } catch {
       // Older hosts and minimal test harnesses may not expose provider APIs.
     }
-    providers = listed.map((provider) => ({
-      id: provider.id,
-      displayName: provider.displayName,
-      available: provider.available !== false,
-      capabilities: {
-        supportsServiceTier: false,
-        permissionModes: [],
-        supportsFork: false,
-        supportsNativeUserQuestion: false,
-        supportsSessionRewind: false,
-        supportsThreadArchive: false,
-        supportsThreadRename: false,
-      },
-      composerActions: [],
-      logoUrl: null,
-    }));
+    providers = listed;
   }
 
   if (providers.length === 0) {

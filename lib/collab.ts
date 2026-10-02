@@ -106,7 +106,8 @@ function executionFromRow(row: CollabRow): GoalAgent["execution"] {
         : null,
     permissionMode: permissionMode(row.requested_permission_mode),
   };
-  const actual: NonNullable<GoalAgent["execution"]>["actual"] = row.actual_provider && row.actual_model && isReasoningLevel(row.actual_reasoning)
+  const actual: NonNullable<GoalAgent["execution"]>["actual"] = row.actual_provider && row.actual_model && isReasoningLevel(row.actual_reasoning) &&
+    (row.actual_permission_mode === "auto" || row.actual_permission_mode === "accept-edits" || row.actual_permission_mode === "full")
     ? {
         providerId: row.actual_provider,
         model: row.actual_model,
@@ -115,7 +116,7 @@ function executionFromRow(row: CollabRow): GoalAgent["execution"] {
           row.actual_service_tier === "fast" || row.actual_service_tier === "default"
             ? row.actual_service_tier
             : null,
-        permissionMode: permissionMode(row.actual_permission_mode),
+        permissionMode: row.actual_permission_mode,
       }
     : null;
   const mismatches = actual
@@ -374,6 +375,27 @@ export function createCollabStore(
 
   function rowOf(threadId: string): CollabRow | null {
     return (byThread.get(threadId) as CollabRow | undefined) ?? null;
+  }
+
+  /** Read current execution, clearing stale observations when SDK read-back fails. */
+  async function refreshExecution(threadId: string): Promise<CollabRow | null> {
+    const row = rowOf(threadId);
+    if (!row) return null;
+    const actual = await readExecutionOptions(threadId);
+    row.actual_provider = row.actual_provider ?? row.requested_provider;
+    row.actual_model = actual?.model ?? null;
+    row.actual_reasoning = actual?.reasoningLevel ?? null;
+    row.actual_service_tier = actual?.serviceTier ?? null;
+    row.actual_permission_mode = actual?.permissionMode ?? null;
+    setActualExecution.run({
+      thread_id: row.thread_id,
+      actual_provider: row.actual_provider ?? null,
+      actual_model: row.actual_model,
+      actual_reasoning: row.actual_reasoning,
+      actual_service_tier: row.actual_service_tier,
+      actual_permission_mode: row.actual_permission_mode,
+    });
+    return row;
   }
 
   function rootId(threadId: string): string {
@@ -688,22 +710,7 @@ export function createCollabStore(
               title: null,
             });
         if (refreshIds.has(row.thread_id)) {
-          const actual = await readExecutionOptions(row.thread_id);
-          if (actual) {
-            row.actual_provider = row.actual_provider ?? row.requested_provider;
-            row.actual_model = actual.model;
-            row.actual_reasoning = actual.reasoningLevel;
-            row.actual_service_tier = actual.serviceTier;
-            row.actual_permission_mode = actual.permissionMode;
-            setActualExecution.run({
-              thread_id: row.thread_id,
-              actual_provider: row.actual_provider,
-              actual_model: row.actual_model,
-              actual_reasoning: row.actual_reasoning,
-              actual_service_tier: row.actual_service_tier,
-              actual_permission_mode: row.actual_permission_mode,
-            });
-          }
+          Object.assign(row, await refreshExecution(row.thread_id));
         }
         const nickname = row.display_name?.trim() || nicknameOf(row.task_name, null);
         const title = mapped.title && mapped.title !== nickname ? mapped.title : null;
@@ -715,7 +722,7 @@ export function createCollabStore(
           itemId: row.item_id,
           role: row.role === "verifier" ? "verifier" as const : "worker" as const,
           status: mapped.status,
-          summary: mapped.summary,
+          summary: row.report_status === "blocked" ? decodeReport(row)?.evidence ?? mapped.summary : mapped.summary,
           execution: executionFromRow(row),
         };
       }),
@@ -1013,7 +1020,9 @@ export function createCollabStore(
               title: shortSliceTitle(trimmed) || displayName,
               permissionMode: execPermissionMode,
               visibility: "hidden",
-              workspace: "reuse",
+              ...(parent.environmentId
+                ? { environment: { type: "reuse" as const, environmentId: parent.environmentId } }
+                : {}),
               // Plugin-origin children skip bb's parent "needs help"
               // notifications; UltraGoal handles its own crew.
               origin: "plugin",
@@ -1112,6 +1121,7 @@ export function createCollabStore(
   return {
     rootId,
     rowOf,
+    refreshExecution,
     itemHasWorker,
     setWorkerCap(rootThreadId: string, maxWorkers: number): boolean {
       return reservations.setCap(rootId(rootThreadId), maxWorkers);
@@ -1297,7 +1307,7 @@ export function createCollabStore(
           ...(args.reasoningLevel ? { reasoningLevel: "explicit" as const } : {}),
           ...(args.serviceTier ? { serviceTier: "explicit" as const } : {}),
           // Without provenance the server re-derives the mode from defaults,
-          // silently undoing the non-editing pin below.
+          // silently undoing the explicit auto permission selection below.
           permissionMode: "explicit" as const,
         },
         // A verifier inspects a worktree and reports. It never needs to write,

@@ -20,12 +20,14 @@ afterEach(async () => {
 function registeredHost(
   sdk?: CreateFakePluginHostOptions["sdk"],
   hostRpc?: CreateFakePluginHostOptions["experimental_callHostRpc"],
+  legacyLocalMerge?: ((args: { environmentId: string; mergeBaseBranch: string }) => Promise<unknown>) | null,
 ) {
   const provider = (id: string, displayName: string) => ({
     id,
     displayName,
     available: true,
     capabilities: {
+      modelCatalogScope: "host" as const,
       supportsServiceTier: true,
       permissionModes: ["auto", "accept-edits", "full"] as const,
       supportsFork: true,
@@ -34,6 +36,9 @@ function registeredHost(
       supportsThreadArchive: true,
       supportsThreadRename: true,
     },
+    completedTurnDisplay: "flat" as const,
+    maintenance: { health: false, installation: false, usage: false },
+    pluginId: `provider-${id}`,
     composerActions: [],
     logoUrl: null,
   });
@@ -116,7 +121,21 @@ function registeredHost(
     );
     INSERT INTO goals VALUES ('thr_sentinel', 'test', 'complete', NULL, 1, 1, 1, 0, 0, 0, NULL, NULL);
   `);
-  plugin(host.bb);
+  // The fake SDK synthesizes functions for every property. Model the optional
+  // legacy boundary explicitly; this is not part of the current SDK surface.
+  const sdkFacade = new Proxy(host.bb.sdk, {
+    get(target, property) {
+      if (property !== "environments") return Reflect.get(target, property);
+      return new Proxy(target.environments, {
+        get(area, method) {
+          return method === "squashMerge" ? legacyLocalMerge ?? undefined : Reflect.get(area, method);
+        },
+      });
+    },
+  });
+  plugin(new Proxy(host.bb, {
+    get(target, property) { return property === "sdk" ? sdkFacade : Reflect.get(target, property); },
+  }));
   return host;
 }
 
@@ -193,6 +212,7 @@ describe("large-plan agent tool contracts", () => {
   });
 
   const context = (providerId: string, threadId: string) => ({
+    pluginMetadata: {},
     thread: { id: threadId, title: "UltraGoal root", parentThreadId: null, sourceThreadId: null },
     project: { id: "proj", kind: "standard" as const, name: "Project", gitRemoteUrl: null },
     environment: {
@@ -1482,4 +1502,165 @@ describe("rotate orchestrator", () => {
     // Unflagged, the server re-derives the mode from the old root's defaults.
     assert.equal(spawned[0]!.executionInputSources?.permissionMode, "explicit");
   });
+});
+
+describe("current SDK provider catalog fallback", () => {
+  it("preserves provider permission and service-tier capabilities when system options fail", async () => {
+    const host = registeredHost({
+      system: { executionOptions: () => { throw new Error("system options unavailable"); } },
+      providers: { list: () => [{
+        id: "acp-test", displayName: "ACP Test", available: true,
+        pluginId: "provider-acp", completedTurnDisplay: "flat", logoUrl: null, composerActions: [],
+        maintenance: { health: false, installation: false, usage: false },
+        capabilities: {
+          modelCatalogScope: "workspace", permissionModes: ["auto", "accept-edits"],
+          supportsServiceTier: true, supportsFork: true, supportsNativeUserQuestion: false,
+          supportsSessionRewind: false, supportsThreadArchive: false, supportsThreadRename: false,
+        },
+      }] },
+    });
+    const catalog = await host.harness.behavior.callRpc("listModels", {}) as {
+      providers: Array<{ id: string; supportsServiceTier: boolean; permissionModes: string[] }>;
+    };
+    assert.equal(catalog.providers[0]?.id, "acp-test");
+    assert.equal(catalog.providers[0]?.supportsServiceTier, true);
+    assert.deepEqual(catalog.providers[0]?.permissionModes, ["auto", "accept-edits"]);
+  });
+});
+
+describe("verifier permission verdict guard", () => {
+  for (const path of ["automatic", "tool", "fork"] as const) {
+    for (const actual of ["auto", "full", "full-at-spawn", "missing", "unavailable", "unexpected", "legacy-invalid-requested", "integration-disabled", "local-api-missing"] as const) {
+      it(`${path} verifier with actual ${actual} ${actual === "auto" || actual === "integration-disabled" ? "passes" : "preserves unfinished work"}`, async () => {
+        let mode: string | null = actual === "full-at-spawn" ? "full" : "auto";
+        const rootId = "thr_permissions_root";
+        const workerId = "thr_permissions_worker";
+        let spawnCount = 0;
+        let integrationCalls = 0;
+        const safe = actual === "auto" || actual === "integration-disabled";
+        const localMissing = actual === "local-api-missing";
+        const host = registeredHost({
+          threads: {
+            get: async ({ threadId }) => makeThreadResponse({
+              id: threadId, projectId: "proj", providerId: "codex",
+              environmentId: threadId === rootId ? "env_root" : "env_test", status: "idle",
+              parentThreadId: threadId === rootId ? null : rootId,
+            }),
+            list: () => [],
+            defaultExecutionOptions: () => {
+              if (mode === "unavailable") throw new Error("permission read-back unavailable");
+              return {
+                model: "gpt-5.6-sol", reasoningLevel: "medium", serviceTier: "default",
+                permissionMode: mode, source: "client/thread/start",
+              } as Awaited<ReturnType<FakePluginHost["bb"]["sdk"]["threads"]["defaultExecutionOptions"]>>;
+            },
+            spawn: () => {
+              spawnCount += 1;
+              return makeThreadResponse({ id: "thr_permissions_verifier", projectId: "proj", providerId: "codex", environmentId: "env_test", parentThreadId: rootId, status: "active" });
+            },
+            fork: async () => {
+              spawnCount += 1;
+              return makeThreadResponse({ id: "thr_permissions_verifier", projectId: "proj", providerId: "codex", environmentId: "env_test", parentThreadId: rootId, status: "active" });
+            },
+            update: ({ threadId }) => makeThreadResponse({ id: threadId }),
+            output: () => ({ output: "ULTRAGOAL_DONE" }),
+            timeline: () => ({ rows: [] }), interactions: { list: async () => [] },
+            send: () => ({ ok: true }), stop: () => ({ ok: true }),
+          },
+          environments: {
+            get: ({ environmentId }) => ({ id: environmentId, hostId: "host_test", path: "/tmp/permissions", branchName: "slice", mergeBaseBranch: "main", isWorktree: true, managed: true }),
+          },
+        }, undefined, localMissing ? null : async (args) => {
+          integrationCalls += 1;
+          assert.deepEqual(args, { environmentId: "env_test", mergeBaseBranch: "main" });
+          return { ok: true };
+        });
+        const db = host.bb.storage.database();
+        db.prepare("UPDATE goals SET thread_id=?, status='active', max_workers=1, verify_enabled=1, auto_continue=0, auto_integrate_completed_slices=? WHERE thread_id='thr_sentinel'").run(rootId, actual === "integration-disabled" ? 0 : 1);
+        const items = createItemStore(host.bb);
+        const findings = createFindingStore(host.bb);
+        const item = items.add(rootId, "Guard verifier permissions", "in_progress", { files: ["src/permissions.ts"] })!;
+        const finding = findings.report(rootId, { title: "Unsafe verification", file: "src/permissions.ts", evidence: "Permissions differ", fixFiles: ["src/permissions.ts"] }).finding;
+        findings.linkItem(rootId, finding.id, item.id);
+        db.prepare(`INSERT INTO collab_agents (thread_id, root_thread_id, parent_thread_id, task_name, created_at, item_id, role)
+          VALUES (?, ?, ?, '/root/permissions', 10, ?, 'worker')`).run(workerId, rootId, rootId, item.id);
+        const idle = (threadId: string, text: string) => host.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: makeThreadResponse({ id: threadId, projectId: "proj", providerId: "codex", environmentId: "env_test", parentThreadId: rootId, status: "idle" }),
+          lastAssistantText: text,
+        });
+        if (path === "automatic") {
+          await host.harness.behavior.callAgentTool("slice_done", {
+            evidence: "commit abc123; permission regression passed",
+            finding_evidence: [{ finding_id: finding.id, proof: "permission regression passed" }],
+          }, { threadId: workerId });
+          await idle(workerId, "ULTRAGOAL_DONE");
+        } else {
+          await host.harness.behavior.callAgentTool("ultragoal_spawn_agent", {
+            task_name: "permission_auditor", role: "verifier", item_id: item.id,
+            message: "Verify this slice.", fork_turns: path === "fork" ? "all" : "none",
+          }, { threadId: rootId, projectId: "proj" });
+        }
+        for (let i = 0; i < 8; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(spawnCount, 1, JSON.stringify(host.harness.inspection.logEntries));
+        // The spawn read-back was auto. Only the fresh idle read detects drift.
+        mode = actual === "missing" ? null : actual === "full-at-spawn" ? "full" : actual === "legacy-invalid-requested" || actual === "integration-disabled" || localMissing ? "auto" : actual;
+        if (actual === "legacy-invalid-requested") {
+          db.prepare("UPDATE collab_agents SET requested_permission_mode='legacy-invalid' WHERE thread_id='thr_permissions_verifier'").run();
+        }
+        db.prepare("UPDATE goals SET auto_continue=1 WHERE thread_id=?").run(rootId);
+        const verdict = `DEFECT_COVERAGE: {"finding_id":"${finding.id}","status":"pass","proof":"permission regression passed"}\nVERIFY_PASS: checked the slice`;
+        await idle("thr_permissions_verifier", verdict);
+        for (let i = 0; i < 8; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+        const itemAfter = items.list(rootId).find((entry) => entry.id === item.id)!;
+        if (localMissing || actual === "integration-disabled") {
+          const hostMethods = host.harness.inspection.experimental_hostRpcCalls.map((call) => call.method);
+          assert.ok(!hostMethods.includes("reclaimWorktree"), "worktree must not be reclaimed");
+          assert.ok(!hostMethods.includes("branchAddsWork"), "missing integration cannot be treated as a successful no-op");
+        }
+        for (const method of ["environments.pullRequest", "environments.mergePullRequest", "environments.delete"] as const) {
+          assert.equal(host.harness.inspection.sdk.callsTo(method).length, 0, `${method} must never run`);
+        }
+        if (safe) {
+          assert.equal(itemAfter.status, "completed");
+          assert.equal(integrationCalls, path === "automatic" && actual === "auto" ? 1 : 0, "integration must run only when enabled and auto matches");
+          assert.equal(findings.list(rootId).find((entry) => entry.id === finding.id)!.status, "fixed");
+        } else if (localMissing) {
+          const failedIntegration = path === "automatic";
+          assert.equal(integrationCalls, 0);
+          assert.equal(itemAfter.status, failedIntegration ? "pending" : "completed");
+          assert.equal(findings.list(rootId).find((entry) => entry.id === finding.id)!.status, failedIntegration ? "open" : "fixed");
+          if (failedIntegration) {
+            const record = db.prepare("SELECT status, branch, detail FROM goal_item_integrations WHERE thread_id=? AND item_id=?").get(rootId, item.id) as { status: string; branch: string; detail: string };
+            assert.equal(record.status, "failed");
+            assert.equal(record.branch, "slice");
+            assert.match(record.detail, /Local squash integration unavailable/);
+            assert.match(JSON.stringify(host.harness.inspection.logEntries), /Local squash integration unavailable/);
+          }
+        } else {
+          assert.equal(itemAfter.status, "in_progress");
+          assert.equal(findings.list(rootId).find((entry) => entry.id === finding.id)!.status, "open");
+          assert.equal(integrationCalls, 0);
+          const logs = JSON.stringify(host.harness.inspection.logEntries);
+          assert.match(logs, /verifier.*permission.*reject|reject.*verifier.*permission/i);
+          const refusal = JSON.parse((db.prepare("SELECT report_evidence FROM collab_agents WHERE thread_id='thr_permissions_verifier'").get() as { report_evidence: string }).report_evidence).evidence as string;
+          const requestedLabel = actual === "legacy-invalid-requested" ? '"legacy-invalid"' : '"auto"';
+          const actualLabel = actual === "missing" || actual === "unavailable" ? "unavailable"
+            : actual === "legacy-invalid-requested" ? '"auto"'
+            : actual.startsWith("full") ? '"full"' : '"unexpected"';
+          assert.ok(refusal.includes(`requested ${requestedLabel}, actual ${actualLabel}`), refusal);
+          await idle("thr_permissions_verifier", verdict);
+          await idle(workerId, "ULTRAGOAL_DONE");
+          for (let i = 0; i < 8; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+          assert.equal(spawnCount, 1, "unsafe verifier must not be automatically replaced in a loop");
+          assert.equal(host.harness.inspection.sdk.callsTo("threads.send").filter((call) => (call[0] as { threadId?: string }).threadId === "thr_permissions_verifier").length, 0);
+          const rootSends = host.harness.inspection.sdk.callsTo("threads.send").filter((call) => (call[0] as { threadId?: string }).threadId === rootId);
+          assert.ok(rootSends.length, "root must wake after refusal");
+          assert.match(JSON.stringify(rootSends), /Verifier verdict rejected: permission mode requested/);
+          const snap = await host.harness.behavior.callAgentTool("ultragoal_state", {}, { threadId: rootId });
+          assert.match(JSON.stringify(snap), /permissionMode|actual-unavailable/);
+          assert.match(JSON.stringify(snap), /rejected.*permission|permission.*rejected/i);
+        }
+      });
+    }
+  }
 });
