@@ -35,7 +35,7 @@
   ],
   "engines": {
     "bb": ">=0.39",
-    "bbPluginSdk": ">=0.4.8"
+    "bbPluginSdk": ">=0.5.29"
   },
   "bb": {
     "name": "UltraGoal",
@@ -57,7 +57,7 @@
     "test": "tsx --test lib/*.test.ts"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.8",
+    "@get-bb/plugin-sdk": "0.5.29",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
