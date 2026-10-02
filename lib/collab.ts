@@ -1310,10 +1310,9 @@ export function createCollabStore(
           // silently undoing the explicit auto permission selection below.
           permissionMode: "explicit" as const,
         },
-        // A verifier inspects a worktree and reports. It never needs to write,
-        // so it is pinned to the ordinary approval gate and is deliberately not
-        // configurable: a verifier that can edit the work it is judging can
-        // make its own verdict come true.
+        // Verifiers are instructed to inspect and report without implementing fixes.
+        // Keep auto explicit: it retains workspace sandboxing and automatic approval
+        // review; it does not prevent workspace edits.
         permissionMode: "auto",
         environment: verifyEnvironmentId
           ? { type: "reuse" as const, environmentId: verifyEnvironmentId }
