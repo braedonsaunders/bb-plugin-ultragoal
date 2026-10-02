@@ -951,7 +951,10 @@ export function createCollabStore(
     const execModel = execution?.model ?? model ?? pin.model ?? undefined;
     const execReasoning = execution?.reasoningLevel ?? (isReasoningLevel(pin.reasoningLevel) ? pin.reasoningLevel : undefined);
     const execServiceTier = execution?.serviceTier ?? pin.serviceTier ?? undefined;
-    const execPermissionMode = execution?.permissionMode ?? hooks?.workerPermissionMode?.(rootThreadId) ?? ("auto" as const);
+    // Verifiers are pinned to auto whoever spawns them (see spawnVerifier).
+    const execPermissionMode = role === "verifier"
+      ? ("auto" as const)
+      : execution?.permissionMode ?? hooks?.workerPermissionMode?.(rootThreadId) ?? ("auto" as const);
     if (
       executionRevision != null &&
       hooks?.executionRevision &&
@@ -971,6 +974,7 @@ export function createCollabStore(
         ...(execModel ? { model: "explicit" as const } : {}),
         ...(execReasoning ? { reasoningLevel: "explicit" as const } : {}),
         ...(execServiceTier ? { serviceTier: "explicit" as const } : {}),
+        permissionMode: "explicit" as const,
       },
       permissionMode: execPermissionMode,
       // Non-forked workers get their own managed worktree: sharing the root's
@@ -1007,7 +1011,7 @@ export function createCollabStore(
               sourceThreadId: threadId,
               input: [{ type: "text", text: prompt, mentions: [] }],
               title: shortSliceTitle(trimmed) || displayName,
-              permissionMode: hooks?.workerPermissionMode?.(rootThreadId) ?? "auto",
+              permissionMode: execPermissionMode,
               visibility: "hidden",
               workspace: "reuse",
               // Plugin-origin children skip bb's parent "needs help"
@@ -1292,6 +1296,9 @@ export function createCollabStore(
           model: "explicit" as const,
           ...(args.reasoningLevel ? { reasoningLevel: "explicit" as const } : {}),
           ...(args.serviceTier ? { serviceTier: "explicit" as const } : {}),
+          // Without provenance the server re-derives the mode from defaults,
+          // silently undoing the non-editing pin below.
+          permissionMode: "explicit" as const,
         },
         // A verifier inspects a worktree and reports. It never needs to write,
         // so it is pinned to the ordinary approval gate and is deliberately not

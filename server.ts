@@ -3362,7 +3362,7 @@ export default function plugin(bb: BbPluginApi) {
         const spawned = await bb.sdk.threads.spawn({
           projectId: source.projectId,
           providerId: source.providerId,
-          executionInputSources: { providerId: "explicit" as const },
+          executionInputSources: { providerId: "explicit" as const, permissionMode: "explicit" as const },
           permissionMode: snapshotDefaults.workerPermissionMode,
           environment: source.environmentId
             ? { type: "reuse" as const, environmentId: source.environmentId }

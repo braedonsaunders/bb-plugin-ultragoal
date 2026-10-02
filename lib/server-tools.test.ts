@@ -1450,3 +1450,36 @@ describe("resolve_finding end to end", () => {
     assert.equal(findings.get("thr_root", rec.finding.id)!.status, "open");
   });
 });
+
+describe("rotate orchestrator", () => {
+  it("spawns the new root with the default worker permission mode flagged explicit", async () => {
+    const spawned: Array<{ permissionMode?: string; executionInputSources?: { permissionMode?: string } }> = [];
+    const host = registeredHost({
+      threads: {
+        get: async ({ threadId }) =>
+          makeThreadResponse({ id: threadId, projectId: "proj", providerId: "codex", environmentId: null }),
+        spawn: async (args) => {
+          spawned.push(args);
+          return makeThreadResponse({ id: "thr_rotated", projectId: "proj", providerId: "codex" });
+        },
+        wait: async () => makeThreadResponse({ id: "thr_rotated" }),
+      },
+    });
+    await host.harness.behavior.callAgentTool(
+      "ultragoal_start",
+      { objective: "Rotate onto a fresh root" },
+      { threadId: "thr_root" },
+    );
+    await host.harness.behavior.callRpc("updateSettings", {
+      threadId: "thr_root",
+      workerProvider: "codex",
+      workerModel: "gpt-5.6-sol",
+    });
+    await host.harness.behavior.callRpc("rotateRoot", { threadId: "thr_root" });
+    assert.equal(spawned.length, 1);
+    // Rotation reads the plugin-wide default, which is auto.
+    assert.equal(spawned[0]!.permissionMode, "auto");
+    // Unflagged, the server re-derives the mode from the old root's defaults.
+    assert.equal(spawned[0]!.executionInputSources?.permissionMode, "explicit");
+  });
+});
