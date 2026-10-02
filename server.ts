@@ -416,7 +416,7 @@ export default function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Permission mode for spawned workers (auto | accept-edits | full)",
       description:
-        "Defaults to auto, so a worker's risky actions still reach the normal approval gate. Set to full only for a deliberately unattended run.",
+        "Defaults to auto: workspace sandboxing with automatic approval review. Set to full only for a deliberately unattended run.",
       default: "auto",
     },
     maxOpenFindings: {
@@ -5470,7 +5470,7 @@ export default function plugin(bb: BbPluginApi) {
           return { exitCode: 1, stderr: `Usage: bb ultragoal exec ${role} --provider <id> --model <id> [--reasoning <level>] [--tier default|fast]${role === "worker" ? " [--permission auto|accept-edits|full] [--replace-active]" : ""}` };
         }
         if (role === "verifier" && permissionMode && permissionMode !== "auto") {
-          return { exitCode: 1, stderr: "Verifiers are fixed to auto permission mode so they cannot edit the work they judge." };
+          return { exitCode: 1, stderr: "Verifiers are fixed to auto permission mode (workspace sandboxing with automatic approval review); auto does not prevent workspace edits." };
         }
         settingsChanging.add(threadId);
         try {
